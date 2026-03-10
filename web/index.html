@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>199xVM — Raoh Playground</title>
+  <style>
+    :root {
+      --bg: #1e1e2e;
+      --surface: #26263a;
+      --border: #44446a;
+      --accent: #7c6af7;
+      --accent-hover: #9d8fff;
+      --text: #cdd6f4;
+      --text-dim: #6c7086;
+      --ok: #a6e3a1;
+      --err: #f38ba8;
+      --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    header h1 {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: var(--accent);
+    }
+
+    header .subtitle {
+      color: var(--text-dim);
+      font-size: 12px;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .pane {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .pane-header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 6px 14px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .pane:first-child {
+      border-right: 1px solid var(--border);
+    }
+
+    #editor-area {
+      flex: 1;
+      overflow: auto;
+      background: var(--bg);
+    }
+
+    textarea#code {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      line-height: 1.6;
+      border: none;
+      outline: none;
+      resize: none;
+      padding: 16px;
+      tab-size: 4;
+    }
+
+    #output-area {
+      flex: 1;
+      overflow: auto;
+      padding: 16px;
+    }
+
+    #output {
+      white-space: pre-wrap;
+      word-break: break-all;
+      line-height: 1.7;
+    }
+
+    #output .ok { color: var(--ok); }
+    #output .err { color: var(--err); }
+    #output .info { color: var(--text-dim); }
+    #output .result { color: var(--text); }
+
+    footer {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    button#run-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 20px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    button#run-btn:hover { background: var(--accent-hover); }
+    button#run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    select#snippet {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .status {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>199xVM</h1>
+    <span class="subtitle">Raoh Playground — minimal JVM on WebAssembly</span>
+  </header>
+
+  <div class="workspace">
+    <div class="pane">
+      <div class="pane-header">
+        <span>Editor</span>
+      </div>
+      <div id="editor-area">
+        <textarea id="code" spellcheck="false" autocomplete="off" autocorrect="off"></textarea>
+      </div>
+    </div>
+
+    <div class="pane">
+      <div class="pane-header">
+        <span>Output</span>
+        <button onclick="clearOutput()" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:11px;">clear</button>
+      </div>
+      <div id="output-area">
+        <pre id="output"><span class="info">// Output will appear here after running.</span></pre>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <select id="snippet" onchange="loadSnippet()">
+      <option value="">— load example —</option>
+      <option value="int_positive">int_().positive()</option>
+      <option value="int_range">int_().min(1).max(100)</option>
+      <option value="string_nonblank">string().nonBlank()</option>
+      <option value="combine">combine two fields</option>
+    </select>
+    <button id="run-btn" onclick="runCode()">&#9654; Run</button>
+    <span class="status" id="status">Loading WASM…</span>
+  </footer>
+
+  <script type="module">
+    // ---------------------------------------------------------------------------
+    // Snippet library
+    // ---------------------------------------------------------------------------
+    const SNIPPETS = {
+      int_positive: `// Raoh: int_().positive()
+// Decoder<Object, Integer> that requires a positive integer.
+//
+// In 199xVM, we invoke Decoders.int_() and then .positive()
+// by calling the pre-loaded Raoh classes.
+// Entry point: net/unit8/raoh/playground/Runner.run()
+
+// [This playground executes pre-built Raoh class files in the
+//  browser via a minimal Java bytecode interpreter written in Rust
+//  compiled to WebAssembly.]
+//
+// Select a snippet and press Run to see Raoh decode a value.
+decode("int_.positive", 42);
+`,
+      int_range: `decode("int_.min_max", 50);`,
+      string_nonblank: `decode("string_.nonBlank", "hello");`,
+      combine: `decode("combine", null);`,
+    };
+
+    const DEFAULT_CODE = `// 199xVM — Raoh Playground
+//
+// The WASM module loads pre-compiled Raoh .class files and
+// interprets Java bytecode in the browser.
+//
+// Select an example from the footer or type a snippet name:
+//   decode("int_.positive", 42)
+//
+// Press ▶ Run to execute.
+decode("int_.positive", 42);
+`;
+
+    // ---------------------------------------------------------------------------
+    // WASM bootstrap
+    // ---------------------------------------------------------------------------
+    let wasmReady = false;
+    let jvmModule = null;
+
+    async function initWasm() {
+      const statusEl = document.getElementById("status");
+      try {
+        // Dynamic import of the wasm-bindgen generated JS.
+        // When wasm-pack builds with --target web it generates:
+        //   pkg/jvm_core.js  and  pkg/jvm_core_bg.wasm
+        const mod = await import("../jvm-core/pkg/jvm_core.js");
+        await mod.default(); // initialise the WASM module
+        jvmModule = mod;
+        wasmReady = true;
+        statusEl.textContent = "WASM ready";
+        document.getElementById("run-btn").disabled = false;
+      } catch (e) {
+        statusEl.textContent = "WASM not built yet — run: wasm-pack build jvm-core --target web";
+        document.getElementById("run-btn").disabled = true;
+        log("info", "WASM module not found.\n\nTo build:\n  cd 199xvm\n  wasm-pack build jvm-core --target web\n\nThen open this file via a local HTTP server.");
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Class bundle loader
+    //   Pre-compiled Raoh .class files are expected in raoh-classes/bundle.bin
+    //   Format: repeated [u32 length][class bytes]
+    // ---------------------------------------------------------------------------
+    let classBundle = null;
+
+    async function loadClassBundle() {
+      try {
+        const resp = await fetch("../raoh-classes/bundle.bin");
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        classBundle = new Uint8Array(await resp.arrayBuffer());
+        log("info", `Class bundle loaded: ${classBundle.byteLength} bytes`);
+      } catch (e) {
+        log("info", "raoh-classes/bundle.bin not found.\nRun build-bundle.sh to package Raoh class files.");
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Interpreter facade
+    // ---------------------------------------------------------------------------
+    window.decode = function(snippet, value) {
+      if (!wasmReady || !jvmModule) {
+        log("err", "WASM not ready.");
+        return;
+      }
+      if (!classBundle) {
+        log("err", "Class bundle not loaded.");
+        return;
+      }
+
+      const mainClass = "net/unit8/raoh/playground/Runner";
+      const method = "run";
+      const descriptor = "(Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/String;";
+
+      try {
+        // parse_class is available for quick validation
+        const result = jvmModule.run_static(classBundle, mainClass, method, descriptor);
+        if (result.startsWith("ERROR:")) {
+          log("err", result);
+        } else {
+          log("ok", result);
+        }
+      } catch (e) {
+        log("err", String(e));
+      }
+    };
+
+    window.runCode = function() {
+      const code = document.getElementById("code").value;
+      clearOutput();
+      log("info", `> ${code.split("\n").find(l => l.trim() && !l.trim().startsWith("//")) ?? code}`);
+
+      try {
+        // The editor runs a tiny JS DSL that maps to WASM calls.
+        // eslint-disable-next-line no-new-func
+        new Function("decode", code)(window.decode);
+      } catch (e) {
+        log("err", String(e));
+      }
+    };
+
+    window.loadSnippet = function() {
+      const sel = document.getElementById("snippet");
+      const key = sel.value;
+      if (key && SNIPPETS[key]) {
+        document.getElementById("code").value = SNIPPETS[key];
+      }
+      sel.value = "";
+    };
+
+    window.clearOutput = function() {
+      document.getElementById("output").innerHTML = "";
+    };
+
+    function log(cls, msg) {
+      const out = document.getElementById("output");
+      const span = document.createElement("span");
+      span.className = cls;
+      span.textContent = msg + "\n";
+      out.appendChild(span);
+      out.parentElement.scrollTop = out.parentElement.scrollHeight;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Keyboard shortcut: Ctrl/Cmd + Enter to run
+    // ---------------------------------------------------------------------------
+    document.getElementById("code").addEventListener("keydown", e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        runCode();
+      }
+    });
+
+    // ---------------------------------------------------------------------------
+    // Init
+    // ---------------------------------------------------------------------------
+    document.getElementById("code").value = DEFAULT_CODE;
+    document.getElementById("run-btn").disabled = true;
+    initWasm();
+    loadClassBundle();
+  </script>
+</body>
+</html>
