@@ -645,24 +645,16 @@ public class ListOps {
 
     async function loadClassBundle() {
       try {
-        const [shimResp, raohResp] = await Promise.all([
-          fetch("../jdk-shim/bundle.bin"),
-          fetch("../raoh-classes/bundle.bin"),
-        ]);
+        const shimResp = await fetch("../jdk-shim/bundle.bin");
         if (!shimResp.ok) throw new Error(`shim bundle: HTTP ${shimResp.status}`);
-        if (!raohResp.ok) throw new Error(`raoh bundle: HTTP ${raohResp.status}`);
-        const shimBuf = new Uint8Array(await shimResp.arrayBuffer());
-        const raohBuf = new Uint8Array(await raohResp.arrayBuffer());
-        classBundle = new Uint8Array(shimBuf.length + raohBuf.length);
-        classBundle.set(shimBuf, 0);
-        classBundle.set(raohBuf, shimBuf.length);
-        log("info", `Bundles loaded: shim=${shimBuf.byteLength}B + raoh=${raohBuf.byteLength}B`);
+        classBundle = new Uint8Array(await shimResp.arrayBuffer());
+        log("info", `Shim bundle loaded: ${classBundle.byteLength}B`);
       } catch (e) {
         log("info", `Bundle load failed: ${e.message}\nRun ./build-shim.sh first.`);
       }
     }
 
-    // Build a combined bundle: shim + raoh (if available) + user class
+    // Build a combined bundle: shim + user class
     function buildBundle(userClassBundle) {
       if (classBundle) {
         const combined = new Uint8Array(classBundle.length + userClassBundle.length);

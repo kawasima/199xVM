@@ -5,7 +5,7 @@ jvm-core/pkg/
 jvm-core/target/
 hello-classes/
 test-classes/
-raoh-classes/bundle.bin
+raoh-classes/
 jdk-shim/bundle.bin
 jdk-shim/out/
 web/javac.js
