@@ -8,11 +8,12 @@
 //! - Integer / long / reference comparisons and control flow
 //! - Native stubs for `java.lang.*` and `java.util.*`
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::class_file::{
-    Attribute, BootstrapMethod, ClassFile, CodeAttribute, ConstantPoolEntry, MethodInfo,
+    Attribute, BootstrapMethod, ClassFile, ConstantPoolEntry, MethodInfo,
 };
 use crate::heap::{JObject, JRef, JValue, NativePayload};
 
@@ -26,12 +27,14 @@ pub struct Vm {
     classes: HashMap<String, ClassFile>,
     /// Interned strings cache (not strictly required but saves allocations).
     string_pool: HashMap<String, JRef>,
+    /// Static field storage keyed by "ClassName.fieldName".
+    static_fields: HashMap<String, JValue>,
 }
 
 impl Vm {
     /// Create an empty VM.
     pub fn new() -> Self {
-        Vm { classes: HashMap::new(), string_pool: HashMap::new() }
+        Vm { classes: HashMap::new(), string_pool: HashMap::new(), static_fields: HashMap::new() }
     }
 
     /// Register a pre-parsed class file.
@@ -74,7 +77,81 @@ impl Vm {
         // Walk super class.
         if class.super_class != 0 {
             let super_name = class.constant_pool.class_name(class.super_class).to_owned();
-            return self.find_method(&super_name, method_name, descriptor);
+            if let Some(result) = self.find_method(&super_name, method_name, descriptor) {
+                return Some(result);
+            }
+        }
+        // Walk interfaces (for default methods).
+        let iface_names: Vec<String> = class.interfaces.iter()
+            .map(|&idx| class.constant_pool.class_name(idx).to_owned())
+            .collect();
+        for iface_name in iface_names {
+            if let Some(result) = self.find_method(&iface_name, method_name, descriptor) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    /// Like find_method but with relaxed matching when the compiler emits generic types.
+    /// Match priority:
+    ///   1. Exact param types match (ignoring return type)
+    ///   2. Same argument count match (ignoring both param types and return type)
+    ///   3. Varargs method (ACC_VARARGS) whose non-varargs param count <= call arg count
+    /// Returns the real descriptor string of the matched method.
+    fn find_method_real_descriptor(
+        &self,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Option<String> {
+        let param_part = descriptor.split(')').next().unwrap_or("(");
+        let arg_count = count_args(descriptor);
+        let class = self.classes.get(class_name)?;
+        let mut arg_count_match: Option<String> = None;
+        let mut varargs_match: Option<String> = None;
+        for m in &class.methods {
+            let n = class.constant_pool.utf8(m.name_index);
+            let d = class.constant_pool.utf8(m.descriptor_index);
+            if n != method_name { continue; }
+            let d_param = d.split(')').next().unwrap_or("(");
+            // Priority 1: exact param match
+            if d_param == param_part {
+                return Some(d.to_owned());
+            }
+            // Priority 2: same arg count
+            if arg_count_match.is_none() && count_args(d) == arg_count {
+                arg_count_match = Some(d.to_owned());
+            }
+            // Priority 3: varargs method (ACC_VARARGS = 0x0080)
+            // A varargs call with 0 extra args passes an empty array as last param,
+            // so arg count from call site may be less than the method's param count.
+            if varargs_match.is_none() && (m.access_flags & 0x0080 != 0) {
+                let method_param_count = count_args(d);
+                // varargs: fixed params = method_param_count - 1, array counts as 1
+                let fixed = method_param_count.saturating_sub(1);
+                if arg_count >= fixed {
+                    varargs_match = Some(d.to_owned());
+                }
+            }
+        }
+        if arg_count_match.is_some() { return arg_count_match; }
+        if varargs_match.is_some() { return varargs_match; }
+        // Walk super class.
+        if class.super_class != 0 {
+            let super_name = class.constant_pool.class_name(class.super_class).to_owned();
+            if let Some(result) = self.find_method_real_descriptor(&super_name, method_name, descriptor) {
+                return Some(result);
+            }
+        }
+        // Walk interfaces.
+        let iface_names: Vec<String> = class.interfaces.iter()
+            .map(|&idx| class.constant_pool.class_name(idx).to_owned())
+            .collect();
+        for iface_name in iface_names {
+            if let Some(result) = self.find_method_real_descriptor(&iface_name, method_name, descriptor) {
+                return Some(result);
+            }
         }
         None
     }
@@ -87,9 +164,39 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        // Try native implementations first.
-        if let Some(v) = self.native_static(class_name, method_name, descriptor, &args) {
-            return Ok(v);
+        // Try bytecode first if the class is loaded; fall back to native stubs.
+        let found = self.find_method(class_name, method_name, descriptor).is_some();
+        if !found {
+            if let Some(v) = self.native_static(class_name, method_name, descriptor, &args) {
+                return Ok(v);
+            }
+        }
+
+        // Resolve the actual descriptor: exact match first, then param-only fallback.
+        // The compiler may emit a generic return type (e.g. Ljava/lang/Object;) for
+        // wildcard-imported methods whose real return type is more specific.
+        let resolved_descriptor = if self.find_method(class_name, method_name, descriptor).is_some() {
+            descriptor.to_owned()
+        } else {
+            self.find_method_real_descriptor(class_name, method_name, descriptor)
+                .unwrap_or_else(|| descriptor.to_owned())
+        };
+        let descriptor = resolved_descriptor.as_str();
+
+        // If the resolved method is varargs (ACC_VARARGS = 0x0080), pad args with an
+        // empty array when the call site passes fewer arguments than the method expects.
+        let mut args = args;
+        let expected_arg_count = count_args(descriptor);
+        if args.len() < expected_arg_count {
+            let is_varargs = self.find_method(class_name, method_name, descriptor)
+                .map(|(_, m)| m.access_flags & 0x0080 != 0)
+                .unwrap_or(false);
+            if is_varargs {
+                // Push empty Object[] for the missing varargs parameter
+                while args.len() < expected_arg_count {
+                    args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
+                }
+            }
         }
 
         // Look up class/method.
@@ -104,7 +211,7 @@ impl Vm {
 
         // Build initial frame.
         let max_locals = {
-            let (class, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
+            let (_class, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
             method.code().map(|c| c.max_locals as usize).unwrap_or(0)
         };
         let mut locals = vec![JValue::Void; max_locals.max(args.len())];
@@ -112,9 +219,112 @@ impl Vm {
             locals[i] = a;
         }
 
+        // If method has no code (native), fall back to native stubs.
+        let has_code = {
+            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
+            method.code().is_some()
+        };
+        if !has_code {
+            if let Some(v) = self.native_static(&class_name_owned, method_name, &descriptor_owned, &locals) {
+                return Ok(v);
+            }
+            return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
+        }
+
         let code = {
             let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().ok_or_else(|| format!("No code in {class_name_owned}.{method_name}"))?.code.clone()
+            method.code().unwrap().code.clone()
+        };
+        let cp_entries: Vec<ConstantPoolEntry> = {
+            let class = self.classes.get(&class_name_owned).unwrap();
+            class.constant_pool.entries.clone()
+        };
+        let bootstrap_methods: Vec<BootstrapMethod> = {
+            let class = self.classes.get(&class_name_owned).unwrap();
+            class.attributes.iter().find_map(|a| {
+                if let Attribute::BootstrapMethods(bms) = a {
+                    Some(bms.clone())
+                } else {
+                    None
+                }
+            }).unwrap_or_default()
+        };
+
+        let mut frame = Frame {
+            locals,
+            stack: Vec::new(),
+            pc: 0,
+        };
+
+        self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods)
+    }
+
+    /// Execute an instance method with invokespecial semantics.
+    /// Resolves from the specified class (not the runtime class).
+    pub fn invoke_special(
+        &mut self,
+        this: JRef,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+        args: Vec<JValue>,
+    ) -> Result<JValue, String> {
+        // Resolve descriptor: exact match first, then param-only fallback for generic return types.
+        let resolved_descriptor = if self.find_method(class_name, method_name, descriptor).is_some() {
+            descriptor.to_owned()
+        } else {
+            self.find_method_real_descriptor(class_name, method_name, descriptor)
+                .unwrap_or_else(|| descriptor.to_owned())
+        };
+        let descriptor = resolved_descriptor.as_str();
+
+        // Resolve from the specified class, not the runtime class.
+        let found = self.find_method(class_name, method_name, descriptor).is_some();
+        if !found {
+            if let Some(v) = self.native_virtual(&this, class_name, method_name, descriptor, &args) {
+                return Ok(v);
+            }
+            return Err(format!("Special method not found: {class_name}.{method_name}{descriptor}"));
+        }
+
+        let (class_name_owned, descriptor_owned) = {
+            let (class, method) = self.find_method(class_name, method_name, descriptor).unwrap();
+            let cn = class.constant_pool.class_name(class.this_class).to_owned();
+            let desc = class.constant_pool.utf8(method.descriptor_index).to_owned();
+            (cn, desc)
+        };
+
+        let max_locals = {
+            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
+            method.code().map(|c| c.max_locals as usize).unwrap_or(0)
+        };
+
+        let total = max_locals.max(args.len() + 1);
+        let mut locals = vec![JValue::Void; total];
+        locals[0] = JValue::Ref(Some(this.clone()));
+        for (i, a) in args.into_iter().enumerate() {
+            locals[i + 1] = a;
+        }
+
+        // If method has no code (native), fall back to native stubs.
+        let has_code = {
+            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
+            method.code().is_some()
+        };
+        if !has_code {
+            let virt_args: Vec<JValue> = locals[1..].iter()
+                .filter(|v| !matches!(v, JValue::Void))
+                .cloned()
+                .collect();
+            if let Some(v) = self.native_virtual(&this, &class_name_owned, method_name, &descriptor_owned, &virt_args) {
+                return Ok(v);
+            }
+            return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
+        }
+
+        let code = {
+            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
+            method.code().unwrap().code.clone()
         };
         let cp_entries: Vec<ConstantPoolEntry> = {
             let class = self.classes.get(&class_name_owned).unwrap();
@@ -152,9 +362,38 @@ impl Vm {
         // Use the actual runtime class of `this` for virtual dispatch.
         let runtime_class = this.borrow().class_name.clone();
 
-        // Try native implementations first.
-        if let Some(v) = self.native_virtual(&this, &runtime_class, method_name, descriptor, &args) {
-            return Ok(v);
+        // If this is a BytecodeLambda, invoke its implementation method directly.
+        if runtime_class == "$$Lambda" {
+            let lambda_info = match &this.borrow().native {
+                NativePayload::BytecodeLambda { impl_class, impl_method, impl_desc, ref_kind, captured } => {
+                    Some((impl_class.clone(), impl_method.clone(), impl_desc.clone(), *ref_kind, captured.clone()))
+                }
+                NativePayload::Lambda(f) => {
+                    let result = f(args);
+                    return Ok(result);
+                }
+                _ => None,
+            };
+            if let Some((impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info {
+                let mut full_args = captured;
+                full_args.extend(args);
+                // ref_kind 5 = invokeVirtual, 7 = invokeSpecial, 9 = invokeInterface
+                // ref_kind 6 = invokeStatic
+                if ref_kind == 5 || ref_kind == 7 || ref_kind == 9 {
+                    // First captured arg is `this` for instance methods.
+                    let recv = full_args.remove(0);
+                    match recv {
+                        JValue::Ref(Some(r)) => {
+                            return self.invoke_virtual(r, &impl_class, &impl_method, &impl_desc, full_args);
+                        }
+                        _ => return Err(format!(
+                            "Lambda invoke_virtual: expected Ref for this, got {recv:?}"
+                        )),
+                    }
+                } else {
+                    return self.invoke_static(&impl_class, &impl_method, &impl_desc, full_args);
+                }
+            }
         }
 
         // Resolve method starting from the runtime class.
@@ -164,12 +403,28 @@ impl Vm {
             class_name.to_owned()
         };
 
+        // Resolve descriptor: exact match first, then param-only fallback for generic return types.
+        let resolved_descriptor = if self.find_method(&resolve_class, method_name, descriptor).is_some() {
+            descriptor.to_owned()
+        } else {
+            self.find_method_real_descriptor(&resolve_class, method_name, descriptor)
+                .unwrap_or_else(|| descriptor.to_owned())
+        };
+        let descriptor = resolved_descriptor.as_str();
+
+        let found = self.find_method(&resolve_class, method_name, descriptor).is_some();
+        if !found {
+            // Method not in bytecode — try native stubs.
+            if let Some(v) = self.native_virtual(&this, &runtime_class, method_name, descriptor, &args) {
+                return Ok(v);
+            }
+            return Err(format!("Virtual method not found: {resolve_class}.{method_name}{descriptor}"));
+        }
+
         let (class_name_owned, descriptor_owned) = {
             let (class, method) = self
                 .find_method(&resolve_class, method_name, descriptor)
-                .ok_or_else(|| {
-                    format!("Virtual method not found: {resolve_class}.{method_name}{descriptor}")
-                })?;
+                .unwrap();
             let cn = class.constant_pool.class_name(class.this_class).to_owned();
             let desc = class.constant_pool.utf8(method.descriptor_index).to_owned();
             (cn, desc)
@@ -188,9 +443,30 @@ impl Vm {
             locals[i + 1] = a;
         }
 
+        // If method has no code (native), fall back to native stubs.
+        let has_code = {
+            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
+            method.code().is_some()
+        };
+        if !has_code {
+            // Extract `this` back from locals[0].
+            let this_ref = match &locals[0] {
+                JValue::Ref(Some(r)) => r.clone(),
+                _ => return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}")),
+            };
+            let virt_args: Vec<JValue> = locals[1..].iter()
+                .filter(|v| !matches!(v, JValue::Void))
+                .cloned()
+                .collect();
+            if let Some(v) = self.native_virtual(&this_ref, &class_name_owned, method_name, &descriptor_owned, &virt_args) {
+                return Ok(v);
+            }
+            return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
+        }
+
         let code = {
             let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().ok_or_else(|| format!("No code in {class_name_owned}.{method_name}"))?.code.clone()
+            method.code().unwrap().code.clone()
         };
         let cp_entries: Vec<ConstantPoolEntry> = {
             let class = self.classes.get(&class_name_owned).unwrap();
@@ -228,12 +504,6 @@ impl Vm {
         class_name: &str,
         bootstrap_methods: &[BootstrapMethod],
     ) -> Result<JValue, String> {
-        macro_rules! cp_get {
-            ($idx:expr) => {
-                &cp[$idx as usize]
-            };
-        }
-
         loop {
             let opcode = code[frame.pc];
             frame.pc += 1;
@@ -357,6 +627,41 @@ impl Vm {
                             v[idx] = val;
                         }
                     }
+                }
+
+                0x4f => { // iastore
+                    let val = frame.stack.pop().unwrap();
+                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let arr_ref = frame.stack.pop().unwrap();
+                    if let Some(r) = arr_ref.as_ref() {
+                        if let NativePayload::Array(ref mut v) = r.borrow_mut().native {
+                            while v.len() <= idx { v.push(JValue::Int(0)); }
+                            v[idx] = val;
+                        }
+                    }
+                }
+                0x55 => { // castore (char array store — treated same as iastore)
+                    let val = frame.stack.pop().unwrap();
+                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let arr_ref = frame.stack.pop().unwrap();
+                    if let Some(r) = arr_ref.as_ref() {
+                        if let NativePayload::Array(ref mut v) = r.borrow_mut().native {
+                            while v.len() <= idx { v.push(JValue::Int(0)); }
+                            v[idx] = val;
+                        }
+                    }
+                }
+                0x34 => { // caload (char array load)
+                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let arr_ref = frame.stack.pop().unwrap();
+                    let val = match arr_ref.as_ref() {
+                        Some(r) => match &r.borrow().native {
+                            NativePayload::Array(v) => v.get(idx).cloned().unwrap_or(JValue::Int(0)),
+                            _ => JValue::Int(0),
+                        },
+                        None => return Err("NullPointerException: caload".to_owned()),
+                    };
+                    frame.stack.push(val);
                 }
 
                 // ---- Stack manipulation ----
@@ -513,19 +818,35 @@ impl Vm {
                     frame.stack.push(v);
                 }
                 0xb3 => { // putstatic
-                    frame.stack.pop(); // discard for now
-                    frame.pc += 2;
+                    let idx = read_u16(code, &mut frame.pc);
+                    let val = frame.stack.pop().unwrap_or(JValue::Void);
+                    let (cls, fld, _) = resolve_fieldref(cp, idx);
+                    self.static_fields.insert(format!("{cls}.{fld}"), val);
                 }
                 0xb4 => { // getfield
                     let idx = read_u16(code, &mut frame.pc);
-                    let obj_ref = frame.stack.pop().unwrap();
+                    let (_, gf_field_name, _) = resolve_fieldref(cp, idx);
+                    let obj_ref = frame.stack.pop().unwrap_or_else(|| {
+                        panic!("getfield {gf_field_name}: empty stack in {class_name}")
+                    });
+                    if matches!(obj_ref, JValue::Void) {
+                        return Err(format!(
+                            "getfield {gf_field_name}: expected Ref on stack, got Void in {class_name}"
+                        ));
+                    }
                     let v = self.resolve_instance_field(cp, idx, &obj_ref)?;
                     frame.stack.push(v);
                 }
                 0xb5 => { // putfield
                     let idx = read_u16(code, &mut frame.pc);
-                    let val = frame.stack.pop().unwrap();
-                    let obj_ref = frame.stack.pop().unwrap();
+                    let val = frame.stack.pop().unwrap_or(JValue::Void);
+                    let obj_ref = frame.stack.pop().unwrap_or(JValue::Void);
+                    if matches!(obj_ref, JValue::Void) {
+                        let (_, pf_field_name, _) = resolve_fieldref(cp, idx);
+                        return Err(format!(
+                            "putfield {pf_field_name}: expected Ref on stack, got Void in {class_name}"
+                        ));
+                    }
                     self.set_instance_field(cp, idx, &obj_ref, val)?;
                 }
 
@@ -561,17 +882,34 @@ impl Vm {
                 // ---- Object creation ----
                 0xbb => { // new
                     let idx = read_u16(code, &mut frame.pc);
-                    let class_name = resolve_class_name(cp, idx);
-                    let obj = JObject::new(class_name);
+                    let new_class = resolve_class_name(cp, idx);
+                    // Run <clinit> for the class being instantiated.
+                    let _ = self.ensure_class_init(&new_class);
+                    let obj = if self.classes.contains_key(&new_class) {
+                        // Class is loaded (bytecode available) — use plain object.
+                        JObject::new(new_class)
+                    } else {
+                        match new_class.as_str() {
+                            // JDK collection types backed by Array payload (no shim loaded).
+                            "java/util/ArrayList" | "java/util/LinkedList" =>
+                                JObject::new_array(new_class, vec![]),
+                            _ => JObject::new(new_class),
+                        }
+                    };
                     frame.stack.push(JValue::Ref(Some(obj)));
                 }
                 0xbc => { // newarray
                     let atype = code[frame.pc]; frame.pc += 1;
                     let count = frame.stack.pop().unwrap().as_int() as usize;
                     let arr = match atype {
-                        8 => JObject::new_array("[B", vec![JValue::Int(0); count]),
-                        10 => JObject::new_array("[I", vec![JValue::Int(0); count]),
-                        11 => JObject::new_array("[J", vec![JValue::Long(0); count]),
+                        4 => JObject::new_array("[Z", vec![JValue::Int(0); count]),   // boolean
+                        5 => JObject::new_array("[C", vec![JValue::Int(0); count]),   // char
+                        6 => JObject::new_array("[F", vec![JValue::Float(0.0); count]), // float
+                        7 => JObject::new_array("[D", vec![JValue::Double(0.0); count]), // double
+                        8 => JObject::new_array("[B", vec![JValue::Int(0); count]),   // byte
+                        9 => JObject::new_array("[S", vec![JValue::Int(0); count]),   // short
+                        10 => JObject::new_array("[I", vec![JValue::Int(0); count]),  // int
+                        11 => JObject::new_array("[J", vec![JValue::Long(0); count]), // long
                         _ => JObject::new_array("[Ljava/lang/Object;", vec![JValue::Ref(None); count]),
                     };
                     frame.stack.push(JValue::Ref(Some(arr)));
@@ -681,7 +1019,7 @@ impl Vm {
                 let obj = JObject::new_string(name);
                 frame.stack.push(JValue::Ref(Some(obj)));
             }
-            other => {
+            _other => {
                 // MethodHandle, MethodType — push null as placeholder.
                 frame.stack.push(JValue::Ref(None));
             }
@@ -694,7 +1032,14 @@ impl Vm {
         idx: u16,
     ) -> Result<JValue, String> {
         let (class_name, field_name, _descriptor) = resolve_fieldref(cp, idx);
-        // Well-known static fields.
+        // Run <clinit> if not yet done (initialises static fields via putstatic).
+        let _ = self.ensure_class_init(&class_name.clone());
+        // Check per-class static field table first.
+        if let Some(v) = self.static_fields.get(&format!("{class_name}.{field_name}")) {
+            return Ok(v.clone());
+        }
+        // Well-known JDK static fields that cannot be initialised via <clinit>
+        // because the JDK classes are not in the bundle.
         match (class_name.as_str(), field_name.as_str()) {
             ("java/lang/System", "out") => Ok(JValue::Ref(Some(JObject::new("java/io/PrintStream")))),
             ("java/lang/System", "err") => Ok(JValue::Ref(Some(JObject::new("java/io/PrintStream")))),
@@ -708,10 +1053,11 @@ impl Vm {
         idx: u16,
         obj_ref: &JValue,
     ) -> Result<JValue, String> {
-        let (_, field_name, _) = resolve_fieldref(cp, idx);
+        let (_, field_name, field_desc) = resolve_fieldref(cp, idx);
         match obj_ref.as_ref() {
             Some(r) => {
-                Ok(r.borrow().fields.get(&field_name).cloned().unwrap_or(JValue::Ref(None)))
+                let default = default_value_for_descriptor(&field_desc);
+                Ok(r.borrow().fields.get(&field_name).cloned().unwrap_or(default))
             }
             None => Err(format!("NullPointerException: getfield {field_name}")),
         }
@@ -755,8 +1101,10 @@ impl Vm {
         let this_val = frame.stack.pop().unwrap();
         match this_val {
             JValue::Ref(Some(r)) => self.invoke_virtual(r, &class_name, &method_name, &descriptor, args),
-            JValue::Ref(None) => Err(format!("NullPointerException: invokevirtual {class_name}.{method_name}")),
-            _ => Err("Expected reference for invokevirtual".to_owned()),
+            JValue::Ref(None) => Err(format!("NullPointerException: invokevirtual {class_name}.{method_name}{descriptor}")),
+            other => Err(format!(
+                "Expected reference for invokevirtual {class_name}.{method_name}{descriptor}, got {other:?}"
+            )),
         }
     }
 
@@ -771,9 +1119,30 @@ impl Vm {
         let args = pop_args(frame, n_args);
         let this_val = frame.stack.pop().unwrap();
         match this_val {
-            JValue::Ref(Some(r)) => self.invoke_virtual(r, &class_name, &method_name, &descriptor, args),
-            JValue::Ref(None) => Err(format!("NullPointerException: invokespecial {class_name}.{method_name}")),
-            _ => Err("Expected reference for invokespecial".to_owned()),
+            JValue::Ref(Some(r)) => {
+                // invokespecial does NOT do virtual dispatch — it calls the exact class
+                // specified in the constant pool. This is critical for super.<init>() calls.
+                if method_name == "<init>" {
+                    // String constructors must be handled natively since String
+                    // content is managed by NativePayload::JavaString.
+                    if class_name == "java/lang/String" {
+                        let s = self.string_from_init_args(&descriptor, &args, &r);
+                        r.borrow_mut().native = NativePayload::JavaString(s);
+                        return Ok(JValue::Void);
+                    }
+                    let has_method = self.find_method(&class_name, &method_name, &descriptor).is_some();
+                    if !has_method {
+                        // Constructor not in bundle — no-op fallback.
+                        return Ok(JValue::Void);
+                    }
+                }
+                // Use invoke_special (non-virtual) instead of invoke_virtual.
+                self.invoke_special(r, &class_name, &method_name, &descriptor, args)
+            }
+            JValue::Ref(None) => Err(format!("NullPointerException: invokespecial {class_name}.{method_name}{descriptor}")),
+            other => Err(format!(
+                "Expected reference for invokespecial {class_name}.{method_name}{descriptor}, got {other:?}"
+            )),
         }
     }
 
@@ -786,11 +1155,23 @@ impl Vm {
         let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
         let n_args = count_args(&descriptor);
         let args = pop_args(frame, n_args);
+
+        // Static interface methods (e.g. List.of()) have no receiver on the stack.
+        // Detect by checking if the method exists as a static method in the interface class.
+        let is_static = self.find_method(&class_name, &method_name, &descriptor)
+            .map(|(_, m)| m.access_flags & 0x0008 != 0)
+            .unwrap_or(false);
+        if is_static {
+            return self.invoke_static(&class_name, &method_name, &descriptor, args);
+        }
+
         let this_val = frame.stack.pop().unwrap();
         match this_val {
             JValue::Ref(Some(r)) => self.invoke_virtual(r, &class_name, &method_name, &descriptor, args),
-            JValue::Ref(None) => Err(format!("NullPointerException: invokeinterface {class_name}.{method_name}")),
-            _ => Err("Expected reference for invokeinterface".to_owned()),
+            JValue::Ref(None) => Err(format!("NullPointerException: invokeinterface {class_name}.{method_name}{descriptor}")),
+            other => Err(format!(
+                "Expected reference for invokeinterface {class_name}.{method_name}{descriptor}, got {other:?}"
+            )),
         }
     }
 
@@ -811,7 +1192,7 @@ impl Vm {
             other => return Err(format!("Expected InvokeDynamic at cp[{idx}], got {other:?}")),
         };
 
-        let (method_name, descriptor) = match &cp[nat_index as usize] {
+        let (_method_name, descriptor) = match &cp[nat_index as usize] {
             ConstantPoolEntry::NameAndType { name_index, descriptor_index } => {
                 let n = match &cp[*name_index as usize] { ConstantPoolEntry::Utf8(s) => s.clone(), _ => String::new() };
                 let d = match &cp[*descriptor_index as usize] { ConstantPoolEntry::Utf8(s) => s.clone(), _ => String::new() };
@@ -848,15 +1229,63 @@ impl Vm {
                 let n_captured = count_args(&descriptor);
                 let captured = pop_args(frame, n_captured);
 
-                // The implementation method is in bootstrap argument 1 (index 1).
-                // We store it as a lambda stub that will be resolved when called.
-                let impl_handle_idx = bm.bootstrap_arguments.get(1).copied();
-
-                let lambda = JObject::new_lambda(move |_args: Vec<JValue>| {
-                    // Simplified: lambdas in Raoh are usually short decoder wrappers.
-                    // Full implementation would invoke the impl method handle.
-                    JValue::Ref(None)
+                // Bootstrap argument 1 is the implementation MethodHandle.
+                // Resolve it to (class, method, descriptor) so the VM can invoke it later.
+                // Bootstrap argument 1 is the implementation MethodHandle.
+                // Resolve it to (ref_kind, class, method, descriptor).
+                let impl_info = bm.bootstrap_arguments.get(1).and_then(|&arg_idx| {
+                    match cp.get(arg_idx as usize)? {
+                        ConstantPoolEntry::MethodHandle { reference_kind, reference_index } => {
+                            let rk = *reference_kind;
+                            match cp.get(*reference_index as usize)? {
+                                ConstantPoolEntry::Methodref { class_index, name_and_type_index }
+                                | ConstantPoolEntry::InterfaceMethodref { class_index, name_and_type_index } => {
+                                    let cls = match cp.get(*class_index as usize)? {
+                                        ConstantPoolEntry::Class { name_index } => {
+                                            match cp.get(*name_index as usize)? {
+                                                ConstantPoolEntry::Utf8(s) => s.clone(),
+                                                _ => return None,
+                                            }
+                                        }
+                                        _ => return None,
+                                    };
+                                    let (mname, mdesc) = match cp.get(*name_and_type_index as usize)? {
+                                        ConstantPoolEntry::NameAndType { name_index, descriptor_index } => {
+                                            let n = match cp.get(*name_index as usize)? {
+                                                ConstantPoolEntry::Utf8(s) => s.clone(), _ => return None,
+                                            };
+                                            let d = match cp.get(*descriptor_index as usize)? {
+                                                ConstantPoolEntry::Utf8(s) => s.clone(), _ => return None,
+                                            };
+                                            (n, d)
+                                        }
+                                        _ => return None,
+                                    };
+                                    Some((rk, cls, mname, mdesc))
+                                }
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
                 });
+
+                let lambda = if let Some((ref_kind, impl_class, impl_method, impl_desc)) = impl_info {
+                    let obj = Rc::new(RefCell::new(JObject {
+                        class_name: "$$Lambda".to_owned(),
+                        fields: std::collections::HashMap::new(),
+                        native: NativePayload::BytecodeLambda {
+                            impl_class,
+                            impl_method,
+                            impl_desc,
+                            ref_kind,
+                            captured,
+                        },
+                    }));
+                    obj
+                } else {
+                    JObject::new_lambda(|_| JValue::Ref(None))
+                };
                 Ok(JValue::Ref(Some(lambda)))
             }
 
@@ -864,21 +1293,59 @@ impl Vm {
                 // Pop arguments based on dynamic descriptor.
                 let n_args = count_args(&descriptor);
                 let args = pop_args(frame, n_args);
-                let mut result = String::new();
-                for a in &args {
-                    match a {
-                        JValue::Int(v) => result.push_str(&v.to_string()),
-                        JValue::Long(v) => result.push_str(&v.to_string()),
-                        JValue::Float(v) => result.push_str(&v.to_string()),
-                        JValue::Double(v) => result.push_str(&v.to_string()),
-                        JValue::Ref(Some(r)) => {
-                            if let Some(s) = r.borrow().as_java_string() {
-                                result.push_str(s);
-                            } else {
-                                result.push_str(&r.borrow().class_name);
+
+                // Extract the recipe string from bootstrap arguments.
+                // The recipe uses \u0001 as placeholders for arguments.
+                let recipe = if !bm.bootstrap_arguments.is_empty() {
+                    match &cp[bm.bootstrap_arguments[0] as usize] {
+                        ConstantPoolEntry::String { string_index } => {
+                            match &cp[*string_index as usize] {
+                                ConstantPoolEntry::Utf8(s) => s.clone(),
+                                _ => "\x01".repeat(n_args),
                             }
                         }
-                        _ => {}
+                        ConstantPoolEntry::Utf8(s) => s.clone(),
+                        _ => "\x01".repeat(n_args),
+                    }
+                } else {
+                    "\x01".repeat(n_args)
+                };
+
+                let mut result = String::new();
+                let mut arg_idx = 0;
+                for ch in recipe.chars() {
+                    if ch == '\x01' {
+                        // Substitute argument — call toString() for objects.
+                        if let Some(a) = args.get(arg_idx) {
+                            match a {
+                                JValue::Int(v) => result.push_str(&v.to_string()),
+                                JValue::Long(v) => result.push_str(&v.to_string()),
+                                JValue::Float(v) => result.push_str(&v.to_string()),
+                                JValue::Double(v) => result.push_str(&v.to_string()),
+                                JValue::Ref(Some(r)) => {
+                                    if let Some(s) = r.borrow().as_java_string() {
+                                        result.push_str(s);
+                                    } else {
+                                        // Call toString() on the object.
+                                        match self.invoke_virtual(r.clone(), &r.borrow().class_name.clone(), "toString", "()Ljava/lang/String;", vec![]) {
+                                            Ok(JValue::Ref(Some(sr))) => {
+                                                if let Some(s) = sr.borrow().as_java_string() {
+                                                    result.push_str(s);
+                                                }
+                                            }
+                                            _ => result.push_str(&r.borrow().class_name),
+                                        }
+                                    }
+                                }
+                                JValue::Ref(None) => result.push_str("null"),
+                                _ => {}
+                            }
+                        }
+                        arg_idx += 1;
+                    } else if ch == '\x02' {
+                        // \u0002 = constant from bootstrap args (skip for now)
+                    } else {
+                        result.push(ch);
                     }
                 }
                 Ok(JValue::Ref(Some(JObject::new_string(result))))
@@ -928,105 +1395,218 @@ impl Vm {
     /// Handle static native methods. Returns `None` if not a known native.
     fn native_static(
         &mut self,
-        class_name: &str,
+        _class_name: &str,
+        _method_name: &str,
+        _descriptor: &str,
+        _args: &[JValue],
+    ) -> Option<JValue> {
+        // All static methods are now handled by JDK shim bytecode.
+        None
+    }
+
+    /// Handle instance native methods. Returns `None` if not a known native.
+    /// Extract a Rust String from String constructor arguments.
+    fn string_from_init_args(&self, descriptor: &str, args: &[JValue], _this: &JRef) -> String {
+        match descriptor {
+            "()V" => String::new(),
+            "([C)V" => {
+                // String(char[])
+                if let Some(r) = args.first().and_then(|a| a.as_ref()) {
+                    if let NativePayload::Array(chars) = &r.borrow().native {
+                        chars.iter().map(|v| char::from(v.as_int() as u8 as u32 as u8)).collect()
+                    } else { String::new() }
+                } else { String::new() }
+            }
+            "([CII)V" => {
+                // String(char[], offset, count)
+                if let Some(r) = args.first().and_then(|a| a.as_ref()) {
+                    let offset = args.get(1).map(|a| a.as_int() as usize).unwrap_or(0);
+                    let count = args.get(2).map(|a| a.as_int() as usize).unwrap_or(0);
+                    if let NativePayload::Array(chars) = &r.borrow().native {
+                        chars[offset..offset + count].iter()
+                            .map(|v| {
+                                let code = v.as_int() as u32;
+                                char::from_u32(code).unwrap_or('?')
+                            })
+                            .collect()
+                    } else { String::new() }
+                } else { String::new() }
+            }
+            "([B)V" => {
+                // String(byte[])
+                if let Some(r) = args.first().and_then(|a| a.as_ref()) {
+                    if let NativePayload::Array(bytes) = &r.borrow().native {
+                        bytes.iter().map(|v| v.as_int() as u8 as char).collect()
+                    } else { String::new() }
+                } else { String::new() }
+            }
+            "(Ljava/lang/String;)V" => {
+                // String(String) — copy constructor
+                if let Some(r) = args.first().and_then(|a| a.as_ref()) {
+                    r.borrow().as_java_string().unwrap_or("").to_owned()
+                } else { String::new() }
+            }
+            _ => String::new(),
+        }
+    }
+
+    fn native_virtual(
+        &mut self,
+        this: &JRef,
+        _class_name: &str,
         method_name: &str,
         _descriptor: &str,
-        args: &[JValue],
+        _args: &[JValue],
     ) -> Option<JValue> {
-        match (class_name, method_name) {
-            ("java/lang/Integer", "valueOf") => {
-                let v = args[0].as_int();
-                let obj = JObject::new("java/lang/Integer");
-                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Int(v));
-                Some(JValue::Ref(Some(obj)))
+        let cn = this.borrow().class_name.clone();
+        match (cn.as_str(), method_name) {
+            // String native methods — backed by NativePayload::JavaString in Rust.
+            ("java/lang/String", "toString") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                Some(JValue::Ref(Some(JObject::new_string(s))))
             }
-            ("java/lang/Integer", "parseInt") => {
-                if let Some(s_ref) = args[0].as_ref() {
-                    if let Some(s) = s_ref.borrow().as_java_string() {
-                        let v = s.parse::<i32>().unwrap_or(0);
-                        return Some(JValue::Int(v));
+            ("java/lang/String", "length") => {
+                let len = this.borrow().as_java_string().map(|s| s.len() as i32).unwrap_or(0);
+                Some(JValue::Int(len))
+            }
+            ("java/lang/String", "charAt") => {
+                let idx = _args.first().map(|v| v.as_int() as usize).unwrap_or(0);
+                let ch = this.borrow().as_java_string()
+                    .and_then(|s| s.chars().nth(idx))
+                    .unwrap_or('\0') as i32;
+                Some(JValue::Int(ch))
+            }
+            ("java/lang/String", "isEmpty") => {
+                let empty = this.borrow().as_java_string().map(|s| s.is_empty()).unwrap_or(true);
+                Some(JValue::Int(if empty { 1 } else { 0 }))
+            }
+            ("java/lang/String", "equals") => {
+                let other_str = _args.first()
+                    .and_then(|a| a.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()));
+                let this_str = this.borrow().as_java_string().map(|s| s.to_owned());
+                let eq = match (this_str, other_str) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                };
+                Some(JValue::Int(if eq { 1 } else { 0 }))
+            }
+            ("java/lang/String", "hashCode") => {
+                let hash = this.borrow().as_java_string().map(|s| {
+                    s.chars().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
+                }).unwrap_or(0);
+                Some(JValue::Int(hash))
+            }
+            ("java/lang/String", "substring") => {
+                let begin = _args.first().map(|v| v.as_int() as usize).unwrap_or(0);
+                let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                let end = _args.get(1).map(|v| v.as_int() as usize).unwrap_or(s.len());
+                let sub: String = s.chars().skip(begin).take(end - begin).collect();
+                Some(JValue::Ref(Some(JObject::new_string(sub))))
+            }
+            ("java/lang/String", "concat") => {
+                let a = this.borrow().as_java_string().unwrap_or("").to_owned();
+                let b = _args.first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                Some(JValue::Ref(Some(JObject::new_string(a + &b))))
+            }
+            ("java/lang/String", "contains") => {
+                let haystack = this.borrow().as_java_string().unwrap_or("").to_owned();
+                let needle = _args.first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                Some(JValue::Int(if haystack.contains(&needle) { 1 } else { 0 }))
+            }
+            ("java/lang/String", "startsWith") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                let prefix = _args.first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                Some(JValue::Int(if s.starts_with(&prefix) { 1 } else { 0 }))
+            }
+            ("java/lang/String", "endsWith") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                let suffix = _args.first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                Some(JValue::Int(if s.ends_with(&suffix) { 1 } else { 0 }))
+            }
+            ("java/lang/String", "indexOf") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                let idx = match _args.first() {
+                    Some(JValue::Ref(Some(r))) => {
+                        let needle = r.borrow().as_java_string().unwrap_or("").to_owned();
+                        s.find(&needle).map(|i| i as i32).unwrap_or(-1)
                     }
-                }
-                Some(JValue::Int(0))
+                    Some(JValue::Int(ch)) => {
+                        let c = char::from_u32(*ch as u32).unwrap_or('\0');
+                        s.find(c).map(|i| i as i32).unwrap_or(-1)
+                    }
+                    _ => -1,
+                };
+                Some(JValue::Int(idx))
             }
-            ("java/lang/Long", "valueOf") => {
-                let v = args[0].as_long();
-                let obj = JObject::new("java/lang/Long");
-                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Long(v));
-                Some(JValue::Ref(Some(obj)))
+            ("java/lang/String", "lastIndexOf") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                let ch = _args.first().map(|v| v.as_int()).unwrap_or(0);
+                let c = char::from_u32(ch as u32).unwrap_or('\0');
+                let idx = s.rfind(c).map(|i| i as i32).unwrap_or(-1);
+                Some(JValue::Int(idx))
             }
-            ("java/lang/Boolean", "valueOf") => {
-                let v = args[0].as_int();
-                let obj = JObject::new("java/lang/Boolean");
-                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Int(v));
-                Some(JValue::Ref(Some(obj)))
+            ("java/lang/String", "trim") => {
+                let s = this.borrow().as_java_string().unwrap_or("").trim().to_owned();
+                Some(JValue::Ref(Some(JObject::new_string(s))))
             }
-            ("java/util/Objects", "requireNonNull") => Some(args[0].clone()),
-            ("java/util/Objects", "requireNonNullElse") => {
-                if args[0].is_null() { Some(args[1].clone()) } else { Some(args[0].clone()) }
+            ("java/lang/String", "toLowerCase") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_lowercase();
+                Some(JValue::Ref(Some(JObject::new_string(s))))
             }
-            ("java/util/List", "of") | ("java/util/Arrays", "asList") => {
-                let arr = JObject::new_array("java/util/List", args.to_vec());
-                Some(JValue::Ref(Some(arr)))
+            ("java/lang/String", "toUpperCase") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_uppercase();
+                Some(JValue::Ref(Some(JObject::new_string(s))))
             }
-            ("java/util/Map", "of") => {
-                let obj = JObject::new("java/util/HashMap");
-                Some(JValue::Ref(Some(obj)))
+            ("java/lang/String", "toCharArray") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                let chars: Vec<JValue> = s.chars().map(|c| JValue::Int(c as i32)).collect();
+                Some(JValue::Ref(Some(JObject::new_array("[C", chars))))
             }
-            ("java/util/Optional", "empty") => {
-                let obj = JObject::new("java/util/Optional");
-                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Ref(None));
-                Some(JValue::Ref(Some(obj)))
+            ("java/lang/String", "getBytes") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                let bytes: Vec<JValue> = s.bytes().map(|b| JValue::Int(b as i32)).collect();
+                Some(JValue::Ref(Some(JObject::new_array("[B", bytes))))
             }
-            ("java/util/Optional", "of") | ("java/util/Optional", "ofNullable") => {
-                let obj = JObject::new("java/util/Optional");
-                obj.borrow_mut().fields.insert("value".to_owned(), args[0].clone());
-                Some(JValue::Ref(Some(obj)))
+            // PrintStream — discard output (playground captures differently).
+            ("java/io/PrintStream", "println") | ("java/io/PrintStream", "print") => {
+                Some(JValue::Void)
+            }
+            // System.arraycopy — native
+            ("java/lang/System", "arraycopy") => {
+                // Handled separately if needed.
+                None
             }
             _ => None,
         }
     }
 
-    /// Handle instance native methods. Returns `None` if not a known native.
-    fn native_virtual(
-        &mut self,
-        this: &JRef,
-        class_name: &str,
-        method_name: &str,
-        _descriptor: &str,
-        args: &[JValue],
-    ) -> Option<JValue> {
-        let cn = this.borrow().class_name.clone();
-        match (cn.as_str(), method_name) {
-            (_, "toString") => {
-                let s = match &this.borrow().native {
-                    NativePayload::JavaString(s) => s.clone(),
-                    _ => format!("{}@{}", this.borrow().class_name, 0),
-                };
-                Some(JValue::Ref(Some(JObject::new_string(s))))
-            }
-            ("java/lang/Integer", "intValue") | ("java/lang/Integer", "longValue") => {
-                Some(this.borrow().fields.get("value").cloned().unwrap_or(JValue::Int(0)))
-            }
-            ("java/lang/Long", "longValue") => {
-                Some(this.borrow().fields.get("value").cloned().unwrap_or(JValue::Long(0)))
-            }
-            ("java/lang/Boolean", "booleanValue") => {
-                Some(this.borrow().fields.get("value").cloned().unwrap_or(JValue::Int(0)))
-            }
-            ("java/io/PrintStream", "println") | ("java/io/PrintStream", "print") => {
-                // Discard output — the playground will capture it differently.
-                Some(JValue::Void)
-            }
-            ("java/util/ArrayList", "add") | ("java/util/ArrayList", "addAll") => {
-                // Simplified: accept but don't store.
-                Some(JValue::Int(1))
-            }
-            ("java/util/ArrayList", "size") | ("java/util/ArrayList", "isEmpty") => {
-                Some(JValue::Int(0))
-            }
-            _ => None,
+    /// Run `<clinit>` for a class if it hasn't been initialized yet.
+    fn ensure_class_init(&mut self, class_name: &str) -> Result<(), String> {
+        let key = format!("{class_name}.<clinit>done");
+        if self.static_fields.contains_key(&key) {
+            return Ok(());
         }
+        // Mark as initialized before running to prevent recursion.
+        self.static_fields.insert(key, JValue::Int(1));
+        // Check if the class has a <clinit> method.
+        let has_clinit = self.find_method(class_name, "<clinit>", "()V").is_some();
+        if has_clinit {
+            self.invoke_static(class_name, "<clinit>", "()V", vec![])?;
+        }
+        Ok(())
     }
 
     /// Check if `runtime_class` is an instance of `target_class` (by name).
@@ -1133,6 +1713,17 @@ fn resolve_fieldref(cp: &[ConstantPoolEntry], idx: u16) -> (String, String, Stri
         _ => (String::new(), String::new()),
     };
     (class_name, name, desc)
+}
+
+/// Return the default zero-value for a JVM field descriptor.
+fn default_value_for_descriptor(desc: &str) -> JValue {
+    match desc.as_bytes().first() {
+        Some(b'I') | Some(b'B') | Some(b'C') | Some(b'S') | Some(b'Z') => JValue::Int(0),
+        Some(b'J') => JValue::Long(0),
+        Some(b'F') => JValue::Float(0.0),
+        Some(b'D') => JValue::Double(0.0),
+        _ => JValue::Ref(None), // Object types default to null
+    }
 }
 
 /// Count the number of method arguments from a JVM method descriptor.

@@ -34,32 +34,10 @@ pub fn run_static(
     method_name: &str,
     descriptor: &str,
 ) -> String {
-    let mut vm = Vm::new();
+    #[cfg(feature = "console_error_panic_hook")]
+    console_error_panic_hook::set_once();
 
-    // The bundle format: repeated [ u32 length ][ class bytes ]
-    let mut pos = 0usize;
-    while pos + 4 <= class_bundle.len() {
-        let len = u32::from_be_bytes([
-            class_bundle[pos],
-            class_bundle[pos + 1],
-            class_bundle[pos + 2],
-            class_bundle[pos + 3],
-        ]) as usize;
-        pos += 4;
-        if pos + len > class_bundle.len() { break; }
-        let class_bytes = &class_bundle[pos..pos + len];
-        pos += len;
-
-        match parse(class_bytes) {
-            Ok(cf) => vm.load_class(cf),
-            Err(e) => return format!("ERROR: Failed to parse class: {e}"),
-        }
-    }
-
-    match vm.invoke_static(main_class, method_name, descriptor, vec![]) {
-        Ok(result) => jvalue_to_string(&result),
-        Err(e) => format!("ERROR: {e}"),
-    }
+    run_static_native(class_bundle, main_class, method_name, descriptor)
 }
 
 /// Parse a single `.class` file and return the class name if successful.
@@ -72,6 +50,60 @@ pub fn parse_class(class_bytes: &[u8]) -> String {
             format!("OK: {name} (v{}.{})", cf.major_version, cf.minor_version)
         }
         Err(e) => format!("ERROR: {e}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public (non-wasm) API for testing
+// ---------------------------------------------------------------------------
+
+/// Load classes from a bundle and invoke a static method.
+/// Same logic as `run_static` but without `wasm_bindgen`.
+pub fn run_static_native(
+    class_bundle: &[u8],
+    main_class: &str,
+    method_name: &str,
+    descriptor: &str,
+) -> String {
+    let mut vm = Vm::new();
+    load_bundle(&mut vm, class_bundle);
+    match vm.invoke_static(main_class, method_name, descriptor, vec![]) {
+        Ok(result) => {
+            // If the result is a non-String object, call toString() on it.
+            if let JValue::Ref(Some(ref r)) = result {
+                let is_java_string = matches!(r.borrow().native, heap::NativePayload::JavaString(_));
+                if !is_java_string {
+                    let class_name = r.borrow().class_name.clone();
+                    match vm.invoke_virtual(r.clone(), &class_name, "toString", "()Ljava/lang/String;", vec![]) {
+                        Ok(s) => return jvalue_to_string(&s),
+                        Err(_) => {}
+                    }
+                }
+            }
+            jvalue_to_string(&result)
+        }
+        Err(e) => format!("ERROR: {e}"),
+    }
+}
+
+/// Load classes from bundle bytes into a VM.
+pub fn load_bundle(vm: &mut Vm, class_bundle: &[u8]) {
+    let mut pos = 0usize;
+    while pos + 4 <= class_bundle.len() {
+        let len = u32::from_be_bytes([
+            class_bundle[pos],
+            class_bundle[pos + 1],
+            class_bundle[pos + 2],
+            class_bundle[pos + 3],
+        ]) as usize;
+        pos += 4;
+        if pos + len > class_bundle.len() { break; }
+        let class_bytes = &class_bundle[pos..pos + len];
+        pos += len;
+        match parse(class_bytes) {
+            Ok(cf) => vm.load_class(cf),
+            Err(e) => panic!("Failed to parse class: {e}"),
+        }
     }
 }
 

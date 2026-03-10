@@ -1,0 +1,19 @@
+{
+  "name": "199xvm",
+  "version": "1.0.0",
+  "description": "A minimal Java bytecode interpreter compiled to WebAssembly.",
+  "main": "index.js",
+  "scripts": {
+    "build:javac": "esbuild web/javac.ts --bundle --format=esm --outfile=web/javac.js --target=es2020",
+    "watch:javac": "esbuild web/javac.ts --bundle --format=esm --outfile=web/javac.js --target=es2020 --watch",
+    "test": "npm run build:javac && node --experimental-strip-types --test web/javac.test.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "esbuild": "^0.27.3",
+    "typescript": "^5.9.3"
+  }
+}

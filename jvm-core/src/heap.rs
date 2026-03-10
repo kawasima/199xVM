@@ -40,9 +40,11 @@ impl JValue {
     }
 
     /// Unwrap as object reference (may be null).
+    /// Returns `None` for `Void` and `Int(0)` (treated as null).
     pub fn as_ref(&self) -> Option<&JRef> {
         match self {
             JValue::Ref(r) => r.as_ref(),
+            JValue::Void | JValue::Int(0) => None,
             other => panic!("Expected Ref, got {other:?}"),
         }
     }
@@ -79,10 +81,19 @@ pub enum NativePayload {
     IntArray(Vec<i32>),
     LongArray(Vec<i64>),
     /// A Rust closure captured as a lambda stand-in.
-    ///
-    /// This lets the bootstrap handler return a callable without implementing
-    /// a full LambdaMetafactory.
     Lambda(Rc<dyn Fn(Vec<JValue>) -> JValue>),
+    /// A lambda backed by a bytecode method handle.
+    ///
+    /// When the functional interface method is invoked, the VM looks up
+    /// `impl_class::impl_method(impl_desc)` and prepends `captured` to the arguments.
+    BytecodeLambda {
+        impl_class: String,
+        impl_method: String,
+        impl_desc: String,
+        /// JVM reference_kind: 5=invokeVirtual, 6=invokeStatic, 7=invokeSpecial, etc.
+        ref_kind: u8,
+        captured: Vec<JValue>,
+    },
 }
 
 impl std::fmt::Debug for NativePayload {
@@ -95,6 +106,9 @@ impl std::fmt::Debug for NativePayload {
             NativePayload::IntArray(v) => write!(f, "IntArray(len={})", v.len()),
             NativePayload::LongArray(v) => write!(f, "LongArray(len={})", v.len()),
             NativePayload::Lambda(_) => write!(f, "Lambda(...)"),
+            NativePayload::BytecodeLambda { impl_class, impl_method, .. } => {
+                write!(f, "BytecodeLambda({impl_class}::{impl_method})")
+            }
         }
     }
 }

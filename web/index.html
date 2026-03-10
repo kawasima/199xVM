@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>199xVM — Raoh Playground</title>
+  <title>199xVM — Java Playground</title>
   <style>
     :root {
       --bg: #1e1e2e;
@@ -15,6 +15,7 @@
       --text-dim: #6c7086;
       --ok: #a6e3a1;
       --err: #f38ba8;
+      --warn: #f9e2af;
       --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
     }
 
@@ -33,7 +34,7 @@
     header {
       background: var(--surface);
       border-bottom: 1px solid var(--border);
-      padding: 12px 20px;
+      padding: 10px 20px;
       display: flex;
       align-items: center;
       gap: 16px;
@@ -44,13 +45,68 @@
       font-weight: 700;
       letter-spacing: 0.05em;
       color: var(--accent);
+      white-space: nowrap;
     }
 
     header .subtitle {
       color: var(--text-dim);
       font-size: 12px;
+      white-space: nowrap;
     }
 
+    /* ── toolbar ── */
+    #toolbar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 6px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    button#run-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 18px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+      white-space: nowrap;
+    }
+
+    button#run-btn:hover { background: var(--accent-hover); }
+    button#run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    select#snippet {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      cursor: pointer;
+      max-width: 260px;
+    }
+
+    .toolbar-sep {
+      width: 1px;
+      height: 20px;
+      background: var(--border);
+    }
+
+    .status {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+
+    /* ── workspace ── */
     .workspace {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -83,29 +139,63 @@
 
     #editor-area {
       flex: 1;
-      overflow: auto;
+      overflow: hidden;
       background: var(--bg);
+      display: flex;
+      flex-direction: column;
     }
 
-    textarea#code {
-      width: 100%;
+    /* CodeMirror 6 theme overrides */
+    .cm-editor {
+      flex: 1;
       height: 100%;
-      background: transparent;
-      color: var(--text);
       font-family: var(--font-mono);
       font-size: 14px;
-      line-height: 1.6;
-      border: none;
-      outline: none;
-      resize: none;
-      padding: 16px;
-      tab-size: 4;
+      background: var(--bg);
+    }
+    .cm-editor.cm-focused { outline: none; }
+    .cm-scroller { overflow: auto; }
+    .cm-content { padding: 16px; caret-color: #f8f8f2; }
+    .cm-line { color: #c8c8d8; }
+    .cm-gutters {
+      background: #22222f;
+      border-right: 1px solid #33334a;
+      color: #4a4a66;
+    }
+    .cm-activeLineGutter { background: #28283a; color: #7a7a9a; }
+    .cm-activeLine { background: #28283a; }
+    .cm-cursor { border-left-color: #f8f8f2; border-left-width: 2px; }
+    .cm-selectionBackground, ::selection { background: #44476a !important; }
+
+    /* Syntax highlight — classHighlighter token classes */
+    .tok-keyword    { color: #c792ea; }
+    .tok-typeName   { color: #6db8d8; }
+    .tok-string, .tok-string2 { color: #c3a84a; }
+    .tok-number     { color: #a07cc0; }
+    .tok-bool       { color: #a07cc0; }
+    .tok-null       { color: #a07cc0; }
+    .tok-comment    { color: #5c6480; font-style: italic; }
+    .tok-operator   { color: #8888aa; }
+    .tok-punctuation { color: #7070a0; }
+    .tok-variableName { color: #b0b0cc; }
+    .tok-definition { color: #57a87a; }
+    .tok-propertyName { color: #6db8d8; }
+    .tok-annotation { color: #c0954a; }
+    .tok-modifier   { color: #c792ea; }
+
+
+    .right-pane {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
     }
 
     #output-area {
       flex: 1;
       overflow: auto;
       padding: 16px;
+      border-bottom: 1px solid var(--border);
+      min-height: 0;
     }
 
     #output {
@@ -116,69 +206,90 @@
 
     #output .ok { color: var(--ok); }
     #output .err { color: var(--err); }
+    #output .warn { color: var(--warn); }
     #output .info { color: var(--text-dim); }
     #output .result { color: var(--text); }
 
-    footer {
-      background: var(--surface);
-      border-top: 1px solid var(--border);
-      padding: 10px 20px;
+    #bytecode-pane {
+      flex: 1;
       display: flex;
-      align-items: center;
-      gap: 12px;
+      flex-direction: column;
+      overflow: hidden;
+      min-height: 0;
     }
 
-    button#run-btn {
-      background: var(--accent);
-      color: #fff;
-      border: none;
-      border-radius: 6px;
-      padding: 8px 20px;
-      font-family: var(--font-mono);
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.15s;
+    #bytecode-area {
+      flex: 1;
+      overflow: auto;
+      padding: 16px;
     }
 
-    button#run-btn:hover { background: var(--accent-hover); }
-    button#run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-    select#snippet {
-      background: var(--surface);
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 6px 10px;
-      font-family: var(--font-mono);
+    #bytecode {
+      white-space: pre;
       font-size: 12px;
-      cursor: pointer;
-    }
-
-    .status {
-      margin-left: auto;
-      font-size: 11px;
+      line-height: 1.6;
       color: var(--text-dim);
     }
+    #bytecode .bc-header  { color: var(--text); }
+    #bytecode .bc-opcode  { color: #89dceb; }
+    #bytecode .bc-offset  { color: var(--text-dim); }
+    #bytecode .bc-comment { color: #6c7086; }
   </style>
 </head>
 <body>
   <header>
     <h1>199xVM</h1>
-    <span class="subtitle">Raoh Playground — minimal JVM on WebAssembly</span>
+    <span class="subtitle">Java Playground — compile &amp; run in the browser via WebAssembly</span>
   </header>
+
+  <div id="toolbar">
+    <button id="run-btn" onclick="runCode()">&#9654; Run</button>
+    <div class="toolbar-sep"></div>
+    <select id="snippet" onchange="loadSnippet()">
+      <option value="">— load example —</option>
+      <optgroup label="Basics">
+        <option value="hello">Hello World</option>
+        <option value="arithmetic">Arithmetic</option>
+        <option value="strings">String ops</option>
+        <option value="string_format">String.formatted()</option>
+        <option value="loop">Loop &amp; accumulate</option>
+        <option value="while_loop">While loop</option>
+        <option value="nested_if">Nested if / ternary</option>
+      </optgroup>
+      <optgroup label="OOP">
+        <option value="class_fields">Class with fields</option>
+        <option value="inheritance">Inheritance</option>
+        <option value="record_type">Record type</option>
+        <option value="static_method">Static methods</option>
+      </optgroup>
+      <optgroup label="Algorithms">
+        <option value="fibonacci">Fibonacci (recursive)</option>
+        <option value="fibonacci_iter">Fibonacci (iterative)</option>
+        <option value="factorial">Factorial</option>
+        <option value="gcd">GCD / Euclid</option>
+        <option value="bubble_sort">Bubble sort</option>
+        <option value="binary_search">Binary search</option>
+      </optgroup>
+      <optgroup label="Collections">
+        <option value="arraylist">ArrayList</option>
+        <option value="list_ops">List operations</option>
+      </optgroup>
+    </select>
+    <span class="status" id="status">Loading WASM…</span>
+  </div>
 
   <div class="workspace">
     <div class="pane">
       <div class="pane-header">
-        <span>Editor</span>
+        <span>Java Source</span>
+        <span style="color:var(--text-dim);font-size:10px;">Ctrl+Enter to run</span>
       </div>
       <div id="editor-area">
-        <textarea id="code" spellcheck="false" autocomplete="off" autocorrect="off"></textarea>
+        <div id="cm-editor"></div>
       </div>
     </div>
 
-    <div class="pane">
+    <div class="pane right-pane">
       <div class="pane-header">
         <span>Output</span>
         <button onclick="clearOutput()" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:11px;">clear</button>
@@ -186,141 +297,471 @@
       <div id="output-area">
         <pre id="output"><span class="info">// Output will appear here after running.</span></pre>
       </div>
+      <div id="bytecode-pane">
+        <div class="pane-header">
+          <span>Bytecode</span>
+        </div>
+        <div id="bytecode-area">
+          <pre id="bytecode"><span class="bc-comment">// Compiled bytecode (javap-style) will appear here.</span></pre>
+        </div>
+      </div>
     </div>
   </div>
 
-  <footer>
-    <select id="snippet" onchange="loadSnippet()">
-      <option value="">— load example —</option>
-      <option value="int_positive">int_().positive()</option>
-      <option value="int_range">int_().min(1).max(100)</option>
-      <option value="string_nonblank">string().nonBlank()</option>
-      <option value="combine">combine two fields</option>
-    </select>
-    <button id="run-btn" onclick="runCode()">&#9654; Run</button>
-    <span class="status" id="status">Loading WASM…</span>
-  </footer>
-
   <script type="module">
-    // ---------------------------------------------------------------------------
-    // Snippet library
-    // ---------------------------------------------------------------------------
-    const SNIPPETS = {
-      int_positive: `// Raoh: int_().positive()
-// Decoder<Object, Integer> that requires a positive integer.
-//
-// In 199xVM, we invoke Decoders.int_() and then .positive()
-// by calling the pre-loaded Raoh classes.
-// Entry point: net/unit8/raoh/playground/Runner.run()
+    import { compile, disassemble } from "./javac.js";
 
-// [This playground executes pre-built Raoh class files in the
-//  browser via a minimal Java bytecode interpreter written in Rust
-//  compiled to WebAssembly.]
-//
-// Select a snippet and press Run to see Raoh decode a value.
-decode("int_.positive", 42);
+    // CodeMirror 6
+    import { EditorState } from "https://esm.sh/@codemirror/state@6";
+    import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from "https://esm.sh/@codemirror/view@6";
+    import { defaultKeymap, indentWithTab } from "https://esm.sh/@codemirror/commands@6";
+    import { java } from "https://esm.sh/@codemirror/lang-java@6";
+    import { classHighlighter } from "https://esm.sh/@lezer/highlight@1";
+    import { syntaxHighlighting } from "https://esm.sh/@codemirror/language@6";
+    import { closeBrackets } from "https://esm.sh/@codemirror/autocomplete@6";
+
+    // -------------------------------------------------------------------------
+    // Snippet library
+    // -------------------------------------------------------------------------
+    const SNIPPETS = {
+      hello: `public class Hello {
+    public static String run() {
+        return "Hello, World!";
+    }
+}
 `,
-      int_range: `decode("int_.min_max", 50);`,
-      string_nonblank: `decode("string_.nonBlank", "hello");`,
-      combine: `decode("combine", null);`,
+      arithmetic: `public class Arithmetic {
+    public static String run() {
+        int a = 10;
+        int b = 3;
+        int sum = a + b;
+        int diff = a - b;
+        int prod = a * b;
+        int quot = a / b;
+        int rem = a % b;
+        return sum + " " + diff + " " + prod + " " + quot + " " + rem;
+    }
+}
+`,
+      strings: `public class StringOps {
+    public static String run() {
+        String s = "Hello, Java!";
+        int len = s.length();
+        String upper = s.toUpperCase();
+        String sub = s.substring(7);
+        boolean starts = s.startsWith("Hello");
+        return "len=" + len + " upper=" + upper + " sub=" + sub + " starts=" + starts;
+    }
+}
+`,
+      string_format: `public class StringFormat {
+    public static String run() {
+        String name = "Java";
+        int year = 1995;
+        return "Hello, %s! Born in %d.".formatted(name, year);
+    }
+}
+`,
+      loop: `public class LoopTest {
+    public static String run() {
+        int sum = 0;
+        for (int i = 1; i <= 10; i++) {
+            sum = sum + i;
+        }
+        return "sum(1..10)=" + sum;
+    }
+}
+`,
+      while_loop: `public class WhileLoop {
+    public static String run() {
+        int n = 1;
+        int product = 1;
+        while (n <= 5) {
+            product = product * n;
+            n = n + 1;
+        }
+        return "5!=" + product;
+    }
+}
+`,
+      nested_if: `public class NestedIf {
+    public static String classify(int n) {
+        if (n < 0) {
+            return "negative";
+        } else if (n == 0) {
+            return "zero";
+        } else if (n % 2 == 0) {
+            return "positive even";
+        } else {
+            return "positive odd";
+        }
+    }
+
+    public static String run() {
+        return classify(-3) + ", " + classify(0) + ", " + classify(4) + ", " + classify(7);
+    }
+}
+`,
+      class_fields: `public class Counter {
+    int count;
+
+    public Counter() {
+        count = 0;
+    }
+
+    public void increment() {
+        count = count + 1;
+    }
+
+    public int get() {
+        return count;
+    }
+
+    public static String run() {
+        Counter c = new Counter();
+        c.increment();
+        c.increment();
+        c.increment();
+        return "count=" + c.get();
+    }
+}
+`,
+      inheritance: `public class Shape {
+    String color;
+
+    public Shape(String color) {
+        this.color = color;
+    }
+
+    public String describe() {
+        return color + " shape";
+    }
+}
+
+public class Circle extends Shape {
+    int radius;
+
+    public Circle(String color, int radius) {
+        super(color);
+        this.radius = radius;
+    }
+
+    public String describe() {
+        return color + " circle r=" + radius;
+    }
+
+    public static String run() {
+        Circle c = new Circle("red", 5);
+        return c.describe();
+    }
+}
+`,
+      record_type: `record Point(int x, int y) {}
+
+public class RecordDemo {
+    public static String run() {
+        Point p = new Point(3, 4);
+        int dist2 = p.x() * p.x() + p.y() * p.y();
+        return "p=(" + p.x() + "," + p.y() + ") dist2=" + dist2;
+    }
+}
+`,
+      static_method: `public class MathUtils {
+    public static int square(int n) {
+        return n * n;
+    }
+
+    public static int cube(int n) {
+        return n * n * n;
+    }
+
+    public static int max(int a, int b) {
+        return a > b ? a : b;
+    }
+
+    public static String run() {
+        return "sq(7)=" + square(7) + " cube(3)=" + cube(3) + " max(4,9)=" + max(4, 9);
+    }
+}
+`,
+      fibonacci: `public class Fibonacci {
+    public static int fib(int n) {
+        if (n <= 1) return n;
+        return fib(n - 1) + fib(n - 2);
+    }
+
+    public static String run() {
+        return "fib(10)=" + fib(10);
+    }
+}
+`,
+      fibonacci_iter: `public class FibIter {
+    public static String run() {
+        int a = 0;
+        int b = 1;
+        for (int i = 0; i < 10; i++) {
+            int tmp = a + b;
+            a = b;
+            b = tmp;
+        }
+        return "fib(10)=" + a;
+    }
+}
+`,
+      factorial: `public class Factorial {
+    public static long fact(int n) {
+        long result = 1;
+        for (int i = 2; i <= n; i++) {
+            result = result * i;
+        }
+        return result;
+    }
+
+    public static String run() {
+        return "10!=" + fact(10) + " 15!=" + fact(15);
+    }
+}
+`,
+      gcd: `public class GCD {
+    public static int gcd(int a, int b) {
+        while (b != 0) {
+            int tmp = b;
+            b = a % b;
+            a = tmp;
+        }
+        return a;
+    }
+
+    public static String run() {
+        return "gcd(48,18)=" + gcd(48, 18) + " gcd(100,75)=" + gcd(100, 75);
+    }
+}
+`,
+      bubble_sort: `public class BubbleSort {
+    public static String run() {
+        int[] arr = {5, 3, 8, 1, 9, 2, 7, 4, 6};
+        int n = arr.length;
+        for (int i = 0; i < n - 1; i++) {
+            for (int j = 0; j < n - i - 1; j++) {
+                if (arr[j] > arr[j + 1]) {
+                    int tmp = arr[j];
+                    arr[j] = arr[j + 1];
+                    arr[j + 1] = tmp;
+                }
+            }
+        }
+        String result = "";
+        for (int i = 0; i < n; i++) {
+            if (i > 0) result = result + ",";
+            result = result + arr[i];
+        }
+        return "[" + result + "]";
+    }
+}
+`,
+      binary_search: `public class BinarySearch {
+    public static int search(int[] arr, int target) {
+        int lo = 0;
+        int hi = arr.length - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            if (arr[mid] == target) return mid;
+            else if (arr[mid] < target) lo = mid + 1;
+            else hi = mid - 1;
+        }
+        return -1;
+    }
+
+    public static String run() {
+        int[] arr = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19};
+        return "idx(7)=" + search(arr, 7) + " idx(10)=" + search(arr, 10);
+    }
+}
+`,
+      arraylist: `import java.util.ArrayList;
+
+public class ArrayListDemo {
+    public static String run() {
+        ArrayList<String> list = new ArrayList<>();
+        list.add("apple");
+        list.add("banana");
+        list.add("cherry");
+        int size = list.size();
+        String first = list.get(0);
+        list.remove(1);
+        return "size=" + size + " first=" + first + " after-remove=" + list.size();
+    }
+}
+`,
+      list_ops: `import java.util.ArrayList;
+
+public class ListOps {
+    public static String run() {
+        ArrayList<String> list = new ArrayList<>();
+        list.add("alpha");
+        list.add("beta");
+        list.add("gamma");
+        list.add("delta");
+
+        String second = list.get(1);
+        list.remove(2);
+        list.set(0, "ALPHA");
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(list.get(i));
+        }
+        return second + " | " + sb.toString();
+    }
+}
+`,
     };
 
-    const DEFAULT_CODE = `// 199xVM — Raoh Playground
-//
-// The WASM module loads pre-compiled Raoh .class files and
-// interprets Java bytecode in the browser.
-//
-// Select an example from the footer or type a snippet name:
-//   decode("int_.positive", 42)
-//
-// Press ▶ Run to execute.
-decode("int_.positive", 42);
-`;
+    const DEFAULT_CODE = SNIPPETS.hello;
 
-    // ---------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // WASM bootstrap
-    // ---------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     let wasmReady = false;
     let jvmModule = null;
+    let classBundle = null;
 
     async function initWasm() {
       const statusEl = document.getElementById("status");
       try {
-        // Dynamic import of the wasm-bindgen generated JS.
-        // When wasm-pack builds with --target web it generates:
-        //   pkg/jvm_core.js  and  pkg/jvm_core_bg.wasm
         const mod = await import("../jvm-core/pkg/jvm_core.js");
-        await mod.default(); // initialise the WASM module
+        await mod.default();
         jvmModule = mod;
         wasmReady = true;
         statusEl.textContent = "WASM ready";
         document.getElementById("run-btn").disabled = false;
       } catch (e) {
-        statusEl.textContent = "WASM not built yet — run: wasm-pack build jvm-core --target web";
+        statusEl.textContent = "WASM not built — run: wasm-pack build jvm-core --target web";
         document.getElementById("run-btn").disabled = true;
-        log("info", "WASM module not found.\n\nTo build:\n  cd 199xvm\n  wasm-pack build jvm-core --target web\n\nThen open this file via a local HTTP server.");
+        log("info", "WASM module not found.\n\nTo build:\n  wasm-pack build jvm-core --target web\n\nThen serve this directory via HTTP.");
       }
     }
-
-    // ---------------------------------------------------------------------------
-    // Class bundle loader
-    //   Pre-compiled Raoh .class files are expected in raoh-classes/bundle.bin
-    //   Format: repeated [u32 length][class bytes]
-    // ---------------------------------------------------------------------------
-    let classBundle = null;
 
     async function loadClassBundle() {
       try {
-        const resp = await fetch("../raoh-classes/bundle.bin");
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        classBundle = new Uint8Array(await resp.arrayBuffer());
-        log("info", `Class bundle loaded: ${classBundle.byteLength} bytes`);
+        const [shimResp, raohResp] = await Promise.all([
+          fetch("../jdk-shim/bundle.bin"),
+          fetch("../raoh-classes/bundle.bin"),
+        ]);
+        if (!shimResp.ok) throw new Error(`shim bundle: HTTP ${shimResp.status}`);
+        if (!raohResp.ok) throw new Error(`raoh bundle: HTTP ${raohResp.status}`);
+        const shimBuf = new Uint8Array(await shimResp.arrayBuffer());
+        const raohBuf = new Uint8Array(await raohResp.arrayBuffer());
+        classBundle = new Uint8Array(shimBuf.length + raohBuf.length);
+        classBundle.set(shimBuf, 0);
+        classBundle.set(raohBuf, shimBuf.length);
+        log("info", `Bundles loaded: shim=${shimBuf.byteLength}B + raoh=${raohBuf.byteLength}B`);
       } catch (e) {
-        log("info", "raoh-classes/bundle.bin not found.\nRun build-bundle.sh to package Raoh class files.");
+        log("info", `Bundle load failed: ${e.message}\nRun ./build-shim.sh first.`);
       }
     }
 
-    // ---------------------------------------------------------------------------
-    // Interpreter facade
-    // ---------------------------------------------------------------------------
-    window.decode = function(snippet, value) {
+    // Build a combined bundle: shim + raoh (if available) + user class
+    function buildBundle(userClassBundle) {
+      if (classBundle) {
+        const combined = new Uint8Array(classBundle.length + userClassBundle.length);
+        combined.set(classBundle, 0);
+        combined.set(userClassBundle, classBundle.length);
+        return combined;
+      }
+      return userClassBundle;
+    }
+
+    // Find the class that contains "public static String run()"
+    // Falls back to the last public class in source.
+    function extractRunClassName(source) {
+      const runMatch = source.match(/public\s+class\s+(\w+)[^}]*public\s+static\s+String\s+run\s*\(\s*\)/s);
+      if (runMatch) return runMatch[1];
+      const all = [...source.matchAll(/public\s+class\s+(\w+)/g)];
+      return all.length > 0 ? all[all.length - 1][1] : null;
+    }
+
+    // Detect whether compile() returned a multi-class bundle (starts with a valid class count)
+    // A raw .class file starts with 0xCAFEBABE; a bundle's first 4 bytes are a length > 0.
+    function isMultiBundle(bytes) {
+      if (bytes.length < 4) return false;
+      return !(bytes[0] === 0xCA && bytes[1] === 0xFE && bytes[2] === 0xBA && bytes[3] === 0xBE);
+    }
+
+    // -------------------------------------------------------------------------
+    // Run
+    // -------------------------------------------------------------------------
+    window.runCode = function() {
       if (!wasmReady || !jvmModule) {
         log("err", "WASM not ready.");
         return;
       }
-      if (!classBundle) {
-        log("err", "Class bundle not loaded.");
+
+      clearOutput();
+      const source = editorView.state.doc.toString();
+      const className = extractRunClassName(source);
+      if (!className) {
+        log("err", "Cannot find 'public class <Name>' in source.");
         return;
       }
 
-      const mainClass = "net/unit8/raoh/playground/Runner";
+      // Compile
+      let userBundle;
+      let classBytes;
+      try {
+        log("info", `Compiling…`);
+        classBytes = compile(source);
+
+        if (isMultiBundle(classBytes)) {
+          // Already a length-prefixed multi-class bundle — use as-is
+          userBundle = classBytes;
+          log("ok", `Compiled ${classBytes.length} bytes (multi-class bundle).`);
+          // Show bytecode of last class for display
+          const lastLen = (classBytes[classBytes.length - 4 - 1] << 24) |
+                          (classBytes[classBytes.length - 3 - 1] << 16) |
+                          (classBytes[classBytes.length - 2 - 1] << 8)  |
+                           classBytes[classBytes.length - 1 - 1];
+          // Parse bundle to find last class for disassembly
+          let off = 0;
+          let lastClass = null;
+          while (off + 4 <= classBytes.length) {
+            const len = (classBytes[off] << 24) | (classBytes[off+1] << 16) | (classBytes[off+2] << 8) | classBytes[off+3];
+            off += 4;
+            if (off + len <= classBytes.length) lastClass = classBytes.slice(off, off + len);
+            off += len;
+          }
+          if (lastClass) showBytecode(lastClass);
+        } else {
+          // Single class — wrap in bundle format
+          userBundle = new Uint8Array(4 + classBytes.length);
+          userBundle[0] = (classBytes.length >> 24) & 0xff;
+          userBundle[1] = (classBytes.length >> 16) & 0xff;
+          userBundle[2] = (classBytes.length >>  8) & 0xff;
+          userBundle[3] =  classBytes.length        & 0xff;
+          userBundle.set(classBytes, 4);
+          log("ok", `Compiled ${classBytes.length} bytes of bytecode.`);
+          showBytecode(classBytes);
+        }
+      } catch (e) {
+        log("err", `Compile error: ${e.message}`);
+        return;
+      }
+
+      // Run
+      const bundle = buildBundle(userBundle);
       const method = "run";
-      const descriptor = "(Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/String;";
+      const descriptor = "()Ljava/lang/String;";
 
       try {
-        // parse_class is available for quick validation
-        const result = jvmModule.run_static(classBundle, mainClass, method, descriptor);
+        const result = jvmModule.run_static(bundle, className, method, descriptor);
         if (result.startsWith("ERROR:")) {
           log("err", result);
         } else {
-          log("ok", result);
+          log("result", `→ ${result}`);
         }
       } catch (e) {
-        log("err", String(e));
-      }
-    };
-
-    window.runCode = function() {
-      const code = document.getElementById("code").value;
-      clearOutput();
-      log("info", `> ${code.split("\n").find(l => l.trim() && !l.trim().startsWith("//")) ?? code}`);
-
-      try {
-        // The editor runs a tiny JS DSL that maps to WASM calls.
-        // eslint-disable-next-line no-new-func
-        new Function("decode", code)(window.decode);
-      } catch (e) {
-        log("err", String(e));
+        log("err", `Runtime error: ${String(e)}`);
       }
     };
 
@@ -328,7 +769,9 @@ decode("int_.positive", 42);
       const sel = document.getElementById("snippet");
       const key = sel.value;
       if (key && SNIPPETS[key]) {
-        document.getElementById("code").value = SNIPPETS[key];
+        editorView.dispatch({
+          changes: { from: 0, to: editorView.state.doc.length, insert: SNIPPETS[key] },
+        });
       }
       sel.value = "";
     };
@@ -336,6 +779,40 @@ decode("int_.positive", 42);
     window.clearOutput = function() {
       document.getElementById("output").innerHTML = "";
     };
+
+    function showBytecode(classBytes) {
+      const raw = disassemble(classBytes);
+      const bc = document.getElementById("bytecode");
+      bc.innerHTML = "";
+      for (const line of raw.split("\n")) {
+        const span = document.createElement("span");
+        // Colour by line type
+        if (/^\s+\d+:/.test(line)) {
+          // Instruction line: "   42: invokevirtual   ..."
+          const m = line.match(/^(\s+\d+:\s*)(\S+)(\s+.*)$/);
+          if (m) {
+            span.innerHTML =
+              `<span class="bc-offset">${escHtml(m[1])}</span>` +
+              `<span class="bc-opcode">${escHtml(m[2])}</span>` +
+              `<span class="bc-comment">${escHtml(m[3])}</span>`;
+          } else {
+            span.textContent = line;
+          }
+        } else if (/^\s*(public|private|static|void|class|extends|record)/.test(line) || /^\s*\/\//.test(line)) {
+          span.className = "bc-header";
+          span.textContent = line;
+        } else {
+          span.textContent = line;
+        }
+        bc.appendChild(span);
+        bc.appendChild(document.createTextNode("\n"));
+      }
+      bc.parentElement.scrollTop = 0;
+    }
+
+    function escHtml(s) {
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
 
     function log(cls, msg) {
       const out = document.getElementById("output");
@@ -346,20 +823,36 @@ decode("int_.positive", 42);
       out.parentElement.scrollTop = out.parentElement.scrollHeight;
     }
 
-    // ---------------------------------------------------------------------------
-    // Keyboard shortcut: Ctrl/Cmd + Enter to run
-    // ---------------------------------------------------------------------------
-    document.getElementById("code").addEventListener("keydown", e => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-        e.preventDefault();
-        runCode();
-      }
+    // -------------------------------------------------------------------------
+    // CodeMirror editor
+    // -------------------------------------------------------------------------
+    const runKeymap = keymap.of([
+      { key: "Ctrl-Enter", mac: "Cmd-Enter", run: () => { runCode(); return true; } },
+      indentWithTab,
+      ...defaultKeymap,
+    ]);
+
+    const editorView = new EditorView({
+      state: EditorState.create({
+        doc: DEFAULT_CODE,
+        extensions: [
+          lineNumbers(),
+          highlightActiveLine(),
+          highlightActiveLineGutter(),
+          closeBrackets(),
+          java(),
+          syntaxHighlighting(classHighlighter),
+          runKeymap,
+          EditorView.theme({
+            "&": { height: "100%" },
+            ".cm-scroller": { overflow: "auto" },
+          }),
+        ],
+      }),
+      parent: document.getElementById("cm-editor"),
     });
 
-    // ---------------------------------------------------------------------------
     // Init
-    // ---------------------------------------------------------------------------
-    document.getElementById("code").value = DEFAULT_CODE;
     document.getElementById("run-btn").disabled = true;
     initWasm();
     loadClassBundle();
