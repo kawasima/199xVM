@@ -102,7 +102,7 @@ pub fn load_bundle(vm: &mut Vm, class_bundle: &[u8]) {
         pos += len;
         match parse(class_bytes) {
             Ok(cf) => vm.load_class(cf),
-            Err(e) => panic!("Failed to parse class: {e}"),
+            Err(e) => eprintln!("Warning: skipping unparseable class: {e}"),
         }
     }
 }

@@ -40,7 +40,9 @@ impl JValue {
     }
 
     /// Unwrap as object reference (may be null).
-    /// Returns `None` for `Void` and `Int(0)` (treated as null).
+    /// `Int(0)` is treated as null because uninitialized local slots and
+    /// some bytecode paths (e.g. `iconst_0` used as `aconst_null` equivalent)
+    /// may leave an Int(0) where a reference is expected.
     pub fn as_ref(&self) -> Option<&JRef> {
         match self {
             JValue::Ref(r) => r.as_ref(),
