@@ -679,6 +679,9 @@ impl Vm {
                     let default_off = read_i32(code, &mut frame.pc);
                     let low = read_i32(code, &mut frame.pc);
                     let high = read_i32(code, &mut frame.pc);
+                    if high < low {
+                        return Err(format!("tableswitch: invalid range low={low} high={high}"));
+                    }
                     let count = (high - low + 1) as usize;
                     let offsets: Vec<i32> = (0..count).map(|_| read_i32(code, &mut frame.pc)).collect();
                     let key = frame.stack.pop().unwrap().as_int();
@@ -729,9 +732,8 @@ impl Vm {
                 0xb4 => { // getfield
                     let idx = read_u16(code, &mut frame.pc);
                     let (_, gf_field_name, _) = resolve_fieldref(cp, idx);
-                    let obj_ref = frame.stack.pop().unwrap_or_else(|| {
-                        panic!("getfield {gf_field_name}: empty stack in {class_name}")
-                    });
+                    let obj_ref = frame.stack.pop()
+                        .ok_or_else(|| format!("getfield {gf_field_name}: empty stack in {class_name}"))?;
                     if matches!(obj_ref, JValue::Void) {
                         return Err(format!(
                             "getfield {gf_field_name}: expected Ref on stack, got Void in {class_name}"
@@ -893,7 +895,8 @@ impl Vm {
                     let idx = read_u16(code, &mut frame.pc);
                     let target_class = resolve_class_name(cp, idx);
                     // Peek at top of stack (don't pop — value stays if check passes).
-                    let obj = frame.stack.last().unwrap();
+                    let obj = frame.stack.last()
+                        .ok_or_else(|| "checkcast: empty stack".to_owned())?;
                     match obj.as_ref() {
                         None => {} // null passes checkcast
                         Some(r) => {
