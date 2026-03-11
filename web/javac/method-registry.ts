@@ -8,7 +8,7 @@ export interface MethodSig {
   isStatic?: boolean;
 }
 
-let knownMethods: Record<string, MethodSig> = {
+const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
   // Integer
   "java/lang/Integer.valueOf(I)": { owner: "java/lang/Integer", returnType: { className: "java/lang/Integer" }, paramTypes: ["int"], isStatic: true },
   "java/lang/Integer.toString()": { owner: "java/lang/Integer", returnType: "String", paramTypes: [] },
@@ -218,9 +218,16 @@ let knownMethods: Record<string, MethodSig> = {
   },
 };
 
+let knownMethods: Record<string, MethodSig> = { ...BASE_KNOWN_METHODS };
+
 /** Merge an externally-built method registry into the known methods table. */
 export function setMethodRegistry(reg: Record<string, MethodSig>): void {
-  knownMethods = { ...knownMethods, ...reg };
+  knownMethods = { ...BASE_KNOWN_METHODS, ...reg };
+}
+
+/** Reset the method registry to the built-in defaults (useful for test isolation). */
+export function resetMethodRegistry(): void {
+  knownMethods = { ...BASE_KNOWN_METHODS };
 }
 
 export interface FunctionalSig {
