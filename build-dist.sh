@@ -8,7 +8,7 @@
 set -euo pipefail
 
 DIST="dist"
-GCS_TARGET="${1:-}"   # e.g. gs://unit8-net/1
+GCS_TARGET="${1:-}"   # e.g. gs://mapper/bucket
 BUILD_TS="$(date +%s)"
 M2_REPO="${HOME}/.m2/repository"
 
@@ -102,7 +102,7 @@ echo "Total size: $(du -sh "$DIST" | cut -f1)"
 
 if [ -z "$GCS_TARGET" ]; then
   echo ""
-  echo "To deploy: ./build-dist.sh gs://unit8.net/199xVM"
+  echo "To deploy: ./build-dist.sh gs://mapper/bucket"
   exit 0
 fi
 
