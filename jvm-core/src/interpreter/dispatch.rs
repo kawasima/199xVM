@@ -166,8 +166,6 @@ impl Vm {
                 let captured = pop_args(frame, n_captured);
 
                 // Bootstrap argument 1 is the implementation MethodHandle.
-                // Resolve it to (class, method, descriptor) so the VM can invoke it later.
-                // Bootstrap argument 1 is the implementation MethodHandle.
                 // Resolve it to (ref_kind, class, method, descriptor).
                 let impl_info = bm.bootstrap_arguments.get(1).and_then(|&arg_idx| {
                     match cp.get(arg_idx as usize)? {
@@ -206,7 +204,7 @@ impl Vm {
                     }
                 });
 
-                let sam_desc = bm.bootstrap_arguments.get(0).and_then(|&arg_idx| {
+                let sam_desc = bm.bootstrap_arguments.first().and_then(|&arg_idx| {
                     match cp.get(arg_idx as usize)? {
                         ConstantPoolEntry::MethodType { descriptor_index } => {
                             match cp.get(*descriptor_index as usize)? {
