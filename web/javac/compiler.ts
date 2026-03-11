@@ -427,6 +427,10 @@ function isPrimitiveType(t: Type): boolean {
     || t === "float" || t === "double" || t === "boolean";
 }
 
+function isIntegralType(t: Type): boolean {
+  return t === "int" || t === "long" || t === "short" || t === "byte" || t === "char";
+}
+
 function sameType(a: Type, b: Type): boolean {
   if (a === b) return true;
   if (typeof a === "object" && typeof b === "object") {
@@ -595,9 +599,24 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
         if (lt === "long" || rt === "long") return "long";
         return "int"; // byte/short/char promote to int
       }
+      if (["<<", ">>", ">>>"].includes(expr.op)) {
+        const lt = inferType(ctx, expr.left);
+        return lt === "long" ? "long" : "int";
+      }
+      if (["&", "|", "^"].includes(expr.op)) {
+        const lt = inferType(ctx, expr.left);
+        const rt = inferType(ctx, expr.right);
+        if (lt === "boolean" && rt === "boolean") return "boolean";
+        if (lt === "long" || rt === "long") return "long";
+        return "int";
+      }
       return "boolean"; // comparison operators
     }
     case "unary": {
+      if (expr.op === "~") {
+        const t = inferType(ctx, expr.operand);
+        return t === "long" ? "long" : "int";
+      }
       if (expr.op === "!") return "boolean";
       const t = inferType(ctx, expr.operand);
       if (t === "double") return "double";
@@ -813,6 +832,16 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         break;
       }
 
+      // Boolean bitwise operators (non short-circuit)
+      if (["&", "|", "^"].includes(expr.op) && leftType === "boolean" && rightType === "boolean") {
+        compileExpr(ctx, emitter, expr.left);
+        compileExpr(ctx, emitter, expr.right);
+        if (expr.op === "&") emitter.emit(0x7e); // iand
+        else if (expr.op === "|") emitter.emit(0x80); // ior
+        else emitter.emit(0x82); // ixor
+        break;
+      }
+
       // Numeric promotion: determine the promoted type
       function promoteNumeric(a: Type, b: Type): Type {
         if (a === "double" || b === "double") return "double";
@@ -820,11 +849,24 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         if (a === "long" || b === "long") return "long";
         return "int";
       }
+      function promoteIntegral(a: Type, b: Type): Type {
+        return (a === "long" || b === "long") ? "long" : "int";
+      }
 
       // Type check for arithmetic operators
       if (["+", "-", "*", "/", "%"].includes(expr.op)) {
         if (!isPrimitiveType(leftType) || !isPrimitiveType(rightType) || leftType === "boolean" || rightType === "boolean") {
           throw new Error(`Operator '${expr.op}' requires numeric operands`);
+        }
+      }
+      if (["&", "|", "^"].includes(expr.op)) {
+        if (!isIntegralType(leftType) || !isIntegralType(rightType)) {
+          throw new Error(`Operator '${expr.op}' requires integral or boolean operands`);
+        }
+      }
+      if (["<<", ">>", ">>>"].includes(expr.op)) {
+        if (!isIntegralType(leftType) || !isIntegralType(rightType)) {
+          throw new Error(`Operator '${expr.op}' requires integral operands`);
         }
       }
       if (["<", ">", "<=", ">="].includes(expr.op)) {
@@ -849,7 +891,28 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       const promoted = (expr.op === "==" || expr.op === "!=")
         && (isRefType(leftType) || isRefType(rightType))
         ? leftType // ref compare, no promotion
+        : ["&", "|", "^"].includes(expr.op)
+          ? promoteIntegral(leftType, rightType)
         : promoteNumeric(leftType, rightType);
+
+      if (["<<", ">>", ">>>"].includes(expr.op)) {
+        const promotedLeft = leftType === "long" ? "long" : "int";
+        compileExpr(ctx, emitter, expr.left);
+        emitWideningConversion(emitter, leftType, promotedLeft);
+        compileExpr(ctx, emitter, expr.right);
+        emitWideningConversion(emitter, rightType, "int");
+        emitNarrowingConversion(emitter, rightType, "int");
+        if (promotedLeft === "long") {
+          if (expr.op === "<<") emitter.emit(0x79); // lshl
+          else if (expr.op === ">>") emitter.emit(0x7b); // lshr
+          else emitter.emit(0x7d); // lushr
+        } else {
+          if (expr.op === "<<") emitter.emit(0x78); // ishl
+          else if (expr.op === ">>") emitter.emit(0x7a); // ishr
+          else emitter.emit(0x7c); // iushr
+        }
+        break;
+      }
 
       // Emit operands with widening
       compileExpr(ctx, emitter, expr.left);
@@ -905,6 +968,9 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
           case "*": emitter.emit(0x69); break; // lmul
           case "/": emitter.emit(0x6d); break; // ldiv
           case "%": emitter.emit(0x71); break; // lrem
+          case "&": emitter.emit(0x7f); break; // land
+          case "|": emitter.emit(0x81); break; // lor
+          case "^": emitter.emit(0x83); break; // lxor
           case "==": case "!=": case "<": case ">": case "<=": case ">=": {
             emitter.emitPush(0x94); // lcmp → int
             const jumpOp = { "==": 0x9a, "!=": 0x99, "<": 0x9c, ">": 0x9e, "<=": 0x9d, ">=": 0x9b }[expr.op]!;
@@ -926,6 +992,9 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
           case "*": emitter.emit(0x68); break; // imul
           case "/": emitter.emit(0x6c); break; // idiv
           case "%": emitter.emit(0x70); break; // irem
+          case "&": emitter.emit(0x7e); break; // iand
+          case "|": emitter.emit(0x80); break; // ior
+          case "^": emitter.emit(0x82); break; // ixor
           case "==": case "!=": case "<": case ">": case "<=": case ">=": {
             const refCompare = (expr.op === "==" || expr.op === "!=")
               && (isRefType(leftType) || isRefType(rightType));
@@ -960,6 +1029,19 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         // XOR with 1
         emitter.emitIconst(1);
         emitter.emit(0x82); // ixor
+      }
+      if (expr.op === "~") {
+        if (!isIntegralType(operandType)) throw new Error("Unary '~' requires integral operand");
+        if (operandType === "long") {
+          emitter.emitLconst(-1, ctx.cp);
+          emitter.emit(0x83); // lxor
+        } else {
+          emitter.emitIconst(-1) || (() => {
+            const cpIdx = ctx.cp.addInteger(-1);
+            emitter.emitLdc(cpIdx);
+          })();
+          emitter.emit(0x82); // ixor
+        }
       }
       break;
     }

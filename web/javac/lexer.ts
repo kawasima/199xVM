@@ -85,9 +85,21 @@ export enum TokenKind {
   Ge = ">=",
   And = "&&",
   Or = "||",
+  BitAnd = "&",
+  BitOr = "|",
+  BitXor = "^",
+  BitNot = "~",
+  ShiftLeft = "<<",
   Not = "!",
   PlusAssign = "+=",
   MinusAssign = "-=",
+  StarAssign = "*=",
+  SlashAssign = "/=",
+  PercentAssign = "%=",
+  AndAssign = "&=",
+  OrAssign = "|=",
+  XorAssign = "^=",
+  ShiftLeftAssign = "<<=",
   PlusPlus = "++",
   MinusMinus = "--",
   Question = "?",
@@ -339,14 +351,23 @@ export function lex(source: string): Token[] {
 
     // Multi-char operators
     const two = pos + 1 < source.length ? ch + source[pos + 1] : "";
+    const three = pos + 2 < source.length ? ch + source[pos + 1] + source[pos + 2] : "";
+    if (three === "<<=") { advance(); advance(); advance(); tokens.push({ kind: TokenKind.ShiftLeftAssign, value: "<<=", line: startLine, col: startCol }); continue; }
     if (two === "==") { advance(); advance(); tokens.push({ kind: TokenKind.Eq, value: "==", line: startLine, col: startCol }); continue; }
     if (two === "!=") { advance(); advance(); tokens.push({ kind: TokenKind.Ne, value: "!=", line: startLine, col: startCol }); continue; }
     if (two === "<=") { advance(); advance(); tokens.push({ kind: TokenKind.Le, value: "<=", line: startLine, col: startCol }); continue; }
     if (two === ">=") { advance(); advance(); tokens.push({ kind: TokenKind.Ge, value: ">=", line: startLine, col: startCol }); continue; }
     if (two === "&&") { advance(); advance(); tokens.push({ kind: TokenKind.And, value: "&&", line: startLine, col: startCol }); continue; }
     if (two === "||") { advance(); advance(); tokens.push({ kind: TokenKind.Or, value: "||", line: startLine, col: startCol }); continue; }
+    if (two === "<<") { advance(); advance(); tokens.push({ kind: TokenKind.ShiftLeft, value: "<<", line: startLine, col: startCol }); continue; }
     if (two === "+=") { advance(); advance(); tokens.push({ kind: TokenKind.PlusAssign, value: "+=", line: startLine, col: startCol }); continue; }
     if (two === "-=") { advance(); advance(); tokens.push({ kind: TokenKind.MinusAssign, value: "-=", line: startLine, col: startCol }); continue; }
+    if (two === "*=") { advance(); advance(); tokens.push({ kind: TokenKind.StarAssign, value: "*=", line: startLine, col: startCol }); continue; }
+    if (two === "/=") { advance(); advance(); tokens.push({ kind: TokenKind.SlashAssign, value: "/=", line: startLine, col: startCol }); continue; }
+    if (two === "%=") { advance(); advance(); tokens.push({ kind: TokenKind.PercentAssign, value: "%=", line: startLine, col: startCol }); continue; }
+    if (two === "&=") { advance(); advance(); tokens.push({ kind: TokenKind.AndAssign, value: "&=", line: startLine, col: startCol }); continue; }
+    if (two === "|=") { advance(); advance(); tokens.push({ kind: TokenKind.OrAssign, value: "|=", line: startLine, col: startCol }); continue; }
+    if (two === "^=") { advance(); advance(); tokens.push({ kind: TokenKind.XorAssign, value: "^=", line: startLine, col: startCol }); continue; }
     if (two === "::") { advance(); advance(); tokens.push({ kind: TokenKind.ColonColon, value: "::", line: startLine, col: startCol }); continue; }
     if (two === "->") { advance(); advance(); tokens.push({ kind: TokenKind.Arrow, value: "->", line: startLine, col: startCol }); continue; }
     if (two === "++") { advance(); advance(); tokens.push({ kind: TokenKind.PlusPlus, value: "++", line: startLine, col: startCol }); continue; }
@@ -362,7 +383,7 @@ export function lex(source: string): Token[] {
       "+": TokenKind.Plus, "-": TokenKind.Minus,
       "*": TokenKind.Star, "/": TokenKind.Slash, "%": TokenKind.Percent,
       "=": TokenKind.Assign, "<": TokenKind.Lt, ">": TokenKind.Gt,
-      "!": TokenKind.Not,
+      "&": TokenKind.BitAnd, "|": TokenKind.BitOr, "^": TokenKind.BitXor, "~": TokenKind.BitNot, "!": TokenKind.Not,
       "?": TokenKind.Question, ":": TokenKind.Colon,
     };
 
