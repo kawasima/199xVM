@@ -9,13 +9,14 @@ set -euo pipefail
 
 DIST="dist"
 GCS_TARGET="${1:-}"   # e.g. gs://unit8-net/1
+BUILD_TS="$(date +%s)"
 
 echo "==> Cleaning $DIST/"
 rm -rf "$DIST"
 mkdir -p "$DIST/pkg" "$DIST/bundle"
 
 echo "==> Copying web assets..."
-cp web/index.html "$DIST/index.html"
+sed "s/__BUILD_TIMESTAMP__/${BUILD_TS}/g" web/index.html > "$DIST/index.html"
 cp web/javac.js   "$DIST/javac.js"
 
 echo "==> Copying WASM package..."

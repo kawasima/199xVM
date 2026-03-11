@@ -6,6 +6,7 @@
   "scripts": {
     "build:javac": "esbuild web/javac.ts --bundle --format=esm --outfile=web/javac.js --target=es2020",
     "watch:javac": "esbuild web/javac.ts --bundle --format=esm --outfile=web/javac.js --target=es2020 --watch",
+    "build:dist": "npm run build:javac && mkdir -p dist && cp web/javac.js dist/ && sed \"s/__BUILD_TIMESTAMP__/$(date +%s)/g\" web/index.html > dist/index.html",
     "test": "npm run build:javac && node --experimental-strip-types --test web/javac.test.ts"
   },
   "keywords": [],
