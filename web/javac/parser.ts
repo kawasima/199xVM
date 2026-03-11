@@ -131,10 +131,23 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     // Skip modifiers before class/record
     while (at(TokenKind.KwPublic) || at(TokenKind.KwAbstract) || at(TokenKind.KwFinal)) advance();
 
+    if (at(TokenKind.At) && tokens[pos + 1]?.kind === TokenKind.KwInterface) {
+      return parseAnnotationDecl();
+    }
+
+    if (at(TokenKind.KwInterface)) {
+      return parseInterfaceDecl();
+    }
+
+    if (at(TokenKind.KwEnum)) {
+      return parseEnumDecl();
+    }
+
     // record Foo(TypeA a, TypeB b) { ... }
     if (at(TokenKind.KwRecord)) {
       advance(); // consume 'record'
       const recordName = expect(TokenKind.Ident).value;
+      skipTypeParametersIfPresent();
       // Parse record components: (TypeA a, TypeB b, ...)
       expect(TokenKind.LParen);
       const components: ParamDecl[] = [];
@@ -147,8 +160,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       }
       expect(TokenKind.RParen);
       // Skip implements clause if present
+      const interfaces: string[] = [];
       if (match(TokenKind.KwImplements)) {
-        while (!at(TokenKind.LBrace) && !at(TokenKind.EOF)) advance();
+        interfaces.push(...parseTypeNameList());
       }
       expect(TokenKind.LBrace);
       const recordFields: FieldDecl[] = [];
@@ -156,7 +170,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       const recordNestedClasses: ClassDecl[] = [];
       // Parse any explicitly declared methods inside the record body
       while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
-        parseMember(recordFields, recordMethods, recordNestedClasses, recordName, true);
+        parseMember(recordFields, recordMethods, recordNestedClasses, recordName, "record");
       }
       expect(TokenKind.RBrace);
 
@@ -235,7 +249,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
       return {
         name: recordName,
+        kind: "class",
         superClass: "java/lang/Record",
+        interfaces,
         isRecord: true,
         recordComponents: components,
         fields: recordFields,
@@ -249,15 +265,15 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
     expect(TokenKind.KwClass);
     const className = expect(TokenKind.Ident).value;
+    skipTypeParametersIfPresent();
 
     let superClass = "java/lang/Object";
     if (match(TokenKind.KwExtends)) {
-      superClass = resolveDeclaredClassName(parseQualifiedName());
+      superClass = parseResolvedTypeName();
     }
-    // Skip implements
+    const interfaces: string[] = [];
     if (match(TokenKind.KwImplements)) {
-      parseQualifiedName();
-      while (match(TokenKind.Comma)) parseQualifiedName();
+      interfaces.push(...parseTypeNameList());
     }
 
     expect(TokenKind.LBrace);
@@ -267,13 +283,15 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     const nestedClasses: ClassDecl[] = [];
 
     while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
-      parseMember(fields, methods, nestedClasses, className, false);
+      parseMember(fields, methods, nestedClasses, className, "class");
     }
     expect(TokenKind.RBrace);
 
     return {
       name: className,
+      kind: "class",
       superClass,
+      interfaces,
       isRecord: false,
       recordComponents: [],
       fields,
@@ -285,14 +303,170 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     };
   }
 
-  function parseMember(fields: FieldDecl[], methods: MethodDecl[], nestedClasses: ClassDecl[], ownerName: string, inRecord: boolean) {
+  function parseInterfaceDecl(): ClassDecl {
+    expect(TokenKind.KwInterface);
+    const name = expect(TokenKind.Ident).value;
+    skipTypeParametersIfPresent();
+    const interfaces: string[] = [];
+    if (match(TokenKind.KwExtends)) {
+      interfaces.push(...parseTypeNameList());
+    }
+    expect(TokenKind.LBrace);
+    const fields: FieldDecl[] = [];
+    const methods: MethodDecl[] = [];
+    const nestedClasses: ClassDecl[] = [];
+    while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
+      parseMember(fields, methods, nestedClasses, name, "interface");
+    }
+    expect(TokenKind.RBrace);
+    return {
+      name,
+      kind: "interface",
+      superClass: "java/lang/Object",
+      interfaces,
+      fields,
+      methods,
+      nestedClasses,
+      importMap,
+      packageImports,
+      staticWildcardImports,
+    };
+  }
+
+  function parseAnnotationDecl(): ClassDecl {
+    expect(TokenKind.At);
+    expect(TokenKind.KwInterface);
+    const name = expect(TokenKind.Ident).value;
+    expect(TokenKind.LBrace);
+    const fields: FieldDecl[] = [];
+    const methods: MethodDecl[] = [];
+    const nestedClasses: ClassDecl[] = [];
+    while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
+      parseMember(fields, methods, nestedClasses, name, "annotation");
+    }
+    expect(TokenKind.RBrace);
+    return {
+      name,
+      kind: "annotation",
+      superClass: "java/lang/Object",
+      interfaces: ["java/lang/annotation/Annotation"],
+      fields,
+      methods,
+      nestedClasses,
+      importMap,
+      packageImports,
+      staticWildcardImports,
+    };
+  }
+
+  function parseEnumDecl(): ClassDecl {
+    expect(TokenKind.KwEnum);
+    const name = expect(TokenKind.Ident).value;
+    const interfaces: string[] = [];
+    if (match(TokenKind.KwImplements)) {
+      interfaces.push(...parseTypeNameList());
+    }
+    expect(TokenKind.LBrace);
+    const fields: FieldDecl[] = [];
+    const methods: MethodDecl[] = [];
+    const nestedClasses: ClassDecl[] = [];
+
+    while (!at(TokenKind.RBrace) && !at(TokenKind.Semi) && !at(TokenKind.EOF)) {
+      const constName = expect(TokenKind.Ident).value;
+      const args: Expr[] = [];
+      if (match(TokenKind.LParen)) {
+        if (!at(TokenKind.RParen)) {
+          do { args.push(parseExpr()); } while (match(TokenKind.Comma));
+        }
+        expect(TokenKind.RParen);
+      }
+      if (match(TokenKind.LBrace)) {
+        let depth = 1;
+        while (depth > 0 && !at(TokenKind.EOF)) {
+          if (match(TokenKind.LBrace)) depth++;
+          else if (match(TokenKind.RBrace)) depth--;
+          else advance();
+        }
+      }
+      fields.push({
+        name: constName,
+        type: { className: name },
+        isStatic: true,
+        isFinal: true,
+        initializer: { kind: "newExpr", className: name, args },
+      });
+      if (!match(TokenKind.Comma)) break;
+    }
+
+    if (match(TokenKind.Semi)) {
+      while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
+        parseMember(fields, methods, nestedClasses, name, "enum");
+      }
+    }
+
+    expect(TokenKind.RBrace);
+    return {
+      name,
+      kind: "enum",
+      superClass: "java/lang/Enum",
+      interfaces,
+      isRecord: false,
+      recordComponents: [],
+      fields,
+      methods,
+      nestedClasses,
+      importMap,
+      packageImports,
+      staticWildcardImports,
+    };
+  }
+
+  function parseResolvedTypeName(): string {
+    const name = parseQualifiedName();
+    skipTypeArgumentsIfPresent();
+    return resolveDeclaredClassName(name);
+  }
+
+  function parseTypeNameList(): string[] {
+    const out = [parseResolvedTypeName()];
+    while (match(TokenKind.Comma)) out.push(parseResolvedTypeName());
+    return out;
+  }
+
+  function skipTypeParametersIfPresent(): void {
+    if (!at(TokenKind.Lt)) return;
+    let depth = 1;
+    advance();
+    while (depth > 0 && !at(TokenKind.EOF)) {
+      if (at(TokenKind.Lt)) depth++;
+      if (at(TokenKind.Gt)) depth--;
+      advance();
+    }
+  }
+
+  function skipTypeArgumentsIfPresent(): void {
+    skipTypeParametersIfPresent();
+  }
+
+  function parseMember(
+    fields: FieldDecl[],
+    methods: MethodDecl[],
+    nestedClasses: ClassDecl[],
+    ownerName: string,
+    ownerKind: "class" | "record" | "interface" | "annotation" | "enum",
+  ) {
     let isStatic = false;
+    let isAbstract = ownerKind === "interface" || ownerKind === "annotation";
+    let isPrivate = false;
 
     // Consume modifiers
     while (true) {
-      if (at(TokenKind.KwPublic) || at(TokenKind.KwPrivate) || at(TokenKind.KwProtected)) { advance(); continue; }
+      if (at(TokenKind.KwPublic) || at(TokenKind.KwProtected)) { advance(); continue; }
+      if (at(TokenKind.KwPrivate)) { advance(); isPrivate = true; continue; }
       if (at(TokenKind.KwStatic)) { advance(); isStatic = true; continue; }
-      if (at(TokenKind.KwFinal) || at(TokenKind.KwAbstract)) { advance(); continue; }
+      if (at(TokenKind.KwAbstract)) { advance(); isAbstract = true; continue; }
+      if (at(TokenKind.KwFinal)) { advance(); continue; }
+      if (at(TokenKind.KwDefault)) { advance(); continue; }
       break;
     }
 
@@ -302,26 +476,28 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       const nestedName = expect(TokenKind.Ident).value;
       const mangledName = ownerName + "$" + nestedName;
       let nestedSuper = "java/lang/Object";
+      const nestedInterfaces: string[] = [];
       if (match(TokenKind.KwExtends)) {
-        nestedSuper = resolveDeclaredClassName(parseQualifiedName());
+        nestedSuper = parseResolvedTypeName();
       }
       if (match(TokenKind.KwImplements)) {
-        parseQualifiedName();
-        while (match(TokenKind.Comma)) parseQualifiedName();
+        nestedInterfaces.push(...parseTypeNameList());
       }
       expect(TokenKind.LBrace);
       const nf: FieldDecl[] = [];
       const nm: MethodDecl[] = [];
       const nnc: ClassDecl[] = [];
       while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
-        parseMember(nf, nm, nnc, mangledName, false);
+        parseMember(nf, nm, nnc, mangledName, "class");
       }
       expect(TokenKind.RBrace);
       // Register simple name so outer class can refer to "Inner" as "Outer$Inner"
       importMap.set(nestedName, mangledName);
       nestedClasses.push({
         name: mangledName,
+        kind: "class",
         superClass: nestedSuper,
+        interfaces: nestedInterfaces,
         isRecord: false,
         recordComponents: [],
         fields: nf,
@@ -338,7 +514,11 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     // Detected by lookahead: current token is Ident and next is '('
     // For nested classes, match either the mangled name (Outer$Inner) or the simple name (Inner).
     const simpleOwnerName = ownerName.includes("$") ? ownerName.slice(ownerName.lastIndexOf("$") + 1) : ownerName;
-    if (at(TokenKind.Ident) && tokens[pos + 1]?.kind === TokenKind.LParen && (peek().value === ownerName || peek().value === simpleOwnerName)) {
+    skipTypeParametersIfPresent();
+    if ((ownerKind === "class" || ownerKind === "record" || ownerKind === "enum")
+        && at(TokenKind.Ident)
+        && tokens[pos + 1]?.kind === TokenKind.LParen
+        && (peek().value === ownerName || peek().value === simpleOwnerName)) {
       advance(); // constructor name
       expect(TokenKind.LParen);
       const params: ParamDecl[] = [];
@@ -351,6 +531,10 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       }
       expect(TokenKind.RParen);
       parseOptionalThrowsClause();
+      if (match(TokenKind.Semi)) {
+        methods.push({ name: "<init>", returnType: "void", params, body: [], isStatic: false, isAbstract: true });
+        return;
+      }
       expect(TokenKind.LBrace);
       const body = parseBlock();
       expect(TokenKind.RBrace);
@@ -374,10 +558,21 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       }
       expect(TokenKind.RParen);
       parseOptionalThrowsClause();
-      expect(TokenKind.LBrace);
-      const body = parseBlock();
-      expect(TokenKind.RBrace);
-      methods.push({ name, returnType: retType, params, body, isStatic });
+      if (ownerKind === "annotation" && at(TokenKind.KwDefault)) {
+        advance(); // default
+        parseExpr(); // ignore default value for now
+        expect(TokenKind.Semi);
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: true });
+        return;
+      }
+      if (match(TokenKind.Semi)) {
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: true });
+      } else {
+        expect(TokenKind.LBrace);
+        const body = parseBlock();
+        expect(TokenKind.RBrace);
+        methods.push({ name, returnType: retType, params, body, isStatic, isAbstract: false });
+      }
     } else {
       // Field
       let init: Expr | undefined;
@@ -385,7 +580,16 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         init = parseExpr();
       }
       expect(TokenKind.Semi);
-      fields.push({ name, type: retType, isStatic, initializer: init, isPrivate: inRecord && !isStatic, isFinal: inRecord && !isStatic });
+      const inRecord = ownerKind === "record";
+      const inInterfaceLike = ownerKind === "interface" || ownerKind === "annotation";
+      fields.push({
+        name,
+        type: retType,
+        isStatic: inInterfaceLike || isStatic,
+        initializer: init,
+        isPrivate: inRecord && !isStatic ? true : isPrivate,
+        isFinal: inRecord && !isStatic ? true : inInterfaceLike ? true : undefined,
+      });
     }
   }
 

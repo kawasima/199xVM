@@ -2798,9 +2798,10 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   const thisClassIdx = cp.addClass(classDecl.name);
   const superClassIdx = cp.addClass(classDecl.superClass);
 
-  // Add default constructor if none exists
+  const isInterfaceLike = classDecl.kind === "interface" || classDecl.kind === "annotation";
+  // Add default constructor if none exists (not for interfaces/annotations)
   const hasInit = classDecl.methods.some(m => m.name === "<init>");
-  if (!hasInit) {
+  if (!isInterfaceLike && !hasInit) {
     classDecl.methods.unshift({
       name: "<init>",
       returnType: "void",
@@ -2815,9 +2816,10 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     nameIdx: number;
     descIdx: number;
     accessFlags: number;
-    code: number[];
-    maxStack: number;
-    maxLocals: number;
+    code?: number[];
+    maxStack?: number;
+    maxLocals?: number;
+    hasCode: boolean;
     exceptionTable?: { startPc: number; endPc: number; handlerPc: number; catchType: number }[];
   }[] = [];
 
@@ -2825,15 +2827,20 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   let generatedDrain = 0;
   for (let mi = 0; mi < methodQueue.length; mi++) {
     const method = methodQueue[mi];
-    validateConstructorBody(method);
+    if (method.name === "<init>") validateConstructorBody(method);
     const nameIdx = cp.addUtf8(method.name);
     const desc = methodDescriptor(method.params, method.returnType);
     const descIdx = cp.addUtf8(desc);
 
     let accessFlags = 0x0001; // ACC_PUBLIC
+    if (method.name === "<init>" && classDecl.kind === "enum") accessFlags = 0x0002; // ACC_PRIVATE
     if (method.isStatic) accessFlags |= 0x0008; // ACC_STATIC
+    const methodIsAbstract = method.name !== "<init>" && !!method.isAbstract;
+    if (methodIsAbstract) accessFlags |= 0x0400; // ACC_ABSTRACT
 
-    if (method.name === "<init>") {
+    if (methodIsAbstract) {
+      compiledMethods.push({ nameIdx, descIdx, accessFlags, hasCode: false });
+    } else if (method.name === "<init>") {
       const emitter = new BytecodeEmitter();
       // If the constructor body starts with super(args), it will emit its own invokespecial.
       // Otherwise emit a default super() call.
@@ -2885,6 +2892,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       emitter.emit(0xb1); // return
       compiledMethods.push({
         nameIdx, descIdx, accessFlags,
+        hasCode: true,
         code: emitter.code,
         maxStack: Math.max(emitter.maxStack, 4),
         maxLocals: Math.max(emitter.maxLocals, method.params.length + 1),
@@ -2898,6 +2906,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       );
       compiledMethods.push({
         nameIdx, descIdx, accessFlags,
+        hasCode: true,
         code: result.code,
         maxStack: result.maxStack,
         maxLocals: result.maxLocals,
@@ -2962,15 +2971,23 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   // Constant pool
   out.push(...cp.serialize());
 
-  // Access flags: ACC_PUBLIC | ACC_SUPER
-  const classFlags = classDecl.isRecord ? 0x0031 : 0x0021; // record classes are final
+  // Access flags
+  let classFlags: number;
+  if (classDecl.kind === "annotation") classFlags = 0x2601; // PUBLIC | INTERFACE | ABSTRACT | ANNOTATION
+  else if (classDecl.kind === "interface") classFlags = 0x0601; // PUBLIC | INTERFACE | ABSTRACT
+  else if (classDecl.kind === "enum") classFlags = 0x4031; // PUBLIC | SUPER | FINAL | ENUM
+  else classFlags = classDecl.isRecord ? 0x0031 : 0x0021; // record classes are final
   out.push((classFlags >> 8) & 0xff, classFlags & 0xff);
   // this_class
   out.push((thisClassIdx >> 8) & 0xff, thisClassIdx & 0xff);
   // super_class
   out.push((superClassIdx >> 8) & 0xff, superClassIdx & 0xff);
   // interfaces_count
-  out.push(0x00, 0x00);
+  const ifaceIndexes = (classDecl.interfaces ?? []).map(i => cp.addClass(i));
+  out.push((ifaceIndexes.length >> 8) & 0xff, ifaceIndexes.length & 0xff);
+  for (const ii of ifaceIndexes) {
+    out.push((ii >> 8) & 0xff, ii & 0xff);
+  }
 
   // fields_count
   out.push((compiledFields.length >> 8) & 0xff, compiledFields.length & 0xff);
@@ -2987,29 +3004,30 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     out.push((m.accessFlags >> 8) & 0xff, m.accessFlags & 0xff);
     out.push((m.nameIdx >> 8) & 0xff, m.nameIdx & 0xff);
     out.push((m.descIdx >> 8) & 0xff, m.descIdx & 0xff);
-    // 1 attribute: Code
-    out.push(0x00, 0x01);
-
-    // Code attribute
-    out.push((codeAttrName >> 8) & 0xff, codeAttrName & 0xff);
-    const codeLen = m.code.length;
-    const exTblLen = m.exceptionTable ? m.exceptionTable.length : 0;
-    const attrLen = 2 + 2 + 4 + codeLen + 2 + exTblLen * 8 + 2; // max_stack + max_locals + code_length + code + exception_table + attributes_count
-    out.push((attrLen >> 24) & 0xff, (attrLen >> 16) & 0xff, (attrLen >> 8) & 0xff, attrLen & 0xff);
-    out.push((m.maxStack >> 8) & 0xff, m.maxStack & 0xff);
-    out.push((m.maxLocals >> 8) & 0xff, m.maxLocals & 0xff);
-    out.push((codeLen >> 24) & 0xff, (codeLen >> 16) & 0xff, (codeLen >> 8) & 0xff, codeLen & 0xff);
-    out.push(...m.code);
-    out.push((exTblLen >> 8) & 0xff, exTblLen & 0xff);
-    if (m.exceptionTable) {
-      for (const e of m.exceptionTable) {
-        out.push((e.startPc >> 8) & 0xff, e.startPc & 0xff);
-        out.push((e.endPc >> 8) & 0xff, e.endPc & 0xff);
-        out.push((e.handlerPc >> 8) & 0xff, e.handlerPc & 0xff);
-        out.push((e.catchType >> 8) & 0xff, e.catchType & 0xff);
+    if (!m.hasCode) {
+      out.push(0x00, 0x00); // attributes_count = 0
+    } else {
+      out.push(0x00, 0x01); // attributes_count = 1 (Code)
+      out.push((codeAttrName >> 8) & 0xff, codeAttrName & 0xff);
+      const codeLen = m.code!.length;
+      const exTblLen = m.exceptionTable ? m.exceptionTable.length : 0;
+      const attrLen = 2 + 2 + 4 + codeLen + 2 + exTblLen * 8 + 2; // max_stack + max_locals + code_length + code + exception_table + attributes_count
+      out.push((attrLen >> 24) & 0xff, (attrLen >> 16) & 0xff, (attrLen >> 8) & 0xff, attrLen & 0xff);
+      out.push(((m.maxStack ?? 0) >> 8) & 0xff, (m.maxStack ?? 0) & 0xff);
+      out.push(((m.maxLocals ?? 0) >> 8) & 0xff, (m.maxLocals ?? 0) & 0xff);
+      out.push((codeLen >> 24) & 0xff, (codeLen >> 16) & 0xff, (codeLen >> 8) & 0xff, codeLen & 0xff);
+      out.push(...m.code!);
+      out.push((exTblLen >> 8) & 0xff, exTblLen & 0xff);
+      if (m.exceptionTable) {
+        for (const e of m.exceptionTable) {
+          out.push((e.startPc >> 8) & 0xff, e.startPc & 0xff);
+          out.push((e.endPc >> 8) & 0xff, e.endPc & 0xff);
+          out.push((e.handlerPc >> 8) & 0xff, e.handlerPc & 0xff);
+          out.push((e.catchType >> 8) & 0xff, e.catchType & 0xff);
+        }
       }
+      out.push(0x00, 0x00); // attributes_count = 0
     }
-    out.push(0x00, 0x00); // attributes_count = 0
   }
 
   // class attributes

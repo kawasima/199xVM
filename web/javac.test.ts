@@ -555,6 +555,48 @@ describe("Parser", () => {
     const cls = parse(lex(src));
     assert.equal(cls.isRecord, true);
   });
+
+  test("interface declaration parses", () => {
+    const src = `public interface Named extends java.io.Serializable {
+      String name();
+      default String label() { return name(); }
+      static String kind() { return "iface"; }
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.kind, "interface");
+    assert.ok((cls.interfaces ?? []).includes("java/io/Serializable"));
+    assert.ok(cls.methods.some(m => m.name === "name" && m.isAbstract));
+    assert.ok(cls.methods.some(m => m.name === "label" && !m.isAbstract));
+  });
+
+  test("enum declaration parses", () => {
+    const src = `public enum Color { RED, GREEN, BLUE; }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.kind, "enum");
+    assert.equal(cls.fields.length, 3);
+    assert.equal(cls.fields[0].name, "RED");
+    assert.equal(cls.superClass, "java/lang/Enum");
+  });
+
+  test("annotation declaration parses", () => {
+    const src = `public @interface Info {
+      String value() default "x";
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.kind, "annotation");
+    assert.ok((cls.interfaces ?? []).includes("java/lang/annotation/Annotation"));
+    assert.ok(cls.methods.some(m => m.name === "value" && m.isAbstract));
+  });
+
+  test("generic class declaration with implements parses", () => {
+    const src = `public class Box<T> implements java.io.Serializable {
+      T value;
+      public T get() { return value; }
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.name, "Box");
+    assert.ok((cls.interfaces ?? []).includes("java/io/Serializable"));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -793,6 +835,44 @@ describe("Code generator", () => {
     assertValidClassFile(bytes);
     const text = new TextDecoder().decode(bytes);
     assert.ok(text.includes("net/unit8/raoh/Ok"), "Ok class in constant pool");
+  });
+
+  test("compiles interface class file flags", () => {
+    const bytes = compile(`public interface Named {
+      String name();
+      default String label() { return name(); }
+    }`);
+    assertValidClassFile(bytes);
+    const meta = parseClassMeta(bytes);
+    assert.ok((meta.accessFlags & 0x0200) !== 0, "ACC_INTERFACE");
+    assert.ok((meta.accessFlags & 0x0400) !== 0, "ACC_ABSTRACT");
+  });
+
+  test("compiles annotation class file flags", () => {
+    const bytes = compile(`public @interface Info {
+      String value() default "x";
+    }`);
+    assertValidClassFile(bytes);
+    const meta = parseClassMeta(bytes);
+    assert.ok((meta.accessFlags & 0x2000) !== 0, "ACC_ANNOTATION");
+    assert.ok((meta.accessFlags & 0x0200) !== 0, "ACC_INTERFACE");
+  });
+
+  test("compiles enum class file flags", () => {
+    const bytes = compile(`public enum Color { RED, GREEN; }`);
+    assertValidClassFile(bytes);
+    const meta = parseClassMeta(bytes);
+    assert.ok((meta.accessFlags & 0x4000) !== 0, "ACC_ENUM");
+    assert.equal(meta.superClass, "java/lang/Enum");
+  });
+
+  test("compiles generic class declaration with implements", () => {
+    const bytes = compile(`public class Box<T> implements java.io.Serializable {
+      T value;
+      public T get() { return value; }
+      public static String run() { return "ok"; }
+    }`);
+    assertValidClassFile(bytes);
   });
 
   test("record declaration generates fields and accessor methods", () => {

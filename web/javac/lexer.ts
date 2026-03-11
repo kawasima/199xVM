@@ -48,6 +48,8 @@ export enum TokenKind {
   KwVar = "var",
   KwInstanceof = "instanceof",
   KwRecord = "record",
+  KwInterface = "interface",
+  KwEnum = "enum",
   KwDo = "do",
   KwThrow = "throw",
   KwTry = "try",
@@ -66,6 +68,7 @@ export enum TokenKind {
   Semi = ";",
   Comma = ",",
   Dot = ".",
+  At = "@",
 
   // Operators
   Plus = "+",
@@ -167,6 +170,8 @@ const KEYWORDS: Record<string, TokenKind> = {
   var: TokenKind.KwVar,
   instanceof: TokenKind.KwInstanceof,
   record: TokenKind.KwRecord,
+  interface: TokenKind.KwInterface,
+  enum: TokenKind.KwEnum,
   do: TokenKind.KwDo,
   throw: TokenKind.KwThrow,
   try: TokenKind.KwTry,
@@ -353,6 +358,7 @@ export function lex(source: string): Token[] {
       "{": TokenKind.LBrace, "}": TokenKind.RBrace,
       "[": TokenKind.LBracket, "]": TokenKind.RBracket,
       ";": TokenKind.Semi, ",": TokenKind.Comma, ".": TokenKind.Dot,
+      "@": TokenKind.At,
       "+": TokenKind.Plus, "-": TokenKind.Minus,
       "*": TokenKind.Star, "/": TokenKind.Slash, "%": TokenKind.Percent,
       "=": TokenKind.Assign, "<": TokenKind.Lt, ">": TokenKind.Gt,
