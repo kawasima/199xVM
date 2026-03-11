@@ -2797,6 +2797,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   // Reserve this_class and super_class
   const thisClassIdx = cp.addClass(classDecl.name);
   const superClassIdx = cp.addClass(classDecl.superClass);
+  const ifaceIndexes = (classDecl.interfaces ?? []).map(i => cp.addClass(i));
 
   const isInterfaceLike = classDecl.kind === "interface" || classDecl.kind === "annotation";
   // Add default constructor if none exists (not for interfaces/annotations)
@@ -2827,7 +2828,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   let generatedDrain = 0;
   for (let mi = 0; mi < methodQueue.length; mi++) {
     const method = methodQueue[mi];
-    if (method.name === "<init>") validateConstructorBody(method);
+    validateConstructorBody(method);
     const nameIdx = cp.addUtf8(method.name);
     const desc = methodDescriptor(method.params, method.returnType);
     const descIdx = cp.addUtf8(desc);
@@ -2972,18 +2973,22 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   out.push(...cp.serialize());
 
   // Access flags
+  const hasAbstractMethods = classDecl.methods.some(m => !!m.isAbstract);
   let classFlags: number;
   if (classDecl.kind === "annotation") classFlags = 0x2601; // PUBLIC | INTERFACE | ABSTRACT | ANNOTATION
   else if (classDecl.kind === "interface") classFlags = 0x0601; // PUBLIC | INTERFACE | ABSTRACT
   else if (classDecl.kind === "enum") classFlags = 0x4031; // PUBLIC | SUPER | FINAL | ENUM
   else classFlags = classDecl.isRecord ? 0x0031 : 0x0021; // record classes are final
+  if (hasAbstractMethods && classDecl.kind !== "interface" && classDecl.kind !== "annotation") {
+    classFlags &= ~0x0010; // clear FINAL
+    classFlags |= 0x0400;  // set ABSTRACT
+  }
   out.push((classFlags >> 8) & 0xff, classFlags & 0xff);
   // this_class
   out.push((thisClassIdx >> 8) & 0xff, thisClassIdx & 0xff);
   // super_class
   out.push((superClassIdx >> 8) & 0xff, superClassIdx & 0xff);
   // interfaces_count
-  const ifaceIndexes = (classDecl.interfaces ?? []).map(i => cp.addClass(i));
   out.push((ifaceIndexes.length >> 8) & 0xff, ifaceIndexes.length & 0xff);
   for (const ii of ifaceIndexes) {
     out.push((ii >> 8) & 0xff, ii & 0xff);

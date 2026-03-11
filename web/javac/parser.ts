@@ -531,10 +531,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       }
       expect(TokenKind.RParen);
       parseOptionalThrowsClause();
-      if (match(TokenKind.Semi)) {
-        methods.push({ name: "<init>", returnType: "void", params, body: [], isStatic: false, isAbstract: true });
-        return;
-      }
+      if (match(TokenKind.Semi)) throw new Error("constructor declaration cannot end with ';'");
       expect(TokenKind.LBrace);
       const body = parseBlock();
       expect(TokenKind.RBrace);
@@ -587,7 +584,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         type: retType,
         isStatic: inInterfaceLike || isStatic,
         initializer: init,
-        isPrivate: inRecord && !isStatic ? true : isPrivate,
+        isPrivate: inInterfaceLike ? false : inRecord && !isStatic ? true : isPrivate,
         isFinal: inRecord && !isStatic ? true : inInterfaceLike ? true : undefined,
       });
     }

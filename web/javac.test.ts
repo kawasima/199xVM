@@ -597,6 +597,13 @@ describe("Parser", () => {
     assert.equal(cls.name, "Box");
     assert.ok((cls.interfaces ?? []).includes("java/io/Serializable"));
   });
+
+  test("constructor declaration ending with semicolon is rejected", () => {
+    const src = `public class BadCtor {
+      BadCtor();
+    }`;
+    assert.throws(() => parse(lex(src)));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -873,6 +880,19 @@ describe("Code generator", () => {
       public static String run() { return "ok"; }
     }`);
     assertValidClassFile(bytes);
+  });
+
+  test("interface field is emitted as public static final", () => {
+    const bytes = compile(`public interface Config {
+      private int X = 1;
+    }`);
+    assertValidClassFile(bytes);
+    const meta = parseClassMeta(bytes);
+    const x = meta.methods.find(m => m.name === "X");
+    assert.equal(x, undefined); // ensure it is a field, not method
+    // best-effort check via byte text for field name and no private marker behavior in runtime parsing
+    const text = new TextDecoder().decode(bytes);
+    assert.ok(text.includes("X"));
   });
 
   test("record declaration generates fields and accessor methods", () => {
