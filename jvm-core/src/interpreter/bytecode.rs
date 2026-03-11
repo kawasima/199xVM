@@ -55,21 +55,24 @@ impl Vm {
         throw_pc: usize,
         err_msg: &str,
     ) -> Option<(usize, JValue)> {
-        // Extract exception class name from error message if it matches our format.
-        let exc_class = if let Some(rest) = err_msg.strip_prefix("Exception: ") {
+        // Extract exception class name from error message.
+        // Preferred format: "java/lang/SomeException: message" — extract the class name directly.
+        let exc_class = if err_msg.starts_with("java/") || err_msg.starts_with("javax/") {
+            err_msg.split(':').next().unwrap_or(err_msg).trim()
+        } else if let Some(rest) = err_msg.strip_prefix("Exception: ") {
             rest.split(':').next().unwrap_or(rest).trim()
         } else if err_msg.starts_with("NullPointerException") {
             "java/lang/NullPointerException"
         } else if err_msg.starts_with("ClassCastException") {
             "java/lang/ClassCastException"
-        } else if err_msg.contains("IndexOutOfBoundsException") {
-            "java/lang/IndexOutOfBoundsException"
         } else if err_msg.contains("ArithmeticException") {
             "java/lang/ArithmeticException"
         } else if err_msg.contains("StackOverflowError") {
             "java/lang/StackOverflowError"
         } else if err_msg.starts_with("UnsupportedOperationException") {
             "java/lang/UnsupportedOperationException"
+        } else if err_msg.contains("IndexOutOfBoundsException") {
+            "java/lang/IndexOutOfBoundsException"
         } else {
             // Last resort: treat any error as java/lang/RuntimeException so
             // catch(Exception e) / catch-all can still handle it.
@@ -192,13 +195,17 @@ impl Vm {
 
                 // ---- Array loads ----
                 0x32 => { // aaload
-                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
+                    if idx_i < 0 {
+                        return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                    }
+                    let idx = idx_i as usize;
                     if let Some(r) = arr_ref.as_ref() {
                         let elem = match &r.borrow().native {
                             NativePayload::Array(v) => match v.get(idx) {
                                 Some(e) => e.clone(),
-                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx} out of bounds")),
+                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds")),
                             },
                             _ => JValue::Ref(None),
                         };
@@ -208,17 +215,21 @@ impl Vm {
                     }
                 }
                 0x33 => { // baload
-                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
+                    if idx_i < 0 {
+                        return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                    }
+                    let idx = idx_i as usize;
                     if let Some(r) = arr_ref.as_ref() {
                         let elem = match &r.borrow().native {
                             NativePayload::ByteArray(v) => match v.get(idx) {
                                 Some(b) => JValue::Int(*b as i32),
-                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx} out of bounds")),
+                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds")),
                             },
                             NativePayload::Array(v) => match v.get(idx) {
                                 Some(x) => JValue::Int(x.as_int() as i8 as i32),
-                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx} out of bounds")),
+                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds")),
                             },
                             _ => JValue::Int(0),
                         };
@@ -228,17 +239,21 @@ impl Vm {
                     }
                 }
                 0x2e => { // iaload
-                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
+                    if idx_i < 0 {
+                        return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                    }
+                    let idx = idx_i as usize;
                     if let Some(r) = arr_ref.as_ref() {
                         let elem = match &r.borrow().native {
                             NativePayload::IntArray(v) => match v.get(idx) {
                                 Some(val) => JValue::Int(*val),
-                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx} out of bounds")),
+                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds")),
                             },
                             NativePayload::Array(v) => match v.get(idx) {
                                 Some(val) => val.clone(),
-                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx} out of bounds")),
+                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds")),
                             },
                             _ => JValue::Int(0),
                         };
@@ -248,21 +263,25 @@ impl Vm {
                     }
                 }
                 0x2f | 0x30 | 0x31 | 0x35 => { // laload, faload, daload, saload
-                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
+                    if idx_i < 0 {
+                        return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                    }
+                    let idx = idx_i as usize;
                     if let Some(r) = arr_ref.as_ref() {
                         let elem = match &r.borrow().native {
                             NativePayload::Array(v) => match v.get(idx) {
                                 Some(val) => val.clone(),
-                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx} out of bounds")),
+                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds")),
                             },
                             NativePayload::LongArray(v) => match v.get(idx) {
                                 Some(val) => JValue::Long(*val),
-                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx} out of bounds")),
+                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds")),
                             },
                             NativePayload::IntArray(v) => match v.get(idx) {
                                 Some(val) => JValue::Int(*val),
-                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx} out of bounds")),
+                                None => return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds")),
                             },
                             _ => JValue::Int(0),
                         };
@@ -288,11 +307,17 @@ impl Vm {
                 // ---- Array stores ----
                 0x53 => { // aastore
                     let val = frame.stack.pop().unwrap();
-                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
+                    if idx_i < 0 {
+                        return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                    }
+                    let idx = idx_i as usize;
                     if let Some(r) = arr_ref.as_ref() {
                         if let NativePayload::Array(ref mut v) = r.borrow_mut().native {
-                            while v.len() <= idx { v.push(JValue::Ref(None)); }
+                            if idx >= v.len() {
+                                return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                            }
                             v[idx] = val;
                         }
                     }
@@ -300,16 +325,25 @@ impl Vm {
 
                 0x4f => { // iastore
                     let val = frame.stack.pop().unwrap();
-                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
+                    if idx_i < 0 {
+                        return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                    }
+                    let idx = idx_i as usize;
                     if let Some(r) = arr_ref.as_ref() {
                         match r.borrow_mut().native {
                             NativePayload::Array(ref mut v) => {
-                                while v.len() <= idx { v.push(JValue::Int(0)); }
+                                if idx >= v.len() {
+                                    return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                                }
                                 v[idx] = val;
                             }
                             NativePayload::IntArray(ref mut v) => {
-                                if idx < v.len() { v[idx] = val.as_int(); }
+                                if idx >= v.len() {
+                                    return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                                }
+                                v[idx] = val.as_int();
                             }
                             _ => {}
                         }
@@ -317,27 +351,42 @@ impl Vm {
                 }
                 0x55 => { // castore (char array store — treated same as iastore)
                     let val = frame.stack.pop().unwrap();
-                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
+                    if idx_i < 0 {
+                        return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                    }
+                    let idx = idx_i as usize;
                     if let Some(r) = arr_ref.as_ref() {
                         if let NativePayload::Array(ref mut v) = r.borrow_mut().native {
-                            while v.len() <= idx { v.push(JValue::Int(0)); }
+                            if idx >= v.len() {
+                                return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                            }
                             v[idx] = val;
                         }
                     }
                 }
                 0x50 | 0x51 | 0x52 | 0x56 => { // lastore, fastore, dastore, sastore
                     let val = frame.stack.pop().unwrap();
-                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
+                    if idx_i < 0 {
+                        return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                    }
+                    let idx = idx_i as usize;
                     if let Some(r) = arr_ref.as_ref() {
                         match r.borrow_mut().native {
                             NativePayload::Array(ref mut v) => {
-                                while v.len() <= idx { v.push(JValue::Int(0)); }
+                                if idx >= v.len() {
+                                    return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                                }
                                 v[idx] = val;
                             }
                             NativePayload::LongArray(ref mut v) => {
-                                if idx < v.len() { v[idx] = val.as_long(); }
+                                if idx >= v.len() {
+                                    return Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"));
+                                }
+                                v[idx] = val.as_long();
                             }
                             _ => {}
                         }

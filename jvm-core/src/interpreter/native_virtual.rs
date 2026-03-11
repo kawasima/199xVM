@@ -1011,18 +1011,22 @@ impl super::Vm {
             }
             ("java/lang/String", "indexOf") => {
                 let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                // fromIndex (char-index): default 0
+                let from_char = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                // Convert from_char to byte offset for slicing
+                let from_byte = s.char_indices().nth(from_char).map(|(b, _)| b).unwrap_or(s.len());
+                let search_str = &s[from_byte..];
                 let idx = match _args.first() {
                     Some(JValue::Ref(Some(r))) => {
                         let needle = r.borrow().as_java_string().unwrap_or("").to_owned();
-                        // Return char-index, not byte-index
-                        s.find(needle.as_str()).map(|byte_pos| {
-                            s[..byte_pos].chars().count() as i32
+                        search_str.find(needle.as_str()).map(|byte_pos| {
+                            (s[..from_byte + byte_pos].chars().count()) as i32
                         }).unwrap_or(-1)
                     }
                     Some(JValue::Int(ch)) => {
                         let c = char::from_u32(*ch as u32).unwrap_or('\0');
-                        s.find(c).map(|byte_pos| {
-                            s[..byte_pos].chars().count() as i32
+                        search_str.find(c).map(|byte_pos| {
+                            (s[..from_byte + byte_pos].chars().count()) as i32
                         }).unwrap_or(-1)
                     }
                     _ => -1,
@@ -1031,16 +1035,22 @@ impl super::Vm {
             }
             ("java/lang/String", "lastIndexOf") => {
                 let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                // fromIndex (char-index): default = end of string
+                let char_len = s.chars().count();
+                let from_char = _args.get(1).map(|v| (v.as_int() as usize).min(char_len)).unwrap_or(char_len);
+                // Convert from_char to byte offset for slicing (search up to from_char+1)
+                let from_byte = s.char_indices().nth(from_char).map(|(b, _)| b).unwrap_or(s.len());
+                let search_str = &s[..from_byte];
                 let idx = match _args.first() {
                     Some(JValue::Ref(Some(r))) => {
                         let needle = r.borrow().as_java_string().unwrap_or("").to_owned();
-                        s.rfind(needle.as_str()).map(|byte_pos| {
+                        search_str.rfind(needle.as_str()).map(|byte_pos| {
                             s[..byte_pos].chars().count() as i32
                         }).unwrap_or(-1)
                     }
                     Some(JValue::Int(ch)) => {
                         let c = char::from_u32(*ch as u32).unwrap_or('\0');
-                        s.rfind(c).map(|byte_pos| {
+                        search_str.rfind(c).map(|byte_pos| {
                             s[..byte_pos].chars().count() as i32
                         }).unwrap_or(-1)
                     }
@@ -1127,19 +1137,54 @@ impl super::Vm {
                 let dest_pos = _args.get(3).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
                 let length = _args.get(4).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
                 if let (Some(src), Some(dest)) = (src_ref, dest_ref) {
-                    let src_elems: Vec<JValue> = if let NativePayload::Array(v) = &src.borrow().native {
-                        let end = (src_pos + length).min(v.len());
-                        v[src_pos.min(v.len())..end].to_vec()
-                    } else {
-                        vec![]
+                    // Extract source elements first to avoid simultaneous borrow
+                    // (src and dest may alias the same object in degenerate cases).
+                    enum Copied { Ref(Vec<JValue>), Byte(Vec<u8>), Int(Vec<i32>), Long(Vec<i64>) }
+                    let copied = match &src.borrow().native {
+                        NativePayload::Array(v) => {
+                            let end = (src_pos + length).min(v.len());
+                            Copied::Ref(v[src_pos.min(v.len())..end].to_vec())
+                        }
+                        NativePayload::ByteArray(v) => {
+                            let end = (src_pos + length).min(v.len());
+                            Copied::Byte(v[src_pos.min(v.len())..end].to_vec())
+                        }
+                        NativePayload::IntArray(v) => {
+                            let end = (src_pos + length).min(v.len());
+                            Copied::Int(v[src_pos.min(v.len())..end].to_vec())
+                        }
+                        NativePayload::LongArray(v) => {
+                            let end = (src_pos + length).min(v.len());
+                            Copied::Long(v[src_pos.min(v.len())..end].to_vec())
+                        }
+                        _ => Copied::Ref(vec![]),
                     };
-                    if let NativePayload::Array(v) = &mut dest.borrow_mut().native {
-                        for (i, elem) in src_elems.into_iter().enumerate() {
-                            let di = dest_pos + i;
-                            if di < v.len() {
-                                v[di] = elem;
+                    match (copied, &mut dest.borrow_mut().native) {
+                        (Copied::Ref(elems), NativePayload::Array(dv)) => {
+                            for (i, elem) in elems.into_iter().enumerate() {
+                                let di = dest_pos + i;
+                                if di < dv.len() { dv[di] = elem; }
                             }
                         }
+                        (Copied::Byte(elems), NativePayload::ByteArray(dv)) => {
+                            for (i, elem) in elems.into_iter().enumerate() {
+                                let di = dest_pos + i;
+                                if di < dv.len() { dv[di] = elem; }
+                            }
+                        }
+                        (Copied::Int(elems), NativePayload::IntArray(dv)) => {
+                            for (i, elem) in elems.into_iter().enumerate() {
+                                let di = dest_pos + i;
+                                if di < dv.len() { dv[di] = elem; }
+                            }
+                        }
+                        (Copied::Long(elems), NativePayload::LongArray(dv)) => {
+                            for (i, elem) in elems.into_iter().enumerate() {
+                                let di = dest_pos + i;
+                                if di < dv.len() { dv[di] = elem; }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Some(JValue::Void)

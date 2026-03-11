@@ -15,7 +15,19 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        // Try bytecode first if the class is loaded; fall back to native stubs.
+        // Resolve descriptor and check for bytecode method in one pass.
+        // The compiler may emit a generic return type (e.g. Ljava/lang/Object;) for
+        // wildcard-imported methods whose real return type is more specific.
+        let maybe_method = self.find_method(class_name, method_name, descriptor);
+        let resolved_descriptor = if maybe_method.is_some() {
+            descriptor.to_owned()
+        } else {
+            self.find_method_real_descriptor(class_name, method_name, descriptor)
+                .unwrap_or_else(|| descriptor.to_owned())
+        };
+        let descriptor = resolved_descriptor.as_str();
+
+        // Try native stubs when no bytecode method is available.
         let found = self.find_method(class_name, method_name, descriptor).is_some();
         if !found {
             if let Some(v) = self.native_static(class_name, method_name, descriptor, &args) {
@@ -25,17 +37,6 @@ impl Vm {
                 return Ok(v);
             }
         }
-
-        // Resolve the actual descriptor: exact match first, then param-only fallback.
-        // The compiler may emit a generic return type (e.g. Ljava/lang/Object;) for
-        // wildcard-imported methods whose real return type is more specific.
-        let resolved_descriptor = if self.find_method(class_name, method_name, descriptor).is_some() {
-            descriptor.to_owned()
-        } else {
-            self.find_method_real_descriptor(class_name, method_name, descriptor)
-                .unwrap_or_else(|| descriptor.to_owned())
-        };
-        let descriptor = resolved_descriptor.as_str();
 
         // If the resolved method is varargs (ACC_VARARGS = 0x0080), synthesize a single
         // empty array argument when the call site omits the trailing varargs parameter.
@@ -160,6 +161,9 @@ impl Vm {
         let found = self.find_method(class_name, method_name, descriptor).is_some();
         if !found {
             if let Some(v) = self.native_virtual(&this, class_name, method_name, descriptor, &args) {
+                if let Some(err) = self.pending_exception_err() {
+                    return Err(err);
+                }
                 return Ok(v);
             }
             return Err(format!("Special method not found: {class_name}.{method_name}{descriptor}"));
