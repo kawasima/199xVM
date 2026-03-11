@@ -18,4 +18,14 @@ public class Object {
     public final native Class<?> getClass();
 
     protected native Object clone() throws CloneNotSupportedException;
+
+    public final void notify() {}
+
+    public final void notifyAll() {}
+
+    public final void wait() throws InterruptedException {}
+
+    public final void wait(long timeoutMillis) throws InterruptedException {}
+
+    public final void wait(long timeoutMillis, int nanos) throws InterruptedException {}
 }

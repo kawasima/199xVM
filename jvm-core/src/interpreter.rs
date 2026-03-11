@@ -707,8 +707,8 @@ impl Vm {
         err_msg: &str,
     ) -> Option<(usize, JValue)> {
         // Extract exception class name from error message if it matches our format.
-        let exc_class = if err_msg.starts_with("Exception: ") {
-            &err_msg["Exception: ".len()..]
+        let exc_class = if let Some(rest) = err_msg.strip_prefix("Exception: ") {
+            rest.split(':').next().unwrap_or(rest).trim()
         } else if err_msg.starts_with("NullPointerException") {
             "java/lang/NullPointerException"
         } else if err_msg.starts_with("ClassCastException") {
@@ -862,6 +862,10 @@ impl Vm {
                     if let Some(r) = arr_ref.as_ref() {
                         let elem = match &r.borrow().native {
                             NativePayload::ByteArray(v) => JValue::Int(v[idx] as i32),
+                            NativePayload::Array(v) => {
+                                let b = v.get(idx).map(|x| x.as_int() as i8).unwrap_or(0);
+                                JValue::Int(b as i32)
+                            }
                             _ => JValue::Int(0),
                         };
                         frame.stack.push(elem);
@@ -875,6 +879,7 @@ impl Vm {
                     if let Some(r) = arr_ref.as_ref() {
                         let elem = match &r.borrow().native {
                             NativePayload::IntArray(v) => JValue::Int(v[idx]),
+                            NativePayload::Array(v) => v.get(idx).cloned().unwrap_or(JValue::Int(0)),
                             _ => JValue::Int(0),
                         };
                         frame.stack.push(elem);
@@ -929,9 +934,15 @@ impl Vm {
                     let idx = frame.stack.pop().unwrap().as_int() as usize;
                     let arr_ref = frame.stack.pop().unwrap();
                     if let Some(r) = arr_ref.as_ref() {
-                        if let NativePayload::Array(ref mut v) = r.borrow_mut().native {
-                            while v.len() <= idx { v.push(JValue::Int(0)); }
-                            v[idx] = val;
+                        match r.borrow_mut().native {
+                            NativePayload::Array(ref mut v) => {
+                                while v.len() <= idx { v.push(JValue::Int(0)); }
+                                v[idx] = val;
+                            }
+                            NativePayload::IntArray(ref mut v) => {
+                                if idx < v.len() { v[idx] = val.as_int(); }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -995,7 +1006,12 @@ impl Vm {
 
                 // ---- Stack manipulation ----
                 0x57 => { frame.stack.pop(); }                                           // pop
-                0x58 => { frame.stack.pop(); frame.stack.pop(); }                        // pop2
+                0x58 => { // pop2
+                    let v1 = frame.stack.pop().unwrap();
+                    if !is_category2(&v1) {
+                        frame.stack.pop();
+                    }
+                }
                 0x59 => { let v = frame.stack.last().unwrap().clone(); frame.stack.push(v); } // dup
                 0x5a => { // dup_x1
                     let v1 = frame.stack.pop().unwrap();
@@ -1007,41 +1023,92 @@ impl Vm {
                 0x5b => { // dup_x2
                     let v1 = frame.stack.pop().unwrap();
                     let v2 = frame.stack.pop().unwrap();
-                    let v3 = frame.stack.pop().unwrap();
-                    frame.stack.push(v1.clone());
-                    frame.stack.push(v3);
-                    frame.stack.push(v2);
-                    frame.stack.push(v1);
+                    if is_category2(&v2) {
+                        // Form 2: ..., value2(cat2), value1(cat1) -> ..., value1, value2, value1
+                        frame.stack.push(v1.clone());
+                        frame.stack.push(v2);
+                        frame.stack.push(v1);
+                    } else {
+                        // Form 1: ..., value3, value2, value1 (all cat1)
+                        let v3 = frame.stack.pop().unwrap();
+                        frame.stack.push(v1.clone());
+                        frame.stack.push(v3);
+                        frame.stack.push(v2);
+                        frame.stack.push(v1);
+                    }
                 }
                 0x5c => { // dup2
                     let v1 = frame.stack.pop().unwrap();
-                    let v2 = frame.stack.pop().unwrap();
-                    frame.stack.push(v2.clone());
-                    frame.stack.push(v1.clone());
-                    frame.stack.push(v2);
-                    frame.stack.push(v1);
+                    if is_category2(&v1) {
+                        // Form 2: ..., value1(cat2) -> ..., value1, value1
+                        frame.stack.push(v1.clone());
+                        frame.stack.push(v1);
+                    } else {
+                        // Form 1: ..., value2, value1 (both cat1)
+                        let v2 = frame.stack.pop().unwrap();
+                        frame.stack.push(v2.clone());
+                        frame.stack.push(v1.clone());
+                        frame.stack.push(v2);
+                        frame.stack.push(v1);
+                    }
                 }
                 0x5d => { // dup2_x1
                     let v1 = frame.stack.pop().unwrap();
-                    let v2 = frame.stack.pop().unwrap();
-                    let v3 = frame.stack.pop().unwrap();
-                    frame.stack.push(v2.clone());
-                    frame.stack.push(v1.clone());
-                    frame.stack.push(v3);
-                    frame.stack.push(v2);
-                    frame.stack.push(v1);
+                    if is_category2(&v1) {
+                        // Form 2: ..., value2(cat1), value1(cat2) -> ..., value1, value2, value1
+                        let v2 = frame.stack.pop().unwrap();
+                        frame.stack.push(v1.clone());
+                        frame.stack.push(v2);
+                        frame.stack.push(v1);
+                    } else {
+                        // Form 1: ..., value3, value2, value1 (all cat1)
+                        let v2 = frame.stack.pop().unwrap();
+                        let v3 = frame.stack.pop().unwrap();
+                        frame.stack.push(v2.clone());
+                        frame.stack.push(v1.clone());
+                        frame.stack.push(v3);
+                        frame.stack.push(v2);
+                        frame.stack.push(v1);
+                    }
                 }
                 0x5e => { // dup2_x2
                     let v1 = frame.stack.pop().unwrap();
-                    let v2 = frame.stack.pop().unwrap();
-                    let v3 = frame.stack.pop().unwrap();
-                    let v4 = frame.stack.pop().unwrap();
-                    frame.stack.push(v2.clone());
-                    frame.stack.push(v1.clone());
-                    frame.stack.push(v4);
-                    frame.stack.push(v3);
-                    frame.stack.push(v2);
-                    frame.stack.push(v1);
+                    if is_category2(&v1) {
+                        let v2 = frame.stack.pop().unwrap();
+                        if is_category2(&v2) {
+                            // Form 4: ..., value2(cat2), value1(cat2) -> ..., value1, value2, value1
+                            frame.stack.push(v1.clone());
+                            frame.stack.push(v2);
+                            frame.stack.push(v1);
+                        } else {
+                            // Form 3: ..., value3(cat1), value2(cat1), value1(cat2)
+                            let v3 = frame.stack.pop().unwrap();
+                            frame.stack.push(v1.clone());
+                            frame.stack.push(v3);
+                            frame.stack.push(v2);
+                            frame.stack.push(v1);
+                        }
+                    } else {
+                        let v2 = frame.stack.pop().unwrap(); // cat1 expected
+                        let v3 = frame.stack.pop().unwrap();
+                        if is_category2(&v3) {
+                            // Form 2: ..., value3(cat2), value2(cat1), value1(cat1)
+                            frame.stack.push(v2.clone());
+                            frame.stack.push(v1.clone());
+                            frame.stack.push(v3);
+                            frame.stack.push(v2);
+                            frame.stack.push(v1);
+                        } else {
+                            // Form 1: ..., value4, value3, value2, value1 (all cat1)
+                            let v4 = frame.stack.pop().unwrap();
+                            frame.stack.push(v2.clone());
+                            frame.stack.push(v1.clone());
+                            frame.stack.push(v4);
+                            frame.stack.push(v3);
+                            frame.stack.push(v2);
+                            frame.stack.push(v1);
+                        }
+                    }
                 }
                 0x5f => { // swap
                     let v1 = frame.stack.pop().unwrap();
@@ -1077,7 +1144,12 @@ impl Vm {
                 0x79 => { let b = frame.stack.pop().unwrap().as_int() & 0x3f; let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a << b)); } // lshl
                 0x7b => { let b = frame.stack.pop().unwrap().as_int() & 0x3f; let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a >> b)); } // lshr
                 0x7d => { let b = frame.stack.pop().unwrap().as_int() & 0x3f; let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(((a as u64) >> b) as i64)); } // lushr
-                0x94 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Int(a.cmp(&b) as i32)); } // lcmp
+                0x94 => { // lcmp
+                    let b = frame.stack.pop().unwrap().as_long();
+                    let a = frame.stack.pop().unwrap().as_long();
+                    let v = if a < b { -1 } else if a == b { 0 } else { 1 };
+                    frame.stack.push(JValue::Int(v));
+                }
 
                 // ---- Arithmetic (float) ----
                 0x62 => { let b = frame.stack.pop().unwrap().as_float(); let a = frame.stack.pop().unwrap().as_float(); frame.stack.push(JValue::Float(a + b)); } // fadd
@@ -4221,6 +4293,10 @@ fn pop_args(frame: &mut Frame, n: usize) -> Vec<JValue> {
     let mut args: Vec<JValue> = (0..n).map(|_| frame.stack.pop().unwrap_or(JValue::Void)).collect();
     args.reverse();
     args
+}
+
+fn is_category2(v: &JValue) -> bool {
+    matches!(v, JValue::Long(_) | JValue::Double(_))
 }
 
 /// Compare two `JValue`s by reference identity.

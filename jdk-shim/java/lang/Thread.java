@@ -1,6 +1,11 @@
 package java.lang;
 
 public class Thread implements Runnable {
+    @FunctionalInterface
+    public static interface UncaughtExceptionHandler {
+        void uncaughtException(Thread t, Throwable e);
+    }
+
     private static int nextId = 1;
     private static final Thread MAIN = new Thread("main");
 
@@ -42,6 +47,12 @@ public class Thread implements Runnable {
     public static void sleep(long millis) throws InterruptedException {}
 
     public static void sleep(long millis, int nanos) throws InterruptedException {}
+
+    public final void join() throws InterruptedException {}
+
+    public final void join(long millis) throws InterruptedException {}
+
+    public final void join(long millis, int nanos) throws InterruptedException {}
 
     public void run() {
         if (target != null) {
