@@ -15,11 +15,10 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        // Resolve descriptor and check for bytecode method in one pass.
+        // Resolve descriptor: exact match first, then param-only fallback for generic return types.
         // The compiler may emit a generic return type (e.g. Ljava/lang/Object;) for
         // wildcard-imported methods whose real return type is more specific.
-        let maybe_method = self.find_method(class_name, method_name, descriptor);
-        let resolved_descriptor = if maybe_method.is_some() {
+        let resolved_descriptor = if self.find_method(class_name, method_name, descriptor).is_some() {
             descriptor.to_owned()
         } else {
             self.find_method_real_descriptor(class_name, method_name, descriptor)
@@ -27,8 +26,12 @@ impl Vm {
         };
         let descriptor = resolved_descriptor.as_str();
 
+        // Check if a bytecode method exists; also collect varargs flag in one lookup.
+        let method_flags = self.find_method(class_name, method_name, descriptor)
+            .map(|(_, m)| m.access_flags);
+        let found = method_flags.is_some();
+
         // Try native stubs when no bytecode method is available.
-        let found = self.find_method(class_name, method_name, descriptor).is_some();
         if !found {
             if let Some(v) = self.native_static(class_name, method_name, descriptor, &args) {
                 if let Some(err) = self.pending_exception_err() {
@@ -43,9 +46,7 @@ impl Vm {
         let mut args = args;
         let expected_arg_count = count_args(descriptor);
         if args.len() < expected_arg_count {
-            let is_varargs = self.find_method(class_name, method_name, descriptor)
-                .map(|(_, m)| m.access_flags & 0x0080 != 0)
-                .unwrap_or(false);
+            let is_varargs = method_flags.map(|f| f & 0x0080 != 0).unwrap_or(false);
             if is_varargs && expected_arg_count - args.len() == 1 {
                 // The JVM only synthesizes the final varargs array; do not silently pad
                 // multiple missing fixed parameters.
