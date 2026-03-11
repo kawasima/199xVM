@@ -413,6 +413,10 @@ function methodDescriptor(params: ParamDecl[], returnType: Type): string {
   return "(" + params.map(p => typeToDescriptor(p.type)).join("") + ")" + typeToDescriptor(returnType);
 }
 
+function enumConstructorDescriptor(paramTypes: Type[]): string {
+  return "(Ljava/lang/String;I" + paramTypes.map(typeToDescriptor).join("") + ")V";
+}
+
 function isRefType(t: Type): boolean {
   return t !== "int" && t !== "long" && t !== "short" && t !== "byte" && t !== "char"
     && t !== "float" && t !== "double" && t !== "boolean" && t !== "void";
@@ -2800,6 +2804,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   const ifaceIndexes = (classDecl.interfaces ?? []).map(i => cp.addClass(i));
 
   const isInterfaceLike = classDecl.kind === "interface" || classDecl.kind === "annotation";
+  const isEnumClass = classDecl.kind === "enum";
   // Add default constructor if none exists (not for interfaces/annotations)
   const hasInit = classDecl.methods.some(m => m.name === "<init>");
   if (!isInterfaceLike && !hasInit) {
@@ -2830,7 +2835,9 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     const method = methodQueue[mi];
     validateConstructorBody(method);
     const nameIdx = cp.addUtf8(method.name);
-    const desc = methodDescriptor(method.params, method.returnType);
+    const desc = isEnumClass && method.name === "<init>"
+      ? enumConstructorDescriptor(method.params.map(p => p.type))
+      : methodDescriptor(method.params, method.returnType);
     const descIdx = cp.addUtf8(desc);
 
     let accessFlags = 0x0001; // ACC_PUBLIC
@@ -2843,22 +2850,30 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       compiledMethods.push({ nameIdx, descIdx, accessFlags, hasCode: false });
     } else if (method.name === "<init>") {
       const emitter = new BytecodeEmitter();
-      // If the constructor body starts with super(args), it will emit its own invokespecial.
-      // Otherwise emit a default super() call.
-      const hasSuperCall = method.body.length > 0 &&
-        method.body[0].kind === "exprStmt" &&
-        method.body[0].expr.kind === "superCall";
-      if (!hasSuperCall) {
+      const hasSuperCall = method.body.length > 0
+        && method.body[0].kind === "exprStmt"
+        && method.body[0].expr.kind === "superCall";
+      if (isEnumClass) {
+        if (hasSuperCall) {
+          throw new Error("explicit super(...) call in enum constructor is not supported");
+        }
+        const superInitRef = cp.addMethodref("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V");
+        emitter.emitAload(0); // this
+        emitter.emitAload(1); // enum name (synthetic)
+        emitter.emitIload(2); // ordinal (synthetic)
+        emitter.emitInvokespecial(superInitRef, 2, false);
+      } else if (!hasSuperCall) {
         const superInitRef = cp.addMethodref(classDecl.superClass, "<init>", "()V");
         emitter.emitAload(0); // this
         emitter.emitInvokespecial(superInitRef, 0, false);
       }
 
-      // Set up locals for constructor params (slot 0 = this, 1..n = params)
+      const initParamSlotBase = isEnumClass ? 3 : 1;
+      // Set up locals for constructor params (slot 0 = this, enum adds synthetic name/ordinal)
       const initCtx: CompileContext = {
         className: classDecl.name, superClass: classDecl.superClass, cp, method,
-        locals: method.params.map((p, i) => ({ name: p.name, type: p.type, slot: i + 1 })),
-        nextSlot: method.params.length + 1,
+        locals: method.params.map((p, i) => ({ name: p.name, type: p.type, slot: i + initParamSlotBase })),
+        nextSlot: method.params.length + initParamSlotBase,
         fields: classDecl.fields, inheritedFields, allMethods,
         importMap: classDecl.importMap,
         packageImports: classDecl.packageImports,
@@ -2872,7 +2887,8 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         breakPatches: [],
         continuePatches: [],
       };
-      if (emitter.maxLocals < method.params.length + 1) emitter.maxLocals = method.params.length + 1;
+      const minLocals = method.params.length + initParamSlotBase;
+      if (emitter.maxLocals < minLocals) emitter.maxLocals = minLocals;
 
       // Initialize instance fields with initializers
       for (const field of classDecl.fields) {
@@ -2896,7 +2912,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         hasCode: true,
         code: emitter.code,
         maxStack: Math.max(emitter.maxStack, 4),
-        maxLocals: Math.max(emitter.maxLocals, method.params.length + 1),
+        maxLocals: Math.max(emitter.maxLocals, minLocals),
         exceptionTable: emitter.exceptionTable.length > 0 ? emitter.exceptionTable : undefined,
       });
     } else {
@@ -2921,6 +2937,75 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     }
   }
 
+  // Synthesize enum static initialization for constants.
+  if (isEnumClass) {
+    const enumConstants = classDecl.fields.filter(f => !!f.isEnumConstant);
+    const hasClinit = classDecl.methods.some(m => m.name === "<clinit>");
+    if (enumConstants.length > 0 && !hasClinit) {
+      const clinitMethod: MethodDecl = { name: "<clinit>", returnType: "void", params: [], body: [], isStatic: true };
+      const clinitCtx: CompileContext = {
+        className: classDecl.name,
+        superClass: classDecl.superClass,
+        cp,
+        method: clinitMethod,
+        locals: [],
+        nextSlot: 0,
+        fields: classDecl.fields,
+        inheritedFields,
+        allMethods,
+        importMap: classDecl.importMap,
+        packageImports: classDecl.packageImports,
+        staticWildcardImports: classDecl.staticWildcardImports,
+        classSupers,
+        classDecls,
+        lambdaCounter,
+        generatedMethods,
+        lambdaBootstraps,
+        ownerIsStatic: true,
+        breakPatches: [],
+        continuePatches: [],
+      };
+      const emitter = new BytecodeEmitter();
+      const classIdx = cp.addClass(classDecl.name);
+      const enumCtors = classDecl.methods.filter(m => m.name === "<init>");
+      for (let ordinal = 0; ordinal < enumConstants.length; ordinal++) {
+        const field = enumConstants[ordinal];
+        const init = field.initializer;
+        if (!init || init.kind !== "newExpr") {
+          throw new Error(`Enum constant ${field.name} must have initializer`);
+        }
+        const ctor = enumCtors.find(m => m.params.length === init.args.length);
+        if (!ctor) {
+          throw new Error(`No enum constructor matches ${field.name}(${init.args.length} args)`);
+        }
+        emitter.emit(0xbb); // new
+        emitter.emitU16(classIdx);
+        emitter.emit(0x59); // dup
+        emitter.emitLdc(cp.addString(field.name));
+        emitter.emitIconst(ordinal);
+        for (let ai = 0; ai < init.args.length; ai++) {
+          compileExpr(clinitCtx, emitter, init.args[ai], ctor.params[ai]?.type);
+        }
+        const ctorDesc = enumConstructorDescriptor(ctor.params.map(p => p.type));
+        const ctorRef = cp.addMethodref(classDecl.name, "<init>", ctorDesc);
+        emitter.emitInvokespecial(ctorRef, 2 + init.args.length, false);
+        const fieldRef = cp.addFieldref(classDecl.name, field.name, typeToDescriptor(field.type));
+        emitter.emit(0xb3); // putstatic
+        emitter.emitU16(fieldRef);
+      }
+      emitter.emit(0xb1); // return
+      compiledMethods.push({
+        nameIdx: cp.addUtf8("<clinit>"),
+        descIdx: cp.addUtf8("()V"),
+        accessFlags: 0x0008, // ACC_STATIC
+        hasCode: true,
+        code: emitter.code,
+        maxStack: Math.max(emitter.maxStack, 6),
+        maxLocals: 0,
+      });
+    }
+  }
+
   // Build fields
   const compiledFields: { nameIdx: number; descIdx: number; accessFlags: number }[] = [];
   for (const field of classDecl.fields) {
@@ -2929,6 +3014,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     let accessFlags = field.isPrivate ? 0x0002 : 0x0001; // ACC_PRIVATE/ACC_PUBLIC
     if (field.isStatic) accessFlags |= 0x0008;
     if (field.isFinal) accessFlags |= 0x0010;
+    if (isEnumClass && field.isEnumConstant) accessFlags |= 0x4000; // ACC_ENUM
     compiledFields.push({ nameIdx, descIdx, accessFlags });
   }
 

@@ -578,6 +578,14 @@ describe("Parser", () => {
     assert.equal(cls.superClass, "java/lang/Enum");
   });
 
+  test("enum declaration with trailing comma parses", () => {
+    const src = `public enum Color { RED, GREEN, }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.kind, "enum");
+    assert.equal(cls.fields.length, 2);
+    assert.equal(cls.fields[1].name, "GREEN");
+  });
+
   test("annotation declaration parses", () => {
     const src = `public @interface Info {
       String value() default "x";
@@ -871,6 +879,11 @@ describe("Code generator", () => {
     const meta = parseClassMeta(bytes);
     assert.ok((meta.accessFlags & 0x4000) !== 0, "ACC_ENUM");
     assert.equal(meta.superClass, "java/lang/Enum");
+    assert.ok(meta.methods.some(m => m.name === "<clinit>"), "enum should have <clinit>");
+    const enumFields = meta.fields.filter(f => (f.accessFlags & 0x4000) !== 0);
+    assert.equal(enumFields.length, 2, "expected two enum constant fields");
+    const enumFieldNames = enumFields.map(f => f.name).sort();
+    assert.deepEqual(enumFieldNames, ["GREEN", "RED"], "enum constants RED and GREEN present");
   });
 
   test("compiles generic class declaration with implements", () => {

@@ -393,9 +393,11 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         type: { className: name },
         isStatic: true,
         isFinal: true,
+        isEnumConstant: true,
         initializer: { kind: "newExpr", className: name, args },
       });
       if (!match(TokenKind.Comma)) break;
+      if (at(TokenKind.Semi) || at(TokenKind.RBrace) || at(TokenKind.EOF)) break;
     }
 
     if (match(TokenKind.Semi)) {

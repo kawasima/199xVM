@@ -14,7 +14,14 @@ export interface ClassMeta {
   accessFlags: number;
   superClass: string;
   interfaces: string[];
+  fields: FieldMeta[];
   methods: MethodMeta[];
+}
+
+export interface FieldMeta {
+  name: string;
+  descriptor: string;
+  accessFlags: number;
 }
 
 export interface MethodMeta {
@@ -100,10 +107,16 @@ export function parseClassMeta(data: Uint8Array): ClassMeta {
     interfaces.push(resolveClass(u16()));
   }
 
-  // Fields — skip
+  // Fields
   const fieldCount = u16();
+  const fields: FieldMeta[] = [];
   for (let i = 0; i < fieldCount; i++) {
-    skip(6); // flags(2) + name(2) + descriptor(2)
+    const fFlags = u16();
+    const fNameIdx = u16();
+    const fDescIdx = u16();
+    const fName = cp[fNameIdx] ?? "";
+    const fDesc = cp[fDescIdx] ?? "";
+    fields.push({ name: fName, descriptor: fDesc, accessFlags: fFlags });
     const attrCount = u16();
     for (let a = 0; a < attrCount; a++) { skip(2); skip(u32()); }
   }
@@ -127,6 +140,7 @@ export function parseClassMeta(data: Uint8Array): ClassMeta {
     accessFlags,
     superClass: superClassName,
     interfaces,
+    fields,
     methods,
   };
 }

@@ -21,6 +21,7 @@ export interface FieldDecl {
   isStatic: boolean;
   isPrivate?: boolean;
   isFinal?: boolean;
+  isEnumConstant?: boolean;
   initializer?: Expr;
 }
 
