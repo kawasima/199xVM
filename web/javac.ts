@@ -484,7 +484,8 @@ export type Expr =
   | { kind: "ternary"; cond: Expr; thenExpr: Expr; elseExpr: Expr }
   | { kind: "switchExpr"; selector: Expr; cases: SwitchCase[] }
   | { kind: "lambda"; params: string[]; bodyExpr?: Expr; bodyStmts?: Stmt[] }
-  | { kind: "methodRef"; target: Expr; method: string; isConstructor: boolean };
+  | { kind: "methodRef"; target: Expr; method: string; isConstructor: boolean }
+  | { kind: "classLit"; className: string };
 
 // ============================================================================
 // Parser
@@ -514,11 +515,21 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     if (/^[0-9]+$/.test(s)) return Number.parseInt(s, 10);
     throw new Error(`Invalid integer literal: ${raw}`);
   }
+  function isNameSegmentToken(kind: TokenKind): boolean {
+    return kind === TokenKind.Ident || kind === TokenKind.KwString;
+  }
+  function parseNameSegment(): string {
+    if (!isNameSegmentToken(peek().kind)) {
+      const t = peek();
+      throw new Error(`Expected Ident but got ${t.kind} ("${t.value}") at line ${t.line}:${t.col}`);
+    }
+    return advance().value;
+  }
   function parseQualifiedName(): string {
-    let name = expect(TokenKind.Ident).value;
-    while (at(TokenKind.Dot) && tokens[pos + 1]?.kind === TokenKind.Ident) {
+    let name = parseNameSegment();
+    while (at(TokenKind.Dot) && isNameSegmentToken(tokens[pos + 1]?.kind ?? TokenKind.EOF)) {
       advance(); // dot
-      name += "." + expect(TokenKind.Ident).value;
+      name += "." + parseNameSegment();
     }
     return name;
   }
@@ -799,6 +810,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         } while (match(TokenKind.Comma));
       }
       expect(TokenKind.RParen);
+      parseOptionalThrowsClause();
       expect(TokenKind.LBrace);
       const body = parseBlock();
       expect(TokenKind.RBrace);
@@ -821,6 +833,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         } while (match(TokenKind.Comma));
       }
       expect(TokenKind.RParen);
+      parseOptionalThrowsClause();
       expect(TokenKind.LBrace);
       const body = parseBlock();
       expect(TokenKind.RBrace);
@@ -833,6 +846,16 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       }
       expect(TokenKind.Semi);
       fields.push({ name, type: retType, isStatic, initializer: init, isPrivate: inRecord && !isStatic, isFinal: inRecord && !isStatic });
+    }
+  }
+
+  // Accept and skip method/constructor throws clause: `throws A, b.C`
+  function parseOptionalThrowsClause(): void {
+    if (!(at(TokenKind.Ident) && peek().value === "throws")) return;
+    advance(); // throws
+    parseQualifiedName();
+    while (match(TokenKind.Comma)) {
+      parseQualifiedName();
     }
   }
 
@@ -850,7 +873,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     else if (match(TokenKind.KwString)) base = "String";
     else if (match(TokenKind.KwVar)) throw new Error(`'var' is only allowed for local variables with initializer`);
     else {
-      const name = expect(TokenKind.Ident).value;
+      const name = parseQualifiedName();
       // Skip generic type parameters like <String>
       if (at(TokenKind.Lt)) {
         advance();
@@ -861,7 +884,14 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           advance();
         }
       }
-      base = { className: name };
+      // Resolve explicitly imported simple names to internal names early.
+      // Keep unresolved simple names as-is so same-compilation-unit user types still work.
+      const resolvedName = name.includes("/")
+        ? name
+        : name.includes(".")
+          ? name.replace(/\./g, "/")
+          : (importMap.get(name) ?? name);
+      base = { className: resolvedName };
     }
     // Check for array suffix: Type[]
     if (at(TokenKind.LBracket) && tokens[pos + 1]?.kind === TokenKind.RBracket) {
@@ -1102,9 +1132,14 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       expect(TokenKind.LParen);
       const cond = parseExpr();
       expect(TokenKind.RParen);
-      expect(TokenKind.LBrace);
-      const body = parseBlock();
-      expect(TokenKind.RBrace);
+      let body: Stmt[];
+      if (at(TokenKind.LBrace)) {
+        expect(TokenKind.LBrace);
+        body = parseBlock();
+        expect(TokenKind.RBrace);
+      } else {
+        body = [parseStmt()];
+      }
       return { kind: "while", cond, body };
     }
 
@@ -1121,9 +1156,14 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       let update: Stmt | undefined;
       if (!at(TokenKind.RParen)) update = parseStmtNoSemi();
       expect(TokenKind.RParen);
-      expect(TokenKind.LBrace);
-      const body = parseBlock();
-      expect(TokenKind.RBrace);
+      let body: Stmt[];
+      if (at(TokenKind.LBrace)) {
+        expect(TokenKind.LBrace);
+        body = parseBlock();
+        expect(TokenKind.RBrace);
+      } else {
+        body = [parseStmt()];
+      }
       return { kind: "for", init, cond, update, body };
     }
 
@@ -1229,8 +1269,14 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         advance();
         // Skip array suffix []
         if (at(TokenKind.LBracket) && tokens[pos + 1]?.kind === TokenKind.RBracket) { advance(); advance(); }
-      } else if (at(TokenKind.Ident)) {
+      } else if (at(TokenKind.Ident) || at(TokenKind.KwString)) {
+        // Qualified type name: a.b.C
         advance();
+        while (at(TokenKind.Dot)) {
+          advance();
+          if (!(at(TokenKind.Ident) || at(TokenKind.KwString))) return false;
+          advance();
+        }
         // Skip generics
         if (at(TokenKind.Lt)) {
           let depth = 1; advance();
@@ -1460,11 +1506,28 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
   }
 
   function parsePostfix(): Expr {
+    function exprToQualifiedName(e: Expr): string | null {
+      if (e.kind === "ident") return e.name;
+      if (e.kind === "fieldAccess") {
+        const left = exprToQualifiedName(e.object);
+        if (!left) return null;
+        return `${left}.${e.field}`;
+      }
+      return null;
+    }
+
     let expr = parsePrimary();
 
     while (true) {
       if (at(TokenKind.Dot)) {
         advance();
+        if (at(TokenKind.KwClass)) {
+          advance();
+          const qn = exprToQualifiedName(expr);
+          if (!qn) throw new Error("Class literal target must be a type name");
+          expr = { kind: "classLit", className: qn };
+          continue;
+        }
         const name = expect(TokenKind.Ident).value;
         if (at(TokenKind.LParen)) {
           // Method call
@@ -2254,6 +2317,65 @@ let knownMethods: Record<string, MethodSig> = {
     paramTypes: [],
     isInterface: true,
   },
+  // CompletableFuture
+  "java/util/concurrent/CompletableFuture.supplyAsync(Ljava/util/function/Supplier;)": {
+    owner: "java/util/concurrent/CompletableFuture",
+    returnType: { className: "java/util/concurrent/CompletableFuture" },
+    paramTypes: [{ className: "java/util/function/Supplier" }],
+    isStatic: true,
+  },
+  "java/util/concurrent/CompletableFuture.thenApply(Ljava/util/function/Function;)": {
+    owner: "java/util/concurrent/CompletableFuture",
+    returnType: { className: "java/util/concurrent/CompletableFuture" },
+    paramTypes: [{ className: "java/util/function/Function" }],
+  },
+  "java/util/concurrent/CompletableFuture.join()": {
+    owner: "java/util/concurrent/CompletableFuture",
+    returnType: { className: "java/lang/Object" },
+    paramTypes: [],
+  },
+  // Raoh core (baseline signatures to avoid load-order sensitivity)
+  "net/unit8/raoh/ObjectDecoders.string()": {
+    owner: "net/unit8/raoh/ObjectDecoders",
+    returnType: { className: "net/unit8/raoh/builtin/StringDecoder" },
+    paramTypes: [],
+    isStatic: true,
+  },
+  "net/unit8/raoh/ObjectDecoders.int_()": {
+    owner: "net/unit8/raoh/ObjectDecoders",
+    returnType: { className: "net/unit8/raoh/builtin/IntDecoder" },
+    paramTypes: [],
+    isStatic: true,
+  },
+  "net/unit8/raoh/map/MapDecoders.field(Ljava/lang/String;Lnet/unit8/raoh/Decoder;)": {
+    owner: "net/unit8/raoh/map/MapDecoders",
+    returnType: { className: "net/unit8/raoh/FieldDecoder" },
+    paramTypes: ["String", { className: "net/unit8/raoh/Decoder" }],
+    isStatic: true,
+  },
+  "net/unit8/raoh/map/MapDecoders.combine(Lnet/unit8/raoh/Decoder;Lnet/unit8/raoh/Decoder;)": {
+    owner: "net/unit8/raoh/map/MapDecoders",
+    returnType: { className: "net/unit8/raoh/combinator/Combiner2" },
+    paramTypes: [{ className: "net/unit8/raoh/Decoder" }, { className: "net/unit8/raoh/Decoder" }],
+    isStatic: true,
+  },
+  "net/unit8/raoh/combinator/Combiner2.map(Ljava/util/function/BiFunction;)": {
+    owner: "net/unit8/raoh/combinator/Combiner2",
+    returnType: { className: "net/unit8/raoh/Decoder" },
+    paramTypes: [{ className: "java/util/function/BiFunction" }],
+  },
+  "net/unit8/raoh/Decoder.decode(Ljava/lang/Object;)": {
+    owner: "net/unit8/raoh/Decoder",
+    returnType: { className: "net/unit8/raoh/Result" },
+    paramTypes: [{ className: "java/lang/Object" }],
+    isInterface: true,
+  },
+  "net/unit8/raoh/Result.getOrThrow()": {
+    owner: "net/unit8/raoh/Result",
+    returnType: { className: "java/lang/Object" },
+    paramTypes: [],
+    isInterface: true,
+  },
   // PrintStream
   "java/io/PrintStream.println(Ljava/lang/String;)": { owner: "java/io/PrintStream", returnType: "void", paramTypes: ["String"] },
   "java/io/PrintStream.println(I)": { owner: "java/io/PrintStream", returnType: "void", paramTypes: ["int"] },
@@ -2455,6 +2577,10 @@ function splitDescriptorArgs(descs: string): string[] {
   return args;
 }
 
+function hasFunctionalArg(args: Expr[]): boolean {
+  return args.some(a => a.kind === "lambda" || a.kind === "methodRef");
+}
+
 /** Resolve a simple class name to its internal JVM name using the import map. */
 function resolveClassName(ctx: CompileContext, name: string): string {
   // Already internal (contains '/') or fully qualified (contains '.')
@@ -2536,7 +2662,9 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
         const ownerClass = resolveClassName(ctx, rawOwner);
         // Look in knownMethods
         const argDescs = expr.args.map(a => typeToDescriptor(inferType(ctx, a))).join("");
-        const sig = lookupKnownMethod(ownerClass, expr.method, argDescs);
+        const exactSig = lookupKnownMethod(ownerClass, expr.method, argDescs);
+        const sig = exactSig
+          ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(ownerClass, expr.method, expr.args.length, false) : undefined);
         if (sig) return sig.returnType;
         // Check user-defined methods
         const userMethod = ctx.allMethods.find(m => m.name === expr.method);
@@ -2545,14 +2673,25 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
         // Unqualified call — look in user-defined methods
         const userMethod = ctx.allMethods.find(m => m.name === expr.method);
         if (userMethod) return userMethod.returnType;
-        // Static import-on-demand method — return type unknown, assume Object
+        // Static import-on-demand method
+        if (ctx.staticWildcardImports.length > 0) {
+          const argDescs = expr.args.map(a => typeToDescriptor(inferType(ctx, a))).join("");
+          for (const owner of ctx.staticWildcardImports) {
+            const exact = lookupKnownMethod(owner, expr.method, argDescs);
+            const sig = exact
+              ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(owner, expr.method, expr.args.length, true) : undefined);
+            if (sig) return sig.returnType;
+          }
+        }
       }
       return { className: "java/lang/Object" };
     }
     case "staticCall": {
       const argDescs = expr.args.map(a => typeToDescriptor(inferType(ctx, a))).join("");
       const internalName = expr.className.replace(/\./g, "/");
-      const sig = lookupKnownMethod(internalName, expr.method, argDescs);
+      const exactSig = lookupKnownMethod(internalName, expr.method, argDescs);
+      const sig = exactSig
+        ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(internalName, expr.method, expr.args.length, true) : undefined);
       if (sig) return sig.returnType;
       // Check user-defined static methods
       const userMethod = ctx.allMethods.find(m => m.name === expr.method && m.isStatic);
@@ -2598,6 +2737,7 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
     }
     case "lambda": return { className: "java/lang/Object" };
     case "methodRef": return { className: "java/lang/Object" };
+    case "classLit": return { className: "java/lang/Class" };
   }
 }
 
@@ -3229,6 +3369,12 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       emitter.emitInvokedynamic(indyIdx, captureTypes.length, true);
       break;
     }
+    case "classLit": {
+      const className = resolveClassName(ctx, expr.className);
+      const classIdx = ctx.cp.addClass(className);
+      emitter.emitLdc(classIdx);
+      break;
+    }
     default:
       throw new Error(`Unsupported expression: ${(expr as Expr).kind}`);
   }
@@ -3328,9 +3474,11 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
         const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
 
         // Try known methods
-        const sig = lookupKnownMethod(internalName, expr.method, argTypes.join(""));
+        const exactSig = lookupKnownMethod(internalName, expr.method, argTypes.join(""));
+        const sig = exactSig
+          ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(internalName, expr.method, expr.args.length, true) : undefined);
         if (sig) {
-          expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, sig.paramTypes[i]));
+          expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, sig.paramTypes[i] ?? { className: "java/lang/Object" }));
           const sigArgDescs = sig.paramTypes.map(t => typeToDescriptor(t)).join("");
           const desc = "(" + sigArgDescs + ")" + typeToDescriptor(sig.returnType);
           const mRef = ctx.cp.addMethodref(internalName, expr.method, desc);
@@ -3358,14 +3506,16 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     const ownerClass = resolveClassName(ctx, rawOwner);
 
     // Look up return type
-    const sig = lookupKnownMethod(ownerClass, expr.method, argTypes.join(""));
+    const exactSig = lookupKnownMethod(ownerClass, expr.method, argTypes.join(""));
+    const sig = exactSig
+      ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(ownerClass, expr.method, expr.args.length, false) : undefined);
 
     let desc: string;
     let retType: Type;
     let isInterface = false;
 
     if (sig) {
-      expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, sig.paramTypes[i]));
+      expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, sig.paramTypes[i] ?? { className: "java/lang/Object" }));
       retType = sig.returnType;
       const sigArgDescs = sig.paramTypes.map(t => typeToDescriptor(t)).join("");
       desc = "(" + sigArgDescs + ")" + typeToDescriptor(retType);
@@ -3406,13 +3556,28 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     } else if (ctx.staticWildcardImports.length > 0) {
       // Try static-import-on-demand owners in order
       const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
-      for (const arg of expr.args) compileExpr(ctx, emitter, arg);
-      const ownerClass = ctx.staticWildcardImports.find(owner => !!lookupKnownMethod(owner, expr.method, argTypes.join("")))
-        ?? ctx.staticWildcardImports[0];
-      const retType: Type = { className: "java/lang/Object" };
-      const desc = "(" + argTypes.join("") + ")" + typeToDescriptor(retType);
+      let ownerClass = ctx.staticWildcardImports[0];
+      let sig: MethodSig | undefined;
+      for (const owner of ctx.staticWildcardImports) {
+        const exact = lookupKnownMethod(owner, expr.method, argTypes.join(""));
+        const candidate = exact
+          ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(owner, expr.method, expr.args.length, true) : undefined);
+        if (candidate) {
+          ownerClass = owner;
+          sig = candidate;
+          break;
+        }
+      }
+      if (sig) {
+        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, sig!.paramTypes[i] ?? { className: "java/lang/Object" }));
+      } else {
+        for (const arg of expr.args) compileExpr(ctx, emitter, arg);
+      }
+      const retType: Type = sig?.returnType ?? { className: "java/lang/Object" };
+      const sigArgDescs = sig ? sig.paramTypes.map(t => typeToDescriptor(t)).join("") : argTypes.join("");
+      const desc = "(" + sigArgDescs + ")" + typeToDescriptor(retType);
       const mRef = ctx.cp.addMethodref(ownerClass, expr.method, desc);
-      emitter.emitInvokestatic(mRef, expr.args.length, true);
+      emitter.emitInvokestatic(mRef, expr.args.length, retType !== "void");
     }
   }
 }
@@ -3531,6 +3696,8 @@ function collectExprIdentifiers(expr: Expr, out: Set<string>): void {
       break;
     case "methodRef":
       collectExprIdentifiers(expr.target, out);
+      break;
+    case "classLit":
       break;
     default:
       break;

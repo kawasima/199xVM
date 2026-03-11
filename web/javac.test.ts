@@ -934,6 +934,17 @@ describe("Code generator", () => {
     assert.ok(bytes.length > 200, "bundle has content");
   });
 
+  test("compiles class literal expression", () => {
+    const bytes = compile(`record Book(String title, int pages) {}
+    public class ReflectionClassLiteral {
+      public static String run() {
+        Class c = Book.class;
+        return "" + c.getName();
+      }
+    }`);
+    assert.ok(bytes.length > 200, "bundle has content");
+  });
+
   test("compiles bubble sort with arrays", () => {
     const bytes = compile(`public class BubbleSort {
       public static String run() {
@@ -1421,6 +1432,30 @@ describe("Runtime (WASM)", () => {
       }
     }`, "RuntimeSwitchExpr");
     assert.equal(result, "kind=release score=3");
+  });
+
+  test("autoboxes primitive arguments for reference-typed calls", async () => {
+    const result = await runSnippet(`import java.util.HashMap;
+      public class RuntimeAutoBoxArg {
+        public static String run() {
+          HashMap m = new HashMap();
+          m.put("age", 41);
+          Object v = m.get("age");
+          return "" + v;
+        }
+      }`, "RuntimeAutoBoxArg");
+    assert.equal(result, "41");
+  });
+
+  test("error includes VM stack frame", async () => {
+    const result = await runSnippet(`public class RuntimeStackTrace {
+      public static String run() {
+        Object x = null;
+        return x.toString();
+      }
+    }`, "RuntimeStackTrace");
+    assert.match(result, /^ERROR: NullPointerException:/);
+    assert.match(result, /\n  at RuntimeStackTrace\.run\(\)Ljava\/lang\/String;/);
   });
 
 });

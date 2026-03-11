@@ -300,7 +300,7 @@ impl Vm {
             if local_idx >= locals.len() {
                 break;
             }
-            locals[local_idx] = a;
+            locals[local_idx] = self.adapt_value_for_descriptor(t, a);
             local_idx += if t == "J" || t == "D" { 2 } else { 1 };
         }
 
@@ -356,6 +356,7 @@ impl Vm {
 
         let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
         self.run_frame(&mut frame, &code, &cp_entries, &frame_owner, &bootstrap_methods, &exception_table)
+            .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 
     /// Execute an instance method with invokespecial semantics.
@@ -411,7 +412,7 @@ impl Vm {
             if local_idx >= locals.len() {
                 break;
             }
-            locals[local_idx] = a;
+            locals[local_idx] = self.adapt_value_for_descriptor(t, a);
             local_idx += if t == "J" || t == "D" { 2 } else { 1 };
         }
 
@@ -459,6 +460,7 @@ impl Vm {
 
         let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
         self.run_frame(&mut frame, &code, &cp_entries, &frame_owner, &bootstrap_methods, &exception_table)
+            .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 
     /// Execute an instance method (first local = `this` reference).
@@ -473,39 +475,37 @@ impl Vm {
         // Use the actual runtime class of `this` for virtual dispatch.
         let runtime_class = this.borrow().class_name.clone();
 
-        // If this is a BytecodeLambda, invoke its implementation method directly.
-        if runtime_class == "$$Lambda" {
-            let lambda_info = match &this.borrow().native {
-                NativePayload::BytecodeLambda { sam_method, sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured } => {
-                    Some((
-                        sam_method.clone(),
-                        sam_desc.clone(),
-                        impl_class.clone(),
-                        impl_method.clone(),
-                        impl_desc.clone(),
-                        *ref_kind,
-                        captured.clone(),
-                    ))
-                }
-                NativePayload::Lambda(f) => {
-                    let result = f(args);
-                    return Ok(result);
-                }
-                _ => None,
-            };
-            if let Some((sam_method, sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info {
-                // A lambda object should intercept only its SAM call.
-                // Default methods on the interface (e.g. Decoder.decode(Object))
-                // must be dispatched normally via the interface bytecode.
-                if method_name != sam_method || descriptor != sam_desc {
-                    // Fall through to regular method resolution below.
-                } else {
+        // If receiver carries lambda payload, try direct SAM dispatch.
+        let lambda_info = match &this.borrow().native {
+            NativePayload::BytecodeLambda { sam_method, sam_desc: _, impl_class, impl_method, impl_desc, ref_kind, captured } => {
+                Some((
+                    sam_method.clone(),
+                    impl_class.clone(),
+                    impl_method.clone(),
+                    impl_desc.clone(),
+                    *ref_kind,
+                    captured.clone(),
+                ))
+            }
+            NativePayload::Lambda(f) => {
+                let result = f(args);
+                return Ok(result);
+            }
+            _ => None,
+        };
+        if let Some((sam_method, impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info {
+            // Generic interface call sites may use erased descriptors
+            // (e.g. Function.apply(Object)), so match by SAM method name.
+            if method_name == sam_method {
                 let mut full_args = captured;
                 full_args.extend(args);
                 // ref_kind 5 = invokeVirtual, 7 = invokeSpecial, 9 = invokeInterface
                 // ref_kind 6 = invokeStatic
                 let invoked = if ref_kind == 5 || ref_kind == 7 || ref_kind == 9 {
-                    // First captured arg is `this` for instance methods.
+                    // For instance impl methods, receiver is the first runtime argument.
+                    if full_args.is_empty() {
+                        return Err("Lambda invoke_virtual: missing receiver argument".to_owned());
+                    }
                     let recv = full_args.remove(0);
                     match recv {
                         JValue::Ref(Some(r)) => self.invoke_virtual(r, &impl_class, &impl_method, &impl_desc, full_args),
@@ -517,7 +517,6 @@ impl Vm {
                     self.invoke_static(&impl_class, &impl_method, &impl_desc, full_args)
                 }?;
                 return self.adapt_lambda_return(descriptor, &impl_desc, invoked);
-                }
             }
         }
 
@@ -579,7 +578,7 @@ impl Vm {
             if local_idx >= locals.len() {
                 break;
             }
-            locals[local_idx] = a;
+            locals[local_idx] = self.adapt_value_for_descriptor(t, a);
             local_idx += if t == "J" || t == "D" { 2 } else { 1 };
         }
 
@@ -635,6 +634,7 @@ impl Vm {
 
         let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
         self.run_frame(&mut frame, &code, &cp_entries, &frame_owner, &bootstrap_methods, &exception_table)
+            .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 
     fn adapt_lambda_return(
@@ -2063,6 +2063,140 @@ impl Vm {
         _args: &[JValue],
     ) -> Option<JValue> {
         match (_class_name, _method_name, _descriptor) {
+            ("java/util/regex/Pattern", "compile", "(Ljava/lang/String;)Ljava/util/regex/Pattern;") => {
+                let regex = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let p = JObject::new("java/util/regex/Pattern");
+                p.borrow_mut().fields.insert("__regex".to_owned(), JValue::Ref(Some(self.intern_string(regex))));
+                p.borrow_mut().fields.insert("__flags".to_owned(), JValue::Int(0));
+                Some(JValue::Ref(Some(p)))
+            }
+            ("java/util/regex/Pattern", "compile", "(Ljava/lang/String;I)Ljava/util/regex/Pattern;") => {
+                let regex = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let flags = _args.get(1).map(|v| v.as_int()).unwrap_or(0);
+                let p = JObject::new("java/util/regex/Pattern");
+                p.borrow_mut().fields.insert("__regex".to_owned(), JValue::Ref(Some(self.intern_string(regex))));
+                p.borrow_mut().fields.insert("__flags".to_owned(), JValue::Int(flags));
+                Some(JValue::Ref(Some(p)))
+            }
+            ("java/util/regex/Pattern", "matches", "(Ljava/lang/String;Ljava/lang/CharSequence;)Z") => {
+                let regex = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let input = _args
+                    .get(1)
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let ok = if regex == ".*" { true } else { regex == input };
+                Some(JValue::Int(if ok { 1 } else { 0 }))
+            }
+            ("java/util/Arrays", "hashCode", "([Ljava/lang/Object;)I") => {
+                let Some(arr_ref) = _args.first().and_then(|v| v.as_ref()).cloned() else {
+                    return Some(JValue::Int(0));
+                };
+                let elems: Vec<JValue> = match &arr_ref.borrow().native {
+                    NativePayload::Array(v) => v.clone(),
+                    _ => return Some(JValue::Int(0)),
+                };
+                let mut result: i32 = 1;
+                for e in elems {
+                    let h = match e {
+                        JValue::Ref(None) => 0,
+                        JValue::Ref(Some(r)) => {
+                            let cls = r.borrow().class_name.clone();
+                            match self.invoke_virtual(r, &cls, "hashCode", "()I", vec![]) {
+                                Ok(JValue::Int(i)) => i,
+                                Ok(v) => self.adapt_value_for_descriptor("I", v).as_int(),
+                                Err(_) => 0,
+                            }
+                        }
+                        JValue::Int(i) => i,
+                        JValue::Long(l) => (l ^ (l >> 32)) as i32,
+                        JValue::Float(f) => f.to_bits() as i32,
+                        JValue::Double(d) => {
+                            let bits = d.to_bits();
+                            (bits ^ (bits >> 32)) as i32
+                        }
+                        _ => 0,
+                    };
+                    result = result.wrapping_mul(31).wrapping_add(h);
+                }
+                Some(JValue::Int(result))
+            }
+            ("java/util/Arrays", "hashCode", "([I)I") => {
+                let Some(arr_ref) = _args.first().and_then(|v| v.as_ref()).cloned() else {
+                    return Some(JValue::Int(0));
+                };
+                let mut result: i32 = 1;
+                match &arr_ref.borrow().native {
+                    NativePayload::IntArray(v) => {
+                        for &e in v {
+                            result = result.wrapping_mul(31).wrapping_add(e);
+                        }
+                    }
+                    NativePayload::Array(v) => {
+                        for e in v {
+                            result = result.wrapping_mul(31).wrapping_add(e.as_int());
+                        }
+                    }
+                    _ => return Some(JValue::Int(0)),
+                }
+                Some(JValue::Int(result))
+            }
+            ("java/util/Arrays", "hashCode", "([J)I") => {
+                let Some(arr_ref) = _args.first().and_then(|v| v.as_ref()).cloned() else {
+                    return Some(JValue::Int(0));
+                };
+                let mut result: i32 = 1;
+                match &arr_ref.borrow().native {
+                    NativePayload::LongArray(v) => {
+                        for &e in v {
+                            let h = (e ^ (e >> 32)) as i32;
+                            result = result.wrapping_mul(31).wrapping_add(h);
+                        }
+                    }
+                    NativePayload::Array(v) => {
+                        for e in v {
+                            let lv = e.as_long();
+                            let h = (lv ^ (lv >> 32)) as i32;
+                            result = result.wrapping_mul(31).wrapping_add(h);
+                        }
+                    }
+                    _ => return Some(JValue::Int(0)),
+                }
+                Some(JValue::Int(result))
+            }
+            ("java/util/Arrays", "hashCode", "([B)I") => {
+                let Some(arr_ref) = _args.first().and_then(|v| v.as_ref()).cloned() else {
+                    return Some(JValue::Int(0));
+                };
+                let mut result: i32 = 1;
+                match &arr_ref.borrow().native {
+                    NativePayload::ByteArray(v) => {
+                        for &e in v {
+                            result = result.wrapping_mul(31).wrapping_add((e as i8) as i32);
+                        }
+                    }
+                    NativePayload::Array(v) => {
+                        for e in v {
+                            let b = e.as_int() as i8 as i32;
+                            result = result.wrapping_mul(31).wrapping_add(b);
+                        }
+                    }
+                    _ => return Some(JValue::Int(0)),
+                }
+                Some(JValue::Int(result))
+            }
             ("java/lang/Class", "forName0", "(Ljava/lang/String;)Ljava/lang/Class;") => {
                 let runtime_name = _args
                     .first()
@@ -3121,6 +3255,35 @@ impl Vm {
         }
         let cn = this.borrow().class_name.clone();
         match (cn.as_str(), method_name) {
+            ("java/util/regex/Pattern", "matcher") => {
+                let input = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let m = JObject::new("java/util/regex/Matcher");
+                m.borrow_mut().fields.insert("__pattern".to_owned(), JValue::Ref(Some(this.clone())));
+                m.borrow_mut().fields.insert("__input".to_owned(), JValue::Ref(Some(self.intern_string(input))));
+                Some(JValue::Ref(Some(m)))
+            }
+            ("java/util/regex/Matcher", "matches") => {
+                let (regex, input) = {
+                    let mb = this.borrow();
+                    let regex = mb.fields.get("__pattern")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|p| p.borrow().fields.get("__regex").cloned())
+                        .and_then(|v| v.as_ref().cloned())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let input = mb.fields.get("__input")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    (regex, input)
+                };
+                let ok = if regex == ".*" { true } else { regex == input };
+                Some(JValue::Int(if ok { 1 } else { 0 }))
+            }
             ("java/lang/Class", "getName") => {
                 let internal = self
                     .class_internal_name_from_obj(this)

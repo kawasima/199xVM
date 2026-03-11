@@ -280,6 +280,21 @@
         <option value="pattern_matching">Pattern matching</option>
         <option value="record_modern">Record</option>
       </optgroup>
+      <optgroup label="Raoh">
+        <option value="raoh_object_string">Raoh ObjectDecoders: string</option>
+        <option value="raoh_object_number">Raoh ObjectDecoders: int/decimal</option>
+        <option value="raoh_map_fields">Raoh MapDecoders: field decode</option>
+        <option value="raoh_map_combine">Raoh MapDecoders: combine</option>
+        <option value="raoh_json_fields">Raoh JsonDecoders: field decode</option>
+        <option value="raoh_json_combine">Raoh JsonDecoders: combine</option>
+      </optgroup>
+      <optgroup label="JVM Showcase">
+        <option value="jvm_reflection_record">Reflection + Record metadata</option>
+        <option value="jvm_bigdecimal">BigDecimal / BigInteger</option>
+        <option value="jvm_completable_future">CompletableFuture</option>
+        <option value="jvm_forkjoin">ForkJoin / RecursiveTask</option>
+        <option value="jvm_pattern_switch_record">Pattern + Switch + Record</option>
+      </optgroup>
     </select>
     <span class="status" id="status">Loading WASM…</span>
   </div>
@@ -677,6 +692,196 @@ public class RecordModernDemo {
     }
 }
 `,
+      raoh_object_string: `import net.unit8.raoh.Result;
+import static net.unit8.raoh.ObjectDecoders.*;
+
+public class RaohObjectString {
+    public static String run() {
+        Result r = string().decode("raoh");
+        return "decoded=" + r.getOrThrow();
+    }
+}
+`,
+      raoh_object_number: `import net.unit8.raoh.Result;
+import static net.unit8.raoh.ObjectDecoders.*;
+
+public class RaohObjectNumber {
+    public static String run() {
+        Result i = int_().decode(42);
+        Result d = decimal().decode("123.45");
+        return "int=" + i.getOrThrow() + " decimal=" + d.getOrThrow();
+    }
+}
+`,
+      raoh_map_fields: `import java.util.HashMap;
+import java.util.Map;
+import net.unit8.raoh.Result;
+import static net.unit8.raoh.ObjectDecoders.*;
+import static net.unit8.raoh.map.MapDecoders.*;
+
+public class RaohMapFields {
+    public static String run() {
+        Map m = new HashMap();
+        m.put("name", "alice");
+        m.put("age", 41);
+
+        Result name = field("name", string()).decode(m);
+        Result age = field("age", int_()).decode(m);
+        return name.getOrThrow() + ":" + age.getOrThrow();
+    }
+}
+`,
+      raoh_map_combine: `import java.util.HashMap;
+import java.util.Map;
+import net.unit8.raoh.Decoder;
+import net.unit8.raoh.Result;
+import static net.unit8.raoh.ObjectDecoders.*;
+import static net.unit8.raoh.map.MapDecoders.*;
+
+public class RaohMapCombine {
+    public static String run() {
+        Map m = new HashMap();
+        m.put("name", "mika");
+        m.put("age", 20);
+
+        Decoder decoder = combine(
+            field("name", string()),
+            field("age", int_())
+        ).map((name, age) -> ((String) name).toUpperCase() + ":" + age);
+
+        Result r = decoder.decode(m);
+        return (String) r.getOrThrow();
+    }
+}
+`,
+      raoh_json_fields: `import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+import net.unit8.raoh.Result;
+import static net.unit8.raoh.json.JsonDecoders.*;
+
+public class RaohJsonFields {
+    public static String run() throws Exception {
+        JsonMapper mapper = JsonMapper.builder().build();
+        JsonNode node = mapper.readTree("{\\"name\\":\\"ren\\",\\"age\\":28}");
+
+        Result name = field("name", string()).decode(node);
+        Result age = field("age", int_()).decode(node);
+        return name.getOrThrow() + ":" + age.getOrThrow();
+    }
+}
+`,
+      raoh_json_combine: `import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+import net.unit8.raoh.Decoder;
+import net.unit8.raoh.Result;
+import static net.unit8.raoh.json.JsonDecoders.*;
+
+public class RaohJsonCombine {
+    public static String run() throws Exception {
+        JsonMapper mapper = JsonMapper.builder().build();
+        JsonNode node = mapper.readTree("{\\"name\\":\\"alice\\",\\"age\\":42}");
+
+        Decoder decoder = combine(
+            field("name", string()),
+            field("age", int_())
+        ).map((name, age) -> name + ":" + age);
+
+        Result r = decoder.decode(node);
+        return (String) r.getOrThrow();
+    }
+}
+`,
+      jvm_reflection_record: `record Book(String title, int pages) {}
+
+public class JvmReflectionRecord {
+    public static String run() {
+        Class c = Book.class;
+        java.lang.reflect.RecordComponent[] components = c.getRecordComponents();
+        return "isRecord=" + c.isRecord() + " components=" + components.length + " first=" + components[0].getName();
+    }
+}
+`,
+      jvm_bigdecimal: `import java.math.BigDecimal;
+import java.math.BigInteger;
+
+public class JvmBigDecimal {
+    public static String run() {
+        BigInteger a = new BigInteger("12345678901234567890");
+        BigInteger b = new BigInteger("9876543210");
+        BigInteger g = a.gcd(b);
+
+        BigDecimal x = new BigDecimal("10.50");
+        BigDecimal y = new BigDecimal("3.20");
+        BigDecimal z = x.multiply(y).add(new BigDecimal("1.00"));
+        return "gcd=" + g + " money=" + z;
+    }
+}
+`,
+      jvm_completable_future: `import java.util.concurrent.CompletableFuture;
+
+public class JvmCompletableFuture {
+    public static String run() {
+        CompletableFuture f = CompletableFuture
+            .supplyAsync(() -> "199xvm")
+            .thenApply(s -> ((String) s).toUpperCase())
+            .thenApply(s -> s + ":OK");
+        return (String) f.join();
+    }
+}
+`,
+      jvm_forkjoin: `import java.util.concurrent.RecursiveTask;
+import java.util.concurrent.ForkJoinPool;
+
+public class JvmForkJoin {
+    static class SumTask extends RecursiveTask {
+        int lo;
+        int hi;
+        SumTask(int lo, int hi) { this.lo = lo; this.hi = hi; }
+
+        protected Object compute() {
+            int n = hi - lo;
+            if (n <= 4) {
+                int s = 0;
+                for (int i = lo; i <= hi; i++) s += i;
+                return s;
+            }
+            int mid = (lo + hi) / 2;
+            SumTask left = new SumTask(lo, mid);
+            SumTask right = new SumTask(mid + 1, hi);
+            left.fork();
+            int r = (int) right.compute();
+            int l = (int) left.join();
+            return l + r;
+        }
+    }
+
+    public static String run() {
+        ForkJoinPool pool = ForkJoinPool.commonPool();
+        int sum = (int) pool.invoke(new SumTask(1, 20));
+        return "sum(1..20)=" + sum;
+    }
+}
+`,
+      jvm_pattern_switch_record: `record User(String name, int age) {}
+
+public class JvmPatternSwitchRecord {
+    static String classify(Object v) {
+        if (v instanceof User(String n, int age)) {
+            return n + ":" + (age >= 20 ? "adult" : "young");
+        }
+        return switch (v) {
+            case String s when s.length() > 3 -> "long:" + s;
+            case String s -> "short:" + s;
+            case null -> "null";
+            default -> "other";
+        };
+    }
+
+    public static String run() {
+        return classify(new User("Aki", 19)) + " | " + classify("hello") + " | " + classify("ok");
+    }
+}
+`,
     };
 
     const DEFAULT_CODE = SNIPPETS.hello;
@@ -691,8 +896,8 @@ public class RecordModernDemo {
     async function initWasm() {
       const statusEl = document.getElementById("status");
       try {
-        const mod = await import("../jvm-core/pkg/jvm_core.js");
-        await mod.default();
+        const mod = await import("../jvm-core/pkg/jvm_core.js?v=__BUILD_TIMESTAMP__");
+        await mod.default({ module_or_path: `../jvm-core/pkg/jvm_core_bg.wasm?v=__BUILD_TIMESTAMP__` });
         jvmModule = mod;
         wasmReady = true;
         statusEl.textContent = "WASM ready";
@@ -721,34 +926,53 @@ public class RecordModernDemo {
 
     /** Load a JAR from a URL, register its methods, and append to classBundle. */
     window.loadJar = async function(url) {
-      try {
-        log("info", `Loading JAR: ${url} ...`);
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const jarBytes = new Uint8Array(await resp.arrayBuffer());
-        const classFiles = await readJar(jarBytes);
-        const jarBundle = classFilesToBundle(classFiles);
+      log("info", `Loading JAR: ${url} ...`);
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
+      const jarBytes = new Uint8Array(await resp.arrayBuffer());
+      const classFiles = await readJar(jarBytes);
+      const jarBundle = classFilesToBundle(classFiles);
 
-        // Register methods from the JAR classes
-        const metas = parseBundleMeta(jarBundle);
-        const reg = buildMethodRegistry(metas);
-        setMethodRegistry(reg);
+      // Register methods from the JAR classes
+      const metas = parseBundleMeta(jarBundle);
+      const reg = buildMethodRegistry(metas);
+      setMethodRegistry(reg);
 
-        // Append to classBundle
-        if (classBundle) {
-          const combined = new Uint8Array(classBundle.length + jarBundle.length);
-          combined.set(classBundle, 0);
-          combined.set(jarBundle, classBundle.length);
-          classBundle = combined;
-        } else {
-          classBundle = jarBundle;
-        }
-
-        const methodCount = Object.keys(reg).length;
-        log("info", `JAR loaded: ${classFiles.size} classes, ${methodCount} methods from ${url}`);
-      } catch (e) {
-        log("err", `JAR load failed: ${e.message}`);
+      // Append to classBundle
+      if (classBundle) {
+        const combined = new Uint8Array(classBundle.length + jarBundle.length);
+        combined.set(classBundle, 0);
+        combined.set(jarBundle, classBundle.length);
+        classBundle = combined;
+      } else {
+        classBundle = jarBundle;
       }
+
+      const methodCount = Object.keys(reg).length;
+      log("info", `JAR loaded: ${classFiles.size} classes, ${methodCount} methods from ${url}`);
+    };
+
+    async function loadBootstrapJars() {
+      // Prefer canonical dist filenames; keep legacy fallback for local dev.
+      const raohCandidates = ["./raoh.jar", "./raoh-0.4.0.jar"];
+      let loadedRaoh = false;
+      for (const url of raohCandidates) {
+        try {
+          await window.loadJar(url);
+          loadedRaoh = true;
+          break;
+        } catch (e) {
+          log("info", `Skip JAR ${url}: ${e.message}`);
+        }
+      }
+      if (!loadedRaoh) {
+        throw new Error("Failed to load raoh core JAR");
+      }
+
+      await window.loadJar("./jackson-annotations.jar");
+      await window.loadJar("./jackson-core.jar");
+      await window.loadJar("./jackson-databind.jar");
+      await window.loadJar("./raoh-json.jar");
     };
 
     // Build a combined bundle: shim + user class
@@ -944,7 +1168,9 @@ public class RecordModernDemo {
     // Init
     document.getElementById("run-btn").disabled = true;
     initWasm();
-    loadClassBundle().then(() => window.loadJar("./raoh-0.4.0.jar"));
+    loadClassBundle()
+      .then(() => loadBootstrapJars())
+      .catch((e) => log("err", `Bootstrap JAR load failed: ${e.message}`));
   </script>
 </body>
 </html>
