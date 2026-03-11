@@ -3,7 +3,7 @@
 // Used to auto-generate the method registry (KNOWN_METHODS) from the JDK shim
 // bundle, eliminating the need for a hand-maintained lookup table.
 
-import type { Type } from "./javac.js";
+import type { Type } from "./javac/ast.js";
 
 // ---------------------------------------------------------------------------
 // Types
