@@ -107,6 +107,10 @@ pub enum NativePayload {
     /// When the functional interface method is invoked, the VM looks up
     /// `impl_class::impl_method(impl_desc)` and prepends `captured` to the arguments.
     BytecodeLambda {
+        /// Functional interface method name (SAM), e.g. "apply", "decode".
+        sam_method: String,
+        /// Functional interface method descriptor for the SAM.
+        sam_desc: String,
         impl_class: String,
         impl_method: String,
         impl_desc: String,

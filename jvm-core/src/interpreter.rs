@@ -476,8 +476,16 @@ impl Vm {
         // If this is a BytecodeLambda, invoke its implementation method directly.
         if runtime_class == "$$Lambda" {
             let lambda_info = match &this.borrow().native {
-                NativePayload::BytecodeLambda { impl_class, impl_method, impl_desc, ref_kind, captured } => {
-                    Some((impl_class.clone(), impl_method.clone(), impl_desc.clone(), *ref_kind, captured.clone()))
+                NativePayload::BytecodeLambda { sam_method, sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured } => {
+                    Some((
+                        sam_method.clone(),
+                        sam_desc.clone(),
+                        impl_class.clone(),
+                        impl_method.clone(),
+                        impl_desc.clone(),
+                        *ref_kind,
+                        captured.clone(),
+                    ))
                 }
                 NativePayload::Lambda(f) => {
                     let result = f(args);
@@ -485,7 +493,13 @@ impl Vm {
                 }
                 _ => None,
             };
-            if let Some((impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info {
+            if let Some((sam_method, sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info {
+                // A lambda object should intercept only its SAM call.
+                // Default methods on the interface (e.g. Decoder.decode(Object))
+                // must be dispatched normally via the interface bytecode.
+                if method_name != sam_method || descriptor != sam_desc {
+                    // Fall through to regular method resolution below.
+                } else {
                 let mut full_args = captured;
                 full_args.extend(args);
                 // ref_kind 5 = invokeVirtual, 7 = invokeSpecial, 9 = invokeInterface
@@ -503,6 +517,7 @@ impl Vm {
                     self.invoke_static(&impl_class, &impl_method, &impl_desc, full_args)
                 }?;
                 return self.adapt_lambda_return(descriptor, &impl_desc, invoked);
+                }
             }
         }
 
@@ -1903,11 +1918,25 @@ impl Vm {
                     }
                 });
 
+                let sam_desc = bm.bootstrap_arguments.get(0).and_then(|&arg_idx| {
+                    match cp.get(arg_idx as usize)? {
+                        ConstantPoolEntry::MethodType { descriptor_index } => {
+                            match cp.get(*descriptor_index as usize)? {
+                                ConstantPoolEntry::Utf8(s) => Some(s.clone()),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                }).unwrap_or_default();
+
                 let lambda = if let Some((ref_kind, impl_class, impl_method, impl_desc)) = impl_info {
                     let obj = Rc::new(RefCell::new(JObject {
                         class_name: "$$Lambda".to_owned(),
                         fields: std::collections::HashMap::new(),
                         native: NativePayload::BytecodeLambda {
+                            sam_method: _method_name,
+                            sam_desc,
                             impl_class,
                             impl_method,
                             impl_desc,
@@ -3951,8 +3980,18 @@ impl Vm {
                     NativePayload::LongArray(v) => NativePayload::LongArray(v.clone()),
                     NativePayload::PrintStream(is_err) => NativePayload::PrintStream(*is_err),
                     NativePayload::Lambda(f) => NativePayload::Lambda(f.clone()),
-                    NativePayload::BytecodeLambda { impl_class, impl_method, impl_desc, ref_kind, captured } =>
+                    NativePayload::BytecodeLambda {
+                        sam_method,
+                        sam_desc,
+                        impl_class,
+                        impl_method,
+                        impl_desc,
+                        ref_kind,
+                        captured,
+                    } =>
                         NativePayload::BytecodeLambda {
+                            sam_method: sam_method.clone(),
+                            sam_desc: sam_desc.clone(),
                             impl_class: impl_class.clone(),
                             impl_method: impl_method.clone(),
                             impl_desc: impl_desc.clone(),
