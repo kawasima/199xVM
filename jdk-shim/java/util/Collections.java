@@ -13,6 +13,11 @@ public class Collections {
         return (Set<T>) EMPTY_SET;
     }
 
+    @SuppressWarnings("unchecked")
+    public static <K, V> Map<K, V> emptyMap() {
+        return (Map<K, V>) EMPTY_MAP;
+    }
+
     public static <T> List<T> unmodifiableList(List<? extends T> list) {
         return new UnmodifiableList<>(list);
     }
@@ -69,6 +74,7 @@ public class Collections {
 
     private static final List<?> EMPTY_LIST = new UnmodifiableList<>(new ArrayList<>());
     private static final Set<?> EMPTY_SET = new UnmodifiableSet<>(new HashSet<>());
+    private static final Map<?, ?> EMPTY_MAP = new HashMap<>();
 
     private static class UnmodifiableList<E> implements List<E> {
         private final List<? extends E> list;

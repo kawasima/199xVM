@@ -531,7 +531,9 @@ impl Vm {
                 }
                 return Ok(v);
             }
-            return Err(format!("Virtual method not found: {resolve_class}.{method_name}{descriptor}"));
+            return Err(format!(
+                "Virtual method not found: {resolve_class}.{method_name}{descriptor} (runtime={runtime_class})"
+            ));
         }
 
         let (class_name_owned, descriptor_owned) = {
