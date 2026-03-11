@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::class_file::{
-    Attribute, BootstrapMethod, ClassFile, ConstantPoolEntry, MethodInfo,
+    Attribute, BootstrapMethod, ClassFile, ConstantPoolEntry, ExceptionTableEntry, MethodInfo,
 };
 use crate::heap::{JObject, JRef, JValue, NativePayload};
 
@@ -29,12 +29,21 @@ pub struct Vm {
     string_pool: HashMap<String, JRef>,
     /// Static field storage keyed by "ClassName.fieldName".
     static_fields: HashMap<String, JValue>,
+    /// Pending exception object — set by athrow, consumed by exception handler.
+    /// This preserves the full exception object (with message, cause, fields)
+    /// across the Err(String) propagation path.
+    pending_exception: Option<JRef>,
 }
 
 impl Vm {
     /// Create an empty VM.
     pub fn new() -> Self {
-        Vm { classes: HashMap::new(), string_pool: HashMap::new(), static_fields: HashMap::new() }
+        Vm {
+            classes: HashMap::new(),
+            string_pool: HashMap::new(),
+            static_fields: HashMap::new(),
+            pending_exception: None,
+        }
     }
 
     /// Register a pre-parsed class file.
@@ -231,9 +240,10 @@ impl Vm {
             return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
         }
 
-        let code = {
+        let (code, exception_table) = {
             let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().unwrap().code.clone()
+            let ca = method.code().unwrap();
+            (ca.code.clone(), ca.exception_table.clone())
         };
         let cp_entries: Vec<ConstantPoolEntry> = {
             let class = self.classes.get(&class_name_owned).unwrap();
@@ -256,7 +266,7 @@ impl Vm {
             pc: 0,
         };
 
-        self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods)
+        self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods, &exception_table)
     }
 
     /// Execute an instance method with invokespecial semantics.
@@ -322,9 +332,10 @@ impl Vm {
             return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
         }
 
-        let code = {
+        let (code, exception_table) = {
             let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().unwrap().code.clone()
+            let ca = method.code().unwrap();
+            (ca.code.clone(), ca.exception_table.clone())
         };
         let cp_entries: Vec<ConstantPoolEntry> = {
             let class = self.classes.get(&class_name_owned).unwrap();
@@ -347,7 +358,7 @@ impl Vm {
             pc: 0,
         };
 
-        self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods)
+        self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods, &exception_table)
     }
 
     /// Execute an instance method (first local = `this` reference).
@@ -464,9 +475,10 @@ impl Vm {
             return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
         }
 
-        let code = {
+        let (code, exception_table) = {
             let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().unwrap().code.clone()
+            let ca = method.code().unwrap();
+            (ca.code.clone(), ca.exception_table.clone())
         };
         let cp_entries: Vec<ConstantPoolEntry> = {
             let class = self.classes.get(&class_name_owned).unwrap();
@@ -489,7 +501,7 @@ impl Vm {
             pc: 0,
         };
 
-        self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods)
+        self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods, &exception_table)
     }
 
     // ------------------------------------------------------------------
@@ -503,11 +515,126 @@ impl Vm {
         cp: &[ConstantPoolEntry],
         class_name: &str,
         bootstrap_methods: &[BootstrapMethod],
+        exception_table: &[ExceptionTableEntry],
     ) -> Result<JValue, String> {
         loop {
+            let opcode_pc = frame.pc; // PC of the current instruction (for exception table lookup)
             let opcode = code[frame.pc];
             frame.pc += 1;
 
+            // Wrap opcode execution to catch exceptions and search exception_table.
+            let result = self.execute_opcode(frame, code, cp, class_name, bootstrap_methods, exception_table, opcode);
+            match result {
+                Ok(Some(ret)) => return Ok(ret),  // method returned a value
+                Ok(None) => continue,              // opcode executed, continue loop
+                Err(err_msg) => {
+                    // Try to find an exception handler in the exception_table.
+                    if let Some((handler_pc, exc_obj)) = self.find_exception_handler(
+                        frame, exception_table, cp, opcode_pc, &err_msg,
+                    ) {
+                        frame.stack.clear();
+                        frame.stack.push(exc_obj);
+                        frame.pc = handler_pc;
+                        continue;
+                    }
+                    return Err(err_msg);
+                }
+            }
+        }
+    }
+
+    /// Search exception_table for a matching handler.
+    /// Returns (handler_pc, exception_object) if found.
+    fn find_exception_handler(
+        &mut self,
+        _frame: &Frame,
+        exception_table: &[ExceptionTableEntry],
+        cp: &[ConstantPoolEntry],
+        throw_pc: usize,
+        err_msg: &str,
+    ) -> Option<(usize, JValue)> {
+        // Extract exception class name from error message if it matches our format.
+        let exc_class = if err_msg.starts_with("Exception: ") {
+            &err_msg["Exception: ".len()..]
+        } else if err_msg.starts_with("NullPointerException") {
+            "java/lang/NullPointerException"
+        } else if err_msg.starts_with("ClassCastException") {
+            "java/lang/ClassCastException"
+        } else if err_msg.contains("IndexOutOfBoundsException") {
+            "java/lang/IndexOutOfBoundsException"
+        } else if err_msg.contains("ArithmeticException") {
+            "java/lang/ArithmeticException"
+        } else if err_msg.contains("StackOverflowError") {
+            "java/lang/StackOverflowError"
+        } else if err_msg.starts_with("UnsupportedOperationException") {
+            "java/lang/UnsupportedOperationException"
+        } else {
+            // Last resort: treat any error as java/lang/RuntimeException so
+            // catch(Exception e) / catch-all can still handle it.
+            "java/lang/RuntimeException"
+        };
+
+        for entry in exception_table {
+            let start = entry.start_pc as usize;
+            let end = entry.end_pc as usize;
+            if throw_pc < start || throw_pc >= end {
+                continue;
+            }
+            // catch_type == 0 means catch-all (finally).
+            if entry.catch_type == 0 {
+                let exc_obj = self.take_or_create_exception(exc_class, err_msg);
+                return Some((entry.handler_pc as usize, exc_obj));
+            }
+            // Resolve catch_type to class name and check if exception is instance.
+            let catch_class = resolve_class_name(cp, entry.catch_type);
+            if exc_class == catch_class || self.is_instance_of(exc_class, &catch_class) {
+                let exc_obj = self.take_or_create_exception(exc_class, err_msg);
+                return Some((entry.handler_pc as usize, exc_obj));
+            }
+        }
+        // No handler found — do NOT clear pending_exception here; it must survive
+        // propagation through intermediate frames until a handler is found upstream.
+        None
+    }
+
+    /// Take the pending exception object if set, or create a new one.
+    fn take_or_create_exception(&mut self, exc_class: &str, err_msg: &str) -> JValue {
+        if let Some(r) = self.pending_exception.take() {
+            JValue::Ref(Some(r))
+        } else {
+            // Create exception object with the message stored as a field.
+            let exc = JObject::new(exc_class);
+            // Store the error message in a "detailMessage" field (matches JDK Throwable).
+            // Strip the "Exception: classname" prefix to get just the meaningful message.
+            let msg_str = err_msg.strip_prefix("Exception: ")
+                .and_then(|s| {
+                    // After stripping "Exception: ", the remainder is class name.
+                    // If there's a ": " after the class name, extract the actual message.
+                    s.find(": ").map(|i| &s[i + 2..])
+                })
+                .unwrap_or(err_msg);
+            exc.borrow_mut().fields.insert(
+                "detailMessage".to_owned(),
+                JValue::Ref(Some(JObject::new_string(msg_str))),
+            );
+            JValue::Ref(Some(exc))
+        }
+    }
+
+    /// Execute a single opcode. Returns:
+    /// - Ok(Some(value)) if the method returns
+    /// - Ok(None) if execution should continue
+    /// - Err(msg) if an exception was thrown
+    fn execute_opcode(
+        &mut self,
+        frame: &mut Frame,
+        code: &[u8],
+        cp: &[ConstantPoolEntry],
+        class_name: &str,
+        bootstrap_methods: &[BootstrapMethod],
+        _exception_table: &[ExceptionTableEntry],
+        opcode: u8,
+    ) -> Result<Option<JValue>, String> {
             match opcode {
                 // ---- Constants ----
                 0x00 => {} // nop
@@ -602,6 +729,21 @@ impl Vm {
                         return Err("NullPointerException: iaload".to_owned());
                     }
                 }
+                0x2f | 0x30 | 0x31 | 0x35 => { // laload, faload, daload, saload
+                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let arr_ref = frame.stack.pop().unwrap();
+                    if let Some(r) = arr_ref.as_ref() {
+                        let elem = match &r.borrow().native {
+                            NativePayload::Array(v) => v.get(idx).cloned().unwrap_or(JValue::Int(0)),
+                            NativePayload::LongArray(v) => JValue::Long(v[idx]),
+                            NativePayload::IntArray(v) => JValue::Int(v[idx]),
+                            _ => JValue::Int(0),
+                        };
+                        frame.stack.push(elem);
+                    } else {
+                        return Err("NullPointerException: array load".to_owned());
+                    }
+                }
 
                 // ---- Stores ----
                 0x36 => { let i = code[frame.pc] as usize; frame.pc += 1; let v = frame.stack.pop().unwrap(); frame.locals[i] = v; } // istore
@@ -651,6 +793,40 @@ impl Vm {
                         }
                     }
                 }
+                0x50 | 0x51 | 0x52 | 0x56 => { // lastore, fastore, dastore, sastore
+                    let val = frame.stack.pop().unwrap();
+                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let arr_ref = frame.stack.pop().unwrap();
+                    if let Some(r) = arr_ref.as_ref() {
+                        match r.borrow_mut().native {
+                            NativePayload::Array(ref mut v) => {
+                                while v.len() <= idx { v.push(JValue::Int(0)); }
+                                v[idx] = val;
+                            }
+                            NativePayload::LongArray(ref mut v) => {
+                                if idx < v.len() { v[idx] = val.as_long(); }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                0x54 => { // bastore
+                    let val = frame.stack.pop().unwrap().as_int() as u8;
+                    let idx = frame.stack.pop().unwrap().as_int() as usize;
+                    let arr_ref = frame.stack.pop().unwrap();
+                    if let Some(r) = arr_ref.as_ref() {
+                        match r.borrow_mut().native {
+                            NativePayload::ByteArray(ref mut v) => {
+                                if idx < v.len() { v[idx] = val; }
+                            }
+                            NativePayload::Array(ref mut v) => {
+                                while v.len() <= idx { v.push(JValue::Int(0)); }
+                                v[idx] = JValue::Int(val as i32);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 0x34 => { // caload (char array load)
                     let idx = frame.stack.pop().unwrap().as_int() as usize;
                     let arr_ref = frame.stack.pop().unwrap();
@@ -672,6 +848,45 @@ impl Vm {
                     let v1 = frame.stack.pop().unwrap();
                     let v2 = frame.stack.pop().unwrap();
                     frame.stack.push(v1.clone());
+                    frame.stack.push(v2);
+                    frame.stack.push(v1);
+                }
+                0x5b => { // dup_x2
+                    let v1 = frame.stack.pop().unwrap();
+                    let v2 = frame.stack.pop().unwrap();
+                    let v3 = frame.stack.pop().unwrap();
+                    frame.stack.push(v1.clone());
+                    frame.stack.push(v3);
+                    frame.stack.push(v2);
+                    frame.stack.push(v1);
+                }
+                0x5c => { // dup2
+                    let v1 = frame.stack.pop().unwrap();
+                    let v2 = frame.stack.pop().unwrap();
+                    frame.stack.push(v2.clone());
+                    frame.stack.push(v1.clone());
+                    frame.stack.push(v2);
+                    frame.stack.push(v1);
+                }
+                0x5d => { // dup2_x1
+                    let v1 = frame.stack.pop().unwrap();
+                    let v2 = frame.stack.pop().unwrap();
+                    let v3 = frame.stack.pop().unwrap();
+                    frame.stack.push(v2.clone());
+                    frame.stack.push(v1.clone());
+                    frame.stack.push(v3);
+                    frame.stack.push(v2);
+                    frame.stack.push(v1);
+                }
+                0x5e => { // dup2_x2
+                    let v1 = frame.stack.pop().unwrap();
+                    let v2 = frame.stack.pop().unwrap();
+                    let v3 = frame.stack.pop().unwrap();
+                    let v4 = frame.stack.pop().unwrap();
+                    frame.stack.push(v2.clone());
+                    frame.stack.push(v1.clone());
+                    frame.stack.push(v4);
+                    frame.stack.push(v3);
                     frame.stack.push(v2);
                     frame.stack.push(v1);
                 }
@@ -700,13 +915,70 @@ impl Vm {
                 0x61 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_add(b))); } // ladd
                 0x65 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_sub(b))); } // lsub
                 0x69 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_mul(b))); } // lmul
+                0x6d => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_div(b))); } // ldiv
+                0x71 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_rem(b))); } // lrem
+                0x75 => { let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_neg())); } // lneg
+                0x7f => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a & b)); } // land
+                0x81 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a | b)); } // lor
+                0x83 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a ^ b)); } // lxor
+                0x79 => { let b = frame.stack.pop().unwrap().as_int() & 0x3f; let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a << b)); } // lshl
+                0x7b => { let b = frame.stack.pop().unwrap().as_int() & 0x3f; let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a >> b)); } // lshr
+                0x7d => { let b = frame.stack.pop().unwrap().as_int() & 0x3f; let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(((a as u64) >> b) as i64)); } // lushr
                 0x94 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Int(a.cmp(&b) as i32)); } // lcmp
+
+                // ---- Arithmetic (float) ----
+                0x62 => { let b = frame.stack.pop().unwrap().as_float(); let a = frame.stack.pop().unwrap().as_float(); frame.stack.push(JValue::Float(a + b)); } // fadd
+                0x66 => { let b = frame.stack.pop().unwrap().as_float(); let a = frame.stack.pop().unwrap().as_float(); frame.stack.push(JValue::Float(a - b)); } // fsub
+                0x6a => { let b = frame.stack.pop().unwrap().as_float(); let a = frame.stack.pop().unwrap().as_float(); frame.stack.push(JValue::Float(a * b)); } // fmul
+                0x6e => { let b = frame.stack.pop().unwrap().as_float(); let a = frame.stack.pop().unwrap().as_float(); frame.stack.push(JValue::Float(a / b)); } // fdiv
+                0x72 => { let b = frame.stack.pop().unwrap().as_float(); let a = frame.stack.pop().unwrap().as_float(); frame.stack.push(JValue::Float(a % b)); } // frem
+                0x76 => { let a = frame.stack.pop().unwrap().as_float(); frame.stack.push(JValue::Float(-a)); } // fneg
+                0x95 => { // fcmpl (NaN → -1)
+                    let b = frame.stack.pop().unwrap().as_float();
+                    let a = frame.stack.pop().unwrap().as_float();
+                    // If either is NaN, none of >, ==, < are true → falls to else (-1).
+                    frame.stack.push(JValue::Int(if a > b { 1 } else if a == b { 0 } else if a < b { -1 } else { -1 }));
+                }
+                0x96 => { // fcmpg (NaN → 1)
+                    let b = frame.stack.pop().unwrap().as_float();
+                    let a = frame.stack.pop().unwrap().as_float();
+                    // If either is NaN, none of >, ==, < are true → falls to else (1).
+                    frame.stack.push(JValue::Int(if a > b { 1 } else if a == b { 0 } else if a < b { -1 } else { 1 }));
+                }
+
+                // ---- Arithmetic (double) ----
+                0x63 => { let b = frame.stack.pop().unwrap().as_double(); let a = frame.stack.pop().unwrap().as_double(); frame.stack.push(JValue::Double(a + b)); } // dadd
+                0x67 => { let b = frame.stack.pop().unwrap().as_double(); let a = frame.stack.pop().unwrap().as_double(); frame.stack.push(JValue::Double(a - b)); } // dsub
+                0x6b => { let b = frame.stack.pop().unwrap().as_double(); let a = frame.stack.pop().unwrap().as_double(); frame.stack.push(JValue::Double(a * b)); } // dmul
+                0x6f => { let b = frame.stack.pop().unwrap().as_double(); let a = frame.stack.pop().unwrap().as_double(); frame.stack.push(JValue::Double(a / b)); } // ddiv
+                0x73 => { let b = frame.stack.pop().unwrap().as_double(); let a = frame.stack.pop().unwrap().as_double(); frame.stack.push(JValue::Double(a % b)); } // drem
+                0x77 => { let a = frame.stack.pop().unwrap().as_double(); frame.stack.push(JValue::Double(-a)); } // dneg
+                0x97 => { // dcmpl (NaN → -1)
+                    let b = frame.stack.pop().unwrap().as_double();
+                    let a = frame.stack.pop().unwrap().as_double();
+                    // If either is NaN, none of >, ==, < are true → falls to else (-1).
+                    frame.stack.push(JValue::Int(if a > b { 1 } else if a == b { 0 } else if a < b { -1 } else { -1 }));
+                }
+                0x98 => { // dcmpg (NaN → 1)
+                    let b = frame.stack.pop().unwrap().as_double();
+                    let a = frame.stack.pop().unwrap().as_double();
+                    // If either is NaN, none of >, ==, < are true → falls to else (1).
+                    frame.stack.push(JValue::Int(if a > b { 1 } else if a == b { 0 } else if a < b { -1 } else { 1 }));
+                }
 
                 // ---- Conversions ----
                 0x85 => { let v = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Long(v as i64)); } // i2l
                 0x86 => { let v = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Float(v as f32)); } // i2f
                 0x87 => { let v = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Double(v as f64)); } // i2d
                 0x88 => { let v = frame.stack.pop().unwrap().as_long() as i32; frame.stack.push(JValue::Int(v)); } // l2i
+                0x89 => { let v = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Float(v as f32)); } // l2f
+                0x8a => { let v = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Double(v as f64)); } // l2d
+                0x8b => { let v = frame.stack.pop().unwrap().as_float(); frame.stack.push(JValue::Int(float_to_int(v))); } // f2i
+                0x8c => { let v = frame.stack.pop().unwrap().as_float(); frame.stack.push(JValue::Long(float_to_long(v))); } // f2l
+                0x8d => { let v = frame.stack.pop().unwrap().as_float(); frame.stack.push(JValue::Double(v as f64)); } // f2d
+                0x8e => { let v = frame.stack.pop().unwrap().as_double(); frame.stack.push(JValue::Int(double_to_int(v))); } // d2i
+                0x8f => { let v = frame.stack.pop().unwrap().as_double(); frame.stack.push(JValue::Long(double_to_long(v))); } // d2l
+                0x90 => { let v = frame.stack.pop().unwrap().as_double(); frame.stack.push(JValue::Float(v as f32)); } // d2f
                 0x91 => { let v = frame.stack.pop().unwrap().as_int() as i8; frame.stack.push(JValue::Int(v as i32)); } // i2b
                 0x92 => { let v = frame.stack.pop().unwrap().as_int() as u16; frame.stack.push(JValue::Int(v as i32)); } // i2c
                 0x93 => { let v = frame.stack.pop().unwrap().as_int() as i16; frame.stack.push(JValue::Int(v as i32)); } // i2s
@@ -804,12 +1076,12 @@ impl Vm {
                 }
 
                 // ---- Returns ----
-                0xac => return Ok(frame.stack.pop().unwrap()), // ireturn
-                0xad => return Ok(frame.stack.pop().unwrap()), // lreturn
-                0xae => return Ok(frame.stack.pop().unwrap()), // freturn
-                0xaf => return Ok(frame.stack.pop().unwrap()), // dreturn
-                0xb0 => return Ok(frame.stack.pop().unwrap()), // areturn
-                0xb1 => return Ok(JValue::Void),               // return
+                0xac => return Ok(Some(frame.stack.pop().unwrap())), // ireturn
+                0xad => return Ok(Some(frame.stack.pop().unwrap())), // lreturn
+                0xae => return Ok(Some(frame.stack.pop().unwrap())), // freturn
+                0xaf => return Ok(Some(frame.stack.pop().unwrap())), // dreturn
+                0xb0 => return Ok(Some(frame.stack.pop().unwrap())), // areturn
+                0xb1 => return Ok(Some(JValue::Void)),               // return
 
                 // ---- Field access ----
                 0xb2 => { // getstatic
@@ -821,6 +1093,8 @@ impl Vm {
                     let idx = read_u16(code, &mut frame.pc);
                     let val = frame.stack.pop().unwrap_or(JValue::Void);
                     let (cls, fld, _) = resolve_fieldref(cp, idx);
+                    // Per JVMS §5.5: putstatic triggers class initialization.
+                    let _ = self.ensure_class_init(&cls);
                     self.static_fields.insert(format!("{cls}.{fld}"), val);
                 }
                 0xb4 => { // getfield
@@ -875,6 +1149,9 @@ impl Vm {
                 0xba => { // invokedynamic
                     let idx = read_u16(code, &mut frame.pc);
                     frame.pc += 2; // reserved bytes
+                    // NOTE: JVMS §6.5.invokedynamic says CallSite should be cached per instruction.
+                    // Our VM doesn't use CallSite indirection, so caching isn't applicable here.
+                    // This is a performance concern only; correctness is unaffected.
                     let result = self.dispatch_invokedynamic(cp, idx, frame, class_name, bootstrap_methods)?;
                     if !matches!(result, JValue::Void) { frame.stack.push(result); }
                 }
@@ -924,6 +1201,19 @@ impl Vm {
                     );
                     frame.stack.push(JValue::Ref(Some(arr)));
                 }
+                0xc5 => { // multianewarray
+                    let idx = read_u16(code, &mut frame.pc);
+                    let dimensions = code[frame.pc] as usize;
+                    frame.pc += 1;
+                    let class_name_str = resolve_class_name(cp, idx);
+                    let mut dim_sizes = Vec::with_capacity(dimensions);
+                    for _ in 0..dimensions {
+                        dim_sizes.push(frame.stack.pop().unwrap().as_int() as usize);
+                    }
+                    dim_sizes.reverse();
+                    let arr = self.create_multi_array(&class_name_str, &dim_sizes, 0);
+                    frame.stack.push(JValue::Ref(Some(arr)));
+                }
                 0xbe => { // arraylength
                     let arr_ref = frame.stack.pop().unwrap();
                     let len = match arr_ref.as_ref() {
@@ -931,6 +1221,7 @@ impl Vm {
                             NativePayload::Array(v) => v.len() as i32,
                             NativePayload::ByteArray(v) => v.len() as i32,
                             NativePayload::IntArray(v) => v.len() as i32,
+                            NativePayload::LongArray(v) => v.len() as i32,
                             _ => 0,
                         },
                         None => return Err("NullPointerException: arraylength".to_owned()),
@@ -939,9 +1230,24 @@ impl Vm {
                 }
 
                 // ---- instanceof / checkcast ----
-                0xc0 => { // checkcast
-                    frame.pc += 2; // index (ignored for now)
-                    // value stays on stack unchanged
+                0xc0 => { // checkcast — per JVMS §6.5.checkcast
+                    let idx = read_u16(code, &mut frame.pc);
+                    let target_class = resolve_class_name(cp, idx);
+                    // Peek at top of stack (don't pop — value stays if check passes).
+                    let obj = frame.stack.last().unwrap();
+                    match obj.as_ref() {
+                        None => {} // null passes checkcast
+                        Some(r) => {
+                            let cn = r.borrow().class_name.clone();
+                            if !self.is_instance_of(&cn, &target_class) {
+                                return Err(format!(
+                                    "ClassCastException: {} cannot be cast to {}",
+                                    cn.replace('/', "."),
+                                    target_class.replace('/', ".")
+                                ));
+                            }
+                        }
+                    }
                 }
                 0xc1 => { // instanceof
                     let idx = read_u16(code, &mut frame.pc);
@@ -972,10 +1278,20 @@ impl Vm {
                 // ---- athrow ----
                 0xbf => {
                     let exc = frame.stack.pop().unwrap();
-                    let msg = match exc.as_ref() {
-                        Some(r) => format!("Exception: {}", r.borrow().class_name),
-                        None => "NullPointerException (athrow null)".to_owned(),
+                    let (msg, exc_ref) = match exc {
+                        JValue::Ref(Some(r)) => {
+                            let msg = format!("Exception: {}", r.borrow().class_name);
+                            (msg, Some(r))
+                        }
+                        JValue::Ref(None) => {
+                            let npe = JObject::new("java/lang/NullPointerException");
+                            ("Exception: java/lang/NullPointerException".to_owned(), Some(npe))
+                        }
+                        _ => ("Exception: java/lang/RuntimeException".to_owned(), None),
                     };
+                    if let Some(r) = exc_ref {
+                        self.pending_exception = Some(r);
+                    }
                     return Err(msg);
                 }
 
@@ -989,7 +1305,7 @@ impl Vm {
                     ));
                 }
             }
-        }
+            Ok(None)
     }
 
     // ------------------------------------------------------------------
@@ -1031,20 +1347,48 @@ impl Vm {
         cp: &[ConstantPoolEntry],
         idx: u16,
     ) -> Result<JValue, String> {
-        let (class_name, field_name, _descriptor) = resolve_fieldref(cp, idx);
+        let (class_name, field_name, descriptor) = resolve_fieldref(cp, idx);
         // Run <clinit> if not yet done (initialises static fields via putstatic).
         let _ = self.ensure_class_init(&class_name.clone());
-        // Check per-class static field table first.
-        if let Some(v) = self.static_fields.get(&format!("{class_name}.{field_name}")) {
-            return Ok(v.clone());
+        // Search this class and its super-class chain for the static field (JVMS §5.4.3.2).
+        if let Some(v) = self.resolve_static_field_in_hierarchy(&class_name, &field_name) {
+            return Ok(v);
         }
         // Well-known JDK static fields that cannot be initialised via <clinit>
         // because the JDK classes are not in the bundle.
         match (class_name.as_str(), field_name.as_str()) {
             ("java/lang/System", "out") => Ok(JValue::Ref(Some(JObject::new("java/io/PrintStream")))),
             ("java/lang/System", "err") => Ok(JValue::Ref(Some(JObject::new("java/io/PrintStream")))),
-            _ => Ok(JValue::Ref(None)),
+            _ => Ok(default_value_for_descriptor(&descriptor)),
         }
+    }
+
+    /// Walk the class hierarchy to find a static field value.
+    fn resolve_static_field_in_hierarchy(&self, class_name: &str, field_name: &str) -> Option<JValue> {
+        // Check this class first.
+        let key = format!("{class_name}.{field_name}");
+        if let Some(v) = self.static_fields.get(&key) {
+            return Some(v.clone());
+        }
+        // Check super class.
+        if let Some(class) = self.classes.get(class_name) {
+            if class.super_class != 0 {
+                let super_name = class.constant_pool.class_name(class.super_class).to_owned();
+                if let Some(v) = self.resolve_static_field_in_hierarchy(&super_name, field_name) {
+                    return Some(v);
+                }
+            }
+            // Check interfaces.
+            let iface_names: Vec<String> = class.interfaces.iter()
+                .map(|&idx| class.constant_pool.class_name(idx).to_owned())
+                .collect();
+            for iface_name in iface_names {
+                if let Some(v) = self.resolve_static_field_in_hierarchy(&iface_name, field_name) {
+                    return Some(v);
+                }
+            }
+        }
+        None
     }
 
     fn resolve_instance_field(
@@ -1084,6 +1428,8 @@ impl Vm {
         frame: &mut Frame,
     ) -> Result<JValue, String> {
         let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
+        // Per JVMS §5.5: invokestatic triggers class initialization.
+        let _ = self.ensure_class_init(&class_name);
         let n_args = count_args(&descriptor);
         let args = pop_args(frame, n_args);
         self.invoke_static(&class_name, &method_name, &descriptor, args)
@@ -1594,6 +1940,9 @@ impl Vm {
     }
 
     /// Run `<clinit>` for a class if it hasn't been initialized yet.
+    /// Per JVMS §5.5: Before a class is initialized, its direct superclass must
+    /// be initialized first (recursively), and any superinterfaces that declare
+    /// default methods must also be initialized.
     fn ensure_class_init(&mut self, class_name: &str) -> Result<(), String> {
         let key = format!("{class_name}.<clinit>done");
         if self.static_fields.contains_key(&key) {
@@ -1601,6 +1950,30 @@ impl Vm {
         }
         // Mark as initialized before running to prevent recursion.
         self.static_fields.insert(key, JValue::Int(1));
+
+        // Initialize super class first (JVMS §5.5 step 7).
+        let (super_name, iface_names) = if let Some(class) = self.classes.get(class_name) {
+            let sup = if class.super_class != 0 {
+                let s = class.constant_pool.class_name(class.super_class).to_owned();
+                if s != "java/lang/Object" { Some(s) } else { None }
+            } else {
+                None
+            };
+            // JVMS §5.5 step 8: initialize superinterfaces that declare default methods.
+            let ifaces: Vec<String> = class.interfaces.iter()
+                .map(|&idx| class.constant_pool.class_name(idx).to_owned())
+                .collect();
+            (sup, ifaces)
+        } else {
+            (None, vec![])
+        };
+        if let Some(s) = super_name {
+            self.ensure_class_init(&s)?;
+        }
+        for iface in iface_names {
+            self.ensure_class_init(&iface)?;
+        }
+
         // Check if the class has a <clinit> method.
         let has_clinit = self.find_method(class_name, "<clinit>", "()V").is_some();
         if has_clinit {
@@ -1610,19 +1983,74 @@ impl Vm {
     }
 
     /// Check if `runtime_class` is an instance of `target_class` (by name).
+    /// Handles array types per JVMS §6.5.instanceof / §6.5.checkcast.
+    /// Recursively create a multi-dimensional array for `multianewarray`.
+    fn create_multi_array(&self, desc: &str, sizes: &[usize], depth: usize) -> JRef {
+        let count = sizes[depth];
+        if depth + 1 >= sizes.len() {
+            // Innermost dimension — create a flat array.
+            let elem = if desc.ends_with("[I") || desc.ends_with("[B") || desc.ends_with("[C") || desc.ends_with("[S") || desc.ends_with("[Z") {
+                JValue::Int(0)
+            } else if desc.ends_with("[J") {
+                JValue::Long(0)
+            } else if desc.ends_with("[F") {
+                JValue::Float(0.0)
+            } else if desc.ends_with("[D") {
+                JValue::Double(0.0)
+            } else {
+                JValue::Ref(None)
+            };
+            JObject::new_array(desc, vec![elem; count])
+        } else {
+            // Create sub-arrays.
+            let sub_desc = &desc[1..]; // strip one '['
+            let elements: Vec<JValue> = (0..count)
+                .map(|_| JValue::Ref(Some(self.create_multi_array(sub_desc, sizes, depth + 1))))
+                .collect();
+            JObject::new_array(desc, elements)
+        }
+    }
+
     fn is_instance_of(&self, runtime_class: &str, target_class: &str) -> bool {
         if runtime_class == target_class { return true; }
+        // java/lang/Object is a supertype of everything.
+        if target_class == "java/lang/Object" { return true; }
+
+        // Array type rules (JVMS §6.5.checkcast):
+        //   array → Object: true (handled above)
+        //   array → Cloneable / Serializable: true
+        //   T[] → S[]: recursively check T against S
+        if runtime_class.starts_with('[') {
+            if target_class == "java/lang/Cloneable" || target_class == "java/io/Serializable" {
+                return true;
+            }
+            if target_class.starts_with('[') {
+                // Both are arrays: compare component types.
+                let rc = &runtime_class[1..];
+                let tc = &target_class[1..];
+                // Extract component class names from descriptors.
+                let rc_class = descriptor_to_class_name(rc);
+                let tc_class = descriptor_to_class_name(tc);
+                if let (Some(r), Some(t)) = (rc_class, tc_class) {
+                    return self.is_instance_of(&r, &t);
+                }
+                // Primitive arrays: must be same type (already handled by == check above).
+                return false;
+            }
+            return false;
+        }
+
         // Check loaded class hierarchy.
         if let Some(class) = self.classes.get(runtime_class) {
-            // Check interfaces.
+            // Check interfaces (recursively).
             for &iface_idx in &class.interfaces {
                 let iface_name = class.constant_pool.class_name(iface_idx);
-                if iface_name == target_class { return true; }
+                if self.is_instance_of(iface_name, target_class) { return true; }
             }
             // Check super class.
             if class.super_class != 0 {
                 let super_name = class.constant_pool.class_name(class.super_class).to_owned();
-                if super_name != "java/lang/Object" && self.is_instance_of(&super_name, target_class) {
+                if self.is_instance_of(&super_name, target_class) {
                     return true;
                 }
             }
@@ -1644,6 +2072,38 @@ struct Frame {
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------
+
+/// JVM spec f2i: NaN→0, clamp to i32 range.
+fn float_to_int(v: f32) -> i32 {
+    if v.is_nan() { 0 }
+    else if v >= i32::MAX as f32 { i32::MAX }
+    else if v <= i32::MIN as f32 { i32::MIN }
+    else { v as i32 }
+}
+
+/// JVM spec f2l: NaN→0, clamp to i64 range.
+fn float_to_long(v: f32) -> i64 {
+    if v.is_nan() { 0 }
+    else if v >= i64::MAX as f32 { i64::MAX }
+    else if v <= i64::MIN as f32 { i64::MIN }
+    else { v as i64 }
+}
+
+/// JVM spec d2i: NaN→0, clamp to i32 range.
+fn double_to_int(v: f64) -> i32 {
+    if v.is_nan() { 0 }
+    else if v >= i32::MAX as f64 { i32::MAX }
+    else if v <= i32::MIN as f64 { i32::MIN }
+    else { v as i32 }
+}
+
+/// JVM spec d2l: NaN→0, clamp to i64 range.
+fn double_to_long(v: f64) -> i64 {
+    if v.is_nan() { 0 }
+    else if v >= i64::MAX as f64 { i64::MAX }
+    else if v <= i64::MIN as f64 { i64::MIN }
+    else { v as i64 }
+}
 
 fn read_i16(code: &[u8], pc: &mut usize) -> i16 {
     let hi = code[*pc] as i8 as i16;
@@ -1723,6 +2183,25 @@ fn default_value_for_descriptor(desc: &str) -> JValue {
         Some(b'F') => JValue::Float(0.0),
         Some(b'D') => JValue::Double(0.0),
         _ => JValue::Ref(None), // Object types default to null
+    }
+}
+
+/// Extract a class name from a JVM field descriptor.
+/// `Ljava/lang/String;` → Some("java/lang/String")
+/// `[Ljava/lang/String;` → Some("[Ljava/lang/String;") (preserves array)
+/// Primitive descriptors (I, B, etc.) → None
+fn descriptor_to_class_name(desc: &str) -> Option<String> {
+    match desc.as_bytes().first()? {
+        b'L' => {
+            // Strip 'L' prefix and ';' suffix.
+            let inner = &desc[1..desc.len().checked_sub(1).unwrap_or(1)];
+            Some(inner.to_string())
+        }
+        b'[' => {
+            // Array descriptor: treat as class name as-is for recursive checks.
+            Some(desc.to_string())
+        }
+        _ => None, // Primitive type — not a class.
     }
 }
 

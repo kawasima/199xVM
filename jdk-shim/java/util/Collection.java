@@ -8,4 +8,66 @@ public interface Collection<E> extends Iterable<E> {
     boolean add(E e);
     boolean addAll(Collection<? extends E> c);
     void clear();
+
+    default boolean remove(Object o) {
+        Iterator<E> it = iterator();
+        while (it.hasNext()) {
+            if (Objects.equals(it.next(), o)) {
+                it.remove();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    default boolean containsAll(Collection<?> c) {
+        for (Object e : c) {
+            if (!contains(e)) return false;
+        }
+        return true;
+    }
+
+    default boolean removeAll(Collection<?> c) {
+        boolean modified = false;
+        Iterator<E> it = iterator();
+        while (it.hasNext()) {
+            if (c.contains(it.next())) {
+                it.remove();
+                modified = true;
+            }
+        }
+        return modified;
+    }
+
+    default boolean retainAll(Collection<?> c) {
+        boolean modified = false;
+        Iterator<E> it = iterator();
+        while (it.hasNext()) {
+            if (!c.contains(it.next())) {
+                it.remove();
+                modified = true;
+            }
+        }
+        return modified;
+    }
+
+    default Object[] toArray() {
+        Object[] result = new Object[size()];
+        Iterator<E> it = iterator();
+        for (int i = 0; i < result.length && it.hasNext(); i++) {
+            result[i] = it.next();
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    default <T> T[] toArray(T[] a) {
+        int s = size();
+        Iterator<E> it = iterator();
+        for (int i = 0; i < s && i < a.length && it.hasNext(); i++) {
+            a[i] = (T) it.next();
+        }
+        if (a.length > s) a[s] = null;
+        return a;
+    }
 }

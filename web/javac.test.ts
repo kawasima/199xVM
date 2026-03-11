@@ -9,7 +9,7 @@
 
 import { test, describe } from "node:test";
 import * as assert from "node:assert/strict";
-import { lex, parseAll, compile, generateClassFile, TokenKind } from "./javac.js";
+import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry } from "./javac.js";
 
 // Helper: parse single class (convenience wrapper)
 function parse(tokens: ReturnType<typeof lex>) {
@@ -127,11 +127,11 @@ describe("Lexer", () => {
   });
 
   test("operators", () => {
-    const tokens = lex("== != <= >= && || ++ --");
+    const tokens = lex("== != <= >= && || ++ -- ::");
     const kinds = tokens.slice(0, -1).map(t => t.kind);
     assert.deepEqual(kinds, [
       TokenKind.Eq, TokenKind.Ne, TokenKind.Le, TokenKind.Ge,
-      TokenKind.And, TokenKind.Or, TokenKind.PlusPlus, TokenKind.MinusMinus,
+      TokenKind.And, TokenKind.Or, TokenKind.PlusPlus, TokenKind.MinusMinus, TokenKind.ColonColon,
     ]);
   });
 
@@ -342,6 +342,153 @@ describe("Parser", () => {
     const cls = parse(lex(src));
     const param = cls.methods[0].params[0];
     assert.deepEqual(param.type, { array: "int" });
+  });
+
+  test("lambda expression parses", () => {
+    const src = `import java.util.function.Function;
+    public class Lambda {
+      public static void run() {
+        Function f = x -> x;
+      }
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.methods.length, 1);
+    assert.equal(cls.methods[0].body[0].kind, "varDecl");
+  });
+
+  test("method reference parses", () => {
+    const src = `import java.util.function.Function;
+    public class MR {
+      public static void run() {
+        Function f = String::length;
+      }
+    }`;
+    const cls = parse(lex(src));
+    const vd = cls.methods[0].body[0] as { kind: "varDecl"; init?: { kind: string } };
+    assert.equal(vd.init?.kind, "methodRef");
+  });
+
+  test("constructor method reference parses", () => {
+    const src = `import java.util.function.Supplier;
+    public class MRCtor {
+      public static void run() {
+        Supplier s = StringBuilder::new;
+      }
+    }`;
+    const cls = parse(lex(src));
+    const vd = cls.methods[0].body[0] as { kind: "varDecl"; init?: { kind: string; isConstructor?: boolean } };
+    assert.equal(vd.init?.kind, "methodRef");
+    assert.equal(vd.init?.isConstructor, true);
+  });
+
+  test("switch statement parses", () => {
+    const src = `public class Sw {
+      public static int run(int x) {
+        switch (x) {
+          case 1 -> { x = 10; }
+          default -> { x = 20; }
+        }
+        return x;
+      }
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.methods[0].body[0].kind, "switch");
+  });
+
+  test("switch expression parses", () => {
+    const src = `public class SwExpr {
+      public static int run(int x) {
+        int y = switch (x) {
+          case 1 -> 10;
+          default -> 20;
+        };
+        return y;
+      }
+    }`;
+    const cls = parse(lex(src));
+    const vd = cls.methods[0].body[0] as { kind: "varDecl"; init?: { kind: string } };
+    assert.equal(vd.init?.kind, "switchExpr");
+  });
+
+  test("switch with guard parses", () => {
+    const src = `public class SwGuard {
+      public static String run(Object v) {
+        switch (v) {
+          case String s when s.length() > 0 -> { return s; }
+          default -> { return "x"; }
+        }
+      }
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.methods[0].body[0].kind, "switch");
+  });
+
+  test("switch expression with boolean labels parses", () => {
+    const src = `public class SwBool {
+      public static int run(boolean b) {
+        int x = switch (b) {
+          case true -> 1;
+          case false -> 0;
+        };
+        return x;
+      }
+    }`;
+    const cls = parse(lex(src));
+    const vd = cls.methods[0].body[0] as { kind: "varDecl"; init?: { kind: string } };
+    assert.equal(vd.init?.kind, "switchExpr");
+  });
+
+  test("switch with parenthesized type pattern parses", () => {
+    const src = `public class SwParenPattern {
+      public static String run(Object v) {
+        return switch (v) {
+          case (String s) -> s;
+          default -> "x";
+        };
+      }
+    }`;
+    const cls = parse(lex(src));
+    const ret = cls.methods[0].body[0] as { kind: "return"; value?: { kind: string } };
+    assert.equal(ret.value?.kind, "switchExpr");
+  });
+
+  test("instanceof with parenthesized pattern parses", () => {
+    const src = `public class InstParen {
+      public static String run(Object v) {
+        if (v instanceof (String s)) {
+          return s;
+        }
+        return "x";
+      }
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.methods[0].body[0].kind, "if");
+  });
+
+  test("switch with record pattern parses", () => {
+    const src = `record Point(int x, int y) {
+      public static int run(Object v) {
+        return switch (v) {
+          case Point(int a, int b) -> a + b;
+          default -> 0;
+        };
+      }
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.isRecord, true);
+  });
+
+  test("instanceof with record pattern parses", () => {
+    const src = `record Pair(int x, int y) {
+      public static int run(Object v) {
+        if (v instanceof Pair(int a, int b)) {
+          return a + b;
+        }
+        return 0;
+      }
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.isRecord, true);
   });
 });
 
@@ -730,5 +877,474 @@ describe("Code generator", () => {
       }
     }`);
     assertValidClassFile(bytes);
+  });
+
+  test("compiles non-capturing lambda via invokedynamic", () => {
+    const bytes = compile(`import java.util.function.Function;
+      public class LambdaRun {
+        public static String run() {
+          Function f = x -> x;
+          return "" + f.apply("ok");
+        }
+      }`);
+    assertValidClassFile(bytes);
+    const text = new TextDecoder().decode(bytes);
+    assert.ok(text.includes("LambdaMetafactory"), "contains lambda bootstrap");
+  });
+
+  test("compiles capturing lambda in static method", () => {
+    const bytes = compile(`import java.util.function.Function;
+      public class LambdaCap {
+        public static String run() {
+          String y = "ok";
+          Function f = x -> y;
+          return "" + f.apply("ng");
+        }
+      }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles capturing lambda in instance method", () => {
+    const bytes = compile(`import java.util.function.Function;
+      public class LambdaThis {
+        String prefix;
+        public LambdaThis(String p) { this.prefix = p; }
+        public String mk() {
+          Function f = x -> prefix;
+          return "" + f.apply("ignored");
+        }
+        public static String run() {
+          LambdaThis v = new LambdaThis("hi");
+          return v.mk();
+        }
+      }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles unbound method reference", () => {
+    const bytes = compile(`import java.util.function.Function;
+      public class MRUnbound {
+        public static String run() {
+          Function f = String::length;
+          return "" + f.apply("abcd");
+        }
+      }`);
+    assertValidClassFile(bytes);
+    const text = new TextDecoder().decode(bytes);
+    assert.ok(text.includes("LambdaMetafactory"), "contains method-ref bootstrap");
+  });
+
+  test("compiles bound method reference", () => {
+    const bytes = compile(`import java.util.function.Supplier;
+      public class MRBound {
+        public static String run() {
+          Supplier s = "xyz"::toString;
+          return "" + s.get();
+        }
+      }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles constructor method reference (no-arg)", () => {
+    const bytes = compile(`import java.util.function.Supplier;
+      public class MRCtor0 {
+        public static String run() {
+          Supplier s = StringBuilder::new;
+          Object o = s.get();
+          return "" + o;
+        }
+      }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles constructor method reference (one-arg user class)", () => {
+    const bytes = compile(`import java.util.function.Function;
+      public class Box {
+        String v;
+        public Box(String v) { this.v = v; }
+      }
+      public class MRCtor1 {
+        public static String run() {
+          Function f = Box::new;
+          Object b = f.apply("z");
+          return "" + b;
+        }
+      }`);
+    assert.ok(bytes.length > 200, "bundle has content");
+  });
+
+  test("compiles switch statement with int labels", () => {
+    const bytes = compile(`public class SwitchInt {
+      public static String run() {
+        int x = 2;
+        switch (x) {
+          case 1 -> { x = 10; }
+          case 2 -> { x = 20; }
+          default -> { x = 30; }
+        }
+        return "" + x;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles switch expression with String labels", () => {
+    const bytes = compile(`public class SwitchString {
+      public static String run() {
+        String s = "b";
+        int x = switch (s) {
+          case "a" -> 1;
+          case "b" -> 2;
+          default -> 3;
+        };
+        return "" + x;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles switch expression with null label", () => {
+    const bytes = compile(`public class SwitchNull {
+      public static String run() {
+        String s = null;
+        int x = switch (s) {
+          case null -> 7;
+          default -> 9;
+        };
+        return "" + x;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles switch statement with type pattern", () => {
+    const bytes = compile(`public class SwitchPattern {
+      public static String run() {
+        Object v = "ok";
+        switch (v) {
+          case String s -> { System.out.println(s); }
+          default -> { System.out.println("x"); }
+        }
+        return "done";
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles switch with guard", () => {
+    const bytes = compile(`public class SwitchGuard {
+      public static String run() {
+        Object v = "ok";
+        return switch (v) {
+          case String s when s.length() > 1 -> "long";
+          default -> "short";
+        };
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("switch expression without default is rejected", () => {
+    assert.throws(() => compile(`public class SwitchNoDefault {
+      public static int run(int x) {
+        return switch (x) {
+          case 1 -> 10;
+        };
+      }
+    }`), /not exhaustive/);
+  });
+
+  test("switch with duplicate default is rejected", () => {
+    assert.throws(() => compile(`public class SwitchDupDefault {
+      public static int run(int x) {
+        switch (x) {
+          default -> { x = 1; }
+          default -> { x = 2; }
+        }
+        return x;
+      }
+    }`), /more than one default label/);
+  });
+
+  test("switch with duplicate constant label is rejected", () => {
+    assert.throws(() => compile(`public class SwitchDupConst {
+      public static int run(int x) {
+        switch (x) {
+          case 1 -> { x = 1; }
+          case 1 -> { x = 2; }
+          default -> { x = 3; }
+        }
+        return x;
+      }
+    }`), /duplicate switch label/);
+  });
+
+  test("switch with case after default is rejected as unreachable", () => {
+    assert.throws(() => compile(`public class SwitchAfterDefault {
+      public static int run(int x) {
+        switch (x) {
+          default -> { x = 0; }
+          case 1 -> { x = 1; }
+        }
+        return x;
+      }
+    }`), /unreachable case after unguarded default/);
+  });
+
+  test("switch with dominated type pattern is rejected", () => {
+    assert.throws(() => compile(`public class SwitchDominated {
+      public static String run(Object v) {
+        return switch (v) {
+          case String s -> "a";
+          case String t -> "b";
+          default -> "c";
+        };
+      }
+    }`), /dominated switch label pattern/);
+  });
+
+  test("switch expression with exhaustive boolean labels compiles without default", () => {
+    const bytes = compile(`public class SwitchBoolExhaustive {
+      public static int run(boolean b) {
+        return switch (b) {
+          case true -> 1;
+          case false -> 0;
+        };
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("switch expression with parenthesized type pattern compiles", () => {
+    const bytes = compile(`public class SwitchParenPattern {
+      public static String run(Object v) {
+        return switch (v) {
+          case (String s) -> s;
+          default -> "x";
+        };
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("switch expression with record pattern compiles", () => {
+    const bytes = compile(`record Point(int x, int y) {
+      public static int run(Object o) {
+        return switch (o) {
+          case Point(int a, int b) -> a + b;
+          default -> 0;
+        };
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("instanceof with record pattern compiles", () => {
+    const bytes = compile(`record Pair(int x, int y) {
+      public static int run(Object o) {
+        if (o instanceof Pair(int a, int b)) {
+          return a * b;
+        }
+        return 0;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("switch on boolean rejects int case label", () => {
+    assert.throws(() => compile(`public class SwitchBoolRejectInt {
+      public static int run(boolean b) {
+        return switch (b) {
+          case 1 -> 1;
+          case 0 -> 0;
+          default -> -1;
+        };
+      }
+    }`), /int case label requires int switch selector/);
+  });
+
+  test("switch on int rejects boolean case label", () => {
+    assert.throws(() => compile(`public class SwitchIntRejectBool {
+      public static int run(int x) {
+        return switch (x) {
+          case true -> 1;
+          case false -> 0;
+          default -> -1;
+        };
+      }
+    }`), /boolean case label requires boolean switch selector/);
+  });
+
+  test("operator '+' rejects boolean operands", () => {
+    assert.throws(() => compile(`public class BadPlusBool {
+      public static int run() {
+        boolean a = true;
+        boolean b = false;
+        return a + b;
+      }
+    }`), /requires int or long operands/);
+  });
+
+  test("operator '==' rejects int/boolean comparison", () => {
+    assert.throws(() => compile(`public class BadEqPrim {
+      public static boolean run() {
+        return 1 == true;
+      }
+    }`), /same primitive type/);
+  });
+
+  test("cast rejects int to boolean", () => {
+    assert.throws(() => compile(`public class BadCastIntToBool {
+      public static boolean run() {
+        return (boolean) 1;
+      }
+    }`), /Invalid cast/);
+  });
+
+  test("cast rejects boolean to int", () => {
+    assert.throws(() => compile(`public class BadCastBoolToInt {
+      public static int run() {
+        return (int) false;
+      }
+    }`), /Invalid cast/);
+  });
+
+  test("assignment allows subtype to supertype in known hierarchy", () => {
+    assert.doesNotThrow(() => compile(`
+      public class A {}
+      public class B extends A {}
+      public class AssignOk {
+        public static String run() {
+          A a = new B();
+          return "ok";
+        }
+      }
+    `));
+  });
+
+  test("assignment rejects supertype to subtype in known hierarchy", () => {
+    assert.throws(() => compile(`
+      public class A {}
+      public class B extends A {}
+      public class AssignNg {
+        public static String run() {
+          B b = new A();
+          return "ng";
+        }
+      }
+    `), /Type mismatch/);
+  });
+
+  test("switch expression with null + total pattern is exhaustive for reference selector", () => {
+    const bytes = compile(`public class SwitchRefExhaustive {
+      public static String run(Object v) {
+        return switch (v) {
+          case null -> "n";
+          case Object o -> "o";
+        };
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("switch expression with only total pattern is not exhaustive for reference selector", () => {
+    assert.throws(() => compile(`public class SwitchRefNotExhaustive {
+      public static String run(Object v) {
+        return switch (v) {
+          case Object o -> "o";
+        };
+      }
+    }`), /not exhaustive/);
+  });
+
+  test("switch with subtype pattern after supertype pattern is rejected as dominated", () => {
+    assert.throws(() => compile(`public class SwitchHierarchyDominated {
+      public static String run(Object v) {
+        return switch (v) {
+          case Object o -> "obj";
+          case String s -> "str";
+          default -> "x";
+        };
+      }
+    }`), /dominated/);
+  });
+
+  test("switch allows guarded type pattern followed by same unguarded type pattern", () => {
+    const bytes = compile(`public class SwitchGuardedThenUnguarded {
+      public static String run(Object v) {
+        return switch (v) {
+          case String s when s.length() > 3 -> "long";
+          case String s -> "short";
+          default -> "other";
+        };
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("switch rejects dominated subtype pattern in user-defined hierarchy", () => {
+    assert.throws(() => compile(`
+      public class A {}
+      public class B extends A {}
+      public class SwitchUserHierarchy {
+        public static String run(A a) {
+          return switch (a) {
+            case A x -> "a";
+            case B y -> "b";
+            default -> "d";
+          };
+        }
+      }
+    `), /dominated/);
+  });
+});
+
+// ============================================================================
+// Class reader
+// ============================================================================
+
+describe("Class reader", () => {
+  test("parseClassMeta extracts class name and methods from compiled .class", () => {
+    const bytes = compile(`public class Foo {
+      public static String run() { return "hi"; }
+      public int add(int a, int b) { return a + b; }
+    }`);
+    // compile() returns raw .class for single class, use parseClassMeta directly
+    const meta = parseClassMeta(bytes);
+    assert.equal(meta.name, "Foo");
+    const methodNames = meta.methods.map(m => m.name);
+    assert.ok(methodNames.includes("run"));
+    assert.ok(methodNames.includes("add"));
+    assert.ok(methodNames.includes("<init>"));
+  });
+
+  test("buildMethodRegistry creates correct keys and types", () => {
+    const bytes = compile(`public class Bar {
+      public static String greet() { return "hello"; }
+      public int compute(int x) { return x * 2; }
+    }`);
+    const classes = [parseClassMeta(bytes)];
+    const reg = buildMethodRegistry(classes);
+    // Static method
+    assert.ok(reg["Bar.greet()"]);
+    assert.equal(reg["Bar.greet()"].returnType, "String");
+    assert.deepEqual(reg["Bar.greet()"].paramTypes, []);
+    // Instance method
+    assert.ok(reg["Bar.compute(I)"]);
+    assert.equal(reg["Bar.compute(I)"].returnType, "int");
+    assert.deepEqual(reg["Bar.compute(I)"].paramTypes, ["int"]);
+  });
+
+  test("parseBundleMeta handles multi-class bundle", () => {
+    const bytes = compile(`public class A {
+      public static String run() { return "a"; }
+    }
+    class B {
+      public int value() { return 1; }
+    }`);
+    const classes = parseBundleMeta(bytes);
+    assert.equal(classes.length, 2);
+    const names = classes.map(c => c.name).sort();
+    assert.deepEqual(names, ["A", "B"]);
   });
 });

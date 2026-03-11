@@ -1,3 +1,6 @@
+// Re-export class-reader utilities for use from index.html
+export { parseClassMeta, parseBundleMeta, buildMethodRegistry, readJar, classFilesToBundle } from "./class-reader.js";
+
 // 199xVM — Java subset compiler (TypeScript)
 //
 // Compiles a minimal subset of Java to JVM .class file bytecode.
@@ -26,6 +29,7 @@
 export enum TokenKind {
   // Literals
   IntLiteral = "IntLiteral",
+  LongLiteral = "LongLiteral",
   StringLiteral = "StringLiteral",
   BoolLiteral = "BoolLiteral",
   NullLiteral = "NullLiteral",
@@ -37,6 +41,7 @@ export enum TokenKind {
   KwStatic = "static",
   KwVoid = "void",
   KwInt = "int",
+  KwLong = "long",
   KwBoolean = "boolean",
   KwString = "String",
   KwReturn = "return",
@@ -45,6 +50,11 @@ export enum TokenKind {
   KwElse = "else",
   KwWhile = "while",
   KwFor = "for",
+  KwSwitch = "switch",
+  KwCase = "case",
+  KwDefault = "default",
+  KwYield = "yield",
+  KwWhen = "when",
   KwThis = "this",
   KwSuper = "super",
   KwExtends = "extends",
@@ -92,6 +102,8 @@ export enum TokenKind {
   MinusMinus = "--",
   Question = "?",
   Colon = ":",
+  ColonColon = "::",
+  Arrow = "->",
 
   // Special
   EOF = "EOF",
@@ -104,12 +116,36 @@ export interface Token {
   col: number;
 }
 
+function preprocessUnicodeEscapes(input: string): string {
+  // JLS 3.3: translate Unicode escapes before lexical analysis.
+  let out = "";
+  for (let i = 0; i < input.length; i++) {
+    if (input[i] !== "\\") {
+      out += input[i];
+      continue;
+    }
+    let j = i + 1;
+    if (j >= input.length || input[j] !== "u") {
+      out += input[i];
+      continue;
+    }
+    while (j < input.length && input[j] === "u") j++;
+    if (j + 4 > input.length) throw new Error("Invalid Unicode escape sequence");
+    const hex = input.slice(j, j + 4);
+    if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error(`Invalid Unicode escape: \\u${hex}`);
+    out += String.fromCharCode(parseInt(hex, 16));
+    i = j + 3;
+  }
+  return out;
+}
+
 const KEYWORDS: Record<string, TokenKind> = {
   class: TokenKind.KwClass,
   public: TokenKind.KwPublic,
   static: TokenKind.KwStatic,
   void: TokenKind.KwVoid,
   int: TokenKind.KwInt,
+  long: TokenKind.KwLong,
   boolean: TokenKind.KwBoolean,
   String: TokenKind.KwString,
   return: TokenKind.KwReturn,
@@ -118,6 +154,11 @@ const KEYWORDS: Record<string, TokenKind> = {
   else: TokenKind.KwElse,
   while: TokenKind.KwWhile,
   for: TokenKind.KwFor,
+  switch: TokenKind.KwSwitch,
+  case: TokenKind.KwCase,
+  default: TokenKind.KwDefault,
+  yield: TokenKind.KwYield,
+  when: TokenKind.KwWhen,
   this: TokenKind.KwThis,
   super: TokenKind.KwSuper,
   true: TokenKind.BoolLiteral,
@@ -137,6 +178,7 @@ const KEYWORDS: Record<string, TokenKind> = {
 };
 
 export function lex(source: string): Token[] {
+  source = preprocessUnicodeEscapes(source);
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
@@ -164,8 +206,13 @@ export function lex(source: string): Token[] {
     }
     // Block comment
     if (ch === "/" && pos + 1 < source.length && source[pos + 1] === "*") {
+      const cLine = line;
+      const cCol = col;
       advance(); advance();
       while (pos + 1 < source.length && !(peek() === "*" && source[pos + 1] === "/")) advance();
+      if (pos + 1 >= source.length) {
+        throw new Error(`Unterminated block comment at line ${cLine}:${cCol}`);
+      }
       advance(); advance();
       continue;
     }
@@ -178,6 +225,9 @@ export function lex(source: string): Token[] {
       advance();
       let s = "";
       while (peek() !== '"' && peek() !== "\0") {
+        if (peek() === "\n" || peek() === "\r") {
+          throw new Error(`Unterminated string literal at line ${startLine}:${startCol}`);
+        }
         if (peek() === "\\") {
           advance();
           const esc = advance();
@@ -192,6 +242,9 @@ export function lex(source: string): Token[] {
           s += advance();
         }
       }
+      if (peek() === "\0") {
+        throw new Error(`Unterminated string literal at line ${startLine}:${startCol}`);
+      }
       advance(); // closing "
       tokens.push({ kind: TokenKind.StringLiteral, value: s, line: startLine, col: startCol });
       continue;
@@ -199,11 +252,24 @@ export function lex(source: string): Token[] {
 
     // Number literal
     if (/[0-9]/.test(ch)) {
-      let num = "";
-      while (/[0-9]/.test(peek())) num += advance();
-      // Skip long suffix
-      if (peek() === "L" || peek() === "l") advance();
-      tokens.push({ kind: TokenKind.IntLiteral, value: num, line: startLine, col: startCol });
+      let raw = "";
+      if (peek() === "0" && (source[pos + 1] === "x" || source[pos + 1] === "X")) {
+        raw += advance(); // 0
+        raw += advance(); // x/X
+        while (/[0-9a-fA-F_]/.test(peek())) raw += advance();
+      } else if (peek() === "0" && (source[pos + 1] === "b" || source[pos + 1] === "B")) {
+        raw += advance(); // 0
+        raw += advance(); // b/B
+        while (/[01_]/.test(peek())) raw += advance();
+      } else if (peek() === "0" && /[0-7_]/.test(source[pos + 1] ?? "")) {
+        raw += advance(); // leading 0
+        while (/[0-7_]/.test(peek())) raw += advance();
+      } else {
+        while (/[0-9_]/.test(peek())) raw += advance();
+      }
+      const isLong = peek() === "L" || peek() === "l";
+      if (isLong) raw += advance();
+      tokens.push({ kind: isLong ? TokenKind.LongLiteral : TokenKind.IntLiteral, value: raw, line: startLine, col: startCol });
       continue;
     }
 
@@ -226,6 +292,8 @@ export function lex(source: string): Token[] {
     if (two === "||") { advance(); advance(); tokens.push({ kind: TokenKind.Or, value: "||", line: startLine, col: startCol }); continue; }
     if (two === "+=") { advance(); advance(); tokens.push({ kind: TokenKind.PlusAssign, value: "+=", line: startLine, col: startCol }); continue; }
     if (two === "-=") { advance(); advance(); tokens.push({ kind: TokenKind.MinusAssign, value: "-=", line: startLine, col: startCol }); continue; }
+    if (two === "::") { advance(); advance(); tokens.push({ kind: TokenKind.ColonColon, value: "::", line: startLine, col: startCol }); continue; }
+    if (two === "->") { advance(); advance(); tokens.push({ kind: TokenKind.Arrow, value: "->", line: startLine, col: startCol }); continue; }
     if (two === "++") { advance(); advance(); tokens.push({ kind: TokenKind.PlusPlus, value: "++", line: startLine, col: startCol }); continue; }
     if (two === "--") { advance(); advance(); tokens.push({ kind: TokenKind.MinusMinus, value: "--", line: startLine, col: startCol }); continue; }
 
@@ -248,8 +316,7 @@ export function lex(source: string): Token[] {
       continue;
     }
 
-    // Skip unknown
-    advance();
+    throw new Error(`Unknown character "${ch}" at line ${startLine}:${startCol}`);
   }
 
   tokens.push({ kind: TokenKind.EOF, value: "", line, col });
@@ -260,21 +327,26 @@ export function lex(source: string): Token[] {
 // AST
 // ============================================================================
 
-export type Type = "int" | "boolean" | "void" | "String" | { className: string } | { array: Type };
+export type Type = "int" | "long" | "boolean" | "void" | "String" | { className: string } | { array: Type };
 
 export interface ClassDecl {
   name: string;
   superClass: string;
+  isRecord?: boolean;
+  recordComponents?: ParamDecl[];
   fields: FieldDecl[];
   methods: MethodDecl[];
   importMap: Map<string, string>; // simpleName -> internal JVM name
-  wildcardImports: string[]; // internal JVM names of wildcard-imported classes (e.g. "net/unit8/raoh/ObjectDecoders")
+  packageImports: string[]; // package names for import-on-demand (e.g. "java/util")
+  staticWildcardImports: string[]; // owner class internal names for import static T.*
 }
 
 export interface FieldDecl {
   name: string;
   type: Type;
   isStatic: boolean;
+  isPrivate?: boolean;
+  isFinal?: boolean;
   initializer?: Expr;
 }
 
@@ -291,18 +363,37 @@ export interface ParamDecl {
   type: Type;
 }
 
+export type SwitchLabel =
+  | { kind: "default" }
+  | { kind: "null" }
+  | { kind: "bool"; value: boolean }
+  | { kind: "int"; value: number }
+  | { kind: "string"; value: string }
+  | { kind: "typePattern"; typeName: string; bindVar: string }
+  | { kind: "recordPattern"; typeName: string; bindVars: string[] };
+
+export interface SwitchCase {
+  labels: SwitchLabel[];
+  guard?: Expr;
+  expr?: Expr;
+  stmts?: Stmt[];
+}
+
 export type Stmt =
   | { kind: "varDecl"; name: string; type: Type; init?: Expr }
   | { kind: "assign"; target: Expr; value: Expr }
   | { kind: "exprStmt"; expr: Expr }
   | { kind: "return"; value?: Expr }
+  | { kind: "yield"; value: Expr }
   | { kind: "if"; cond: Expr; then: Stmt[]; else_?: Stmt[] }
   | { kind: "while"; cond: Expr; body: Stmt[] }
   | { kind: "for"; init?: Stmt; cond?: Expr; update?: Stmt; body: Stmt[] }
+  | { kind: "switch"; selector: Expr; cases: SwitchCase[] }
   | { kind: "block"; stmts: Stmt[] };
 
 export type Expr =
   | { kind: "intLit"; value: number }
+  | { kind: "longLit"; value: number }
   | { kind: "stringLit"; value: string }
   | { kind: "boolLit"; value: boolean }
   | { kind: "nullLit" }
@@ -316,13 +407,16 @@ export type Expr =
   | { kind: "newExpr"; className: string; args: Expr[] }
   | { kind: "cast"; type: Type; expr: Expr }
   | { kind: "postIncrement"; operand: Expr; op: "++" | "--" }
-  | { kind: "instanceof"; expr: Expr; checkType: string; bindVar?: string }
+  | { kind: "instanceof"; expr: Expr; checkType: string; bindVar?: string; recordBindVars?: string[] }
   | { kind: "staticField"; className: string; field: string }
   | { kind: "arrayAccess"; array: Expr; index: Expr }
   | { kind: "arrayLit"; elemType: Type; elements: Expr[] }
   | { kind: "newArray"; elemType: Type; size: Expr }
   | { kind: "superCall"; args: Expr[] }
-  | { kind: "ternary"; cond: Expr; thenExpr: Expr; elseExpr: Expr };
+  | { kind: "ternary"; cond: Expr; thenExpr: Expr; elseExpr: Expr }
+  | { kind: "switchExpr"; selector: Expr; cases: SwitchCase[] }
+  | { kind: "lambda"; params: string[]; bodyExpr?: Expr; bodyStmts?: Stmt[] }
+  | { kind: "methodRef"; target: Expr; method: string; isConstructor: boolean };
 
 // ============================================================================
 // Parser
@@ -343,33 +437,62 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     return false;
   }
   function at(kind: TokenKind): boolean { return peek().kind === kind; }
+  function parseIntLiteral(raw: string): number {
+    let s = raw.replace(/_/g, "");
+    if (s.endsWith("L") || s.endsWith("l")) s = s.slice(0, -1);
+    if (/^0[xX][0-9a-fA-F]+$/.test(s)) return Number.parseInt(s.slice(2), 16);
+    if (/^0[bB][01]+$/.test(s)) return Number.parseInt(s.slice(2), 2);
+    if (/^0[0-7]+$/.test(s) && s.length > 1) return Number.parseInt(s.slice(1), 8);
+    if (/^[0-9]+$/.test(s)) return Number.parseInt(s, 10);
+    throw new Error(`Invalid integer literal: ${raw}`);
+  }
+  function parseQualifiedName(): string {
+    let name = expect(TokenKind.Ident).value;
+    while (at(TokenKind.Dot) && tokens[pos + 1]?.kind === TokenKind.Ident) {
+      advance(); // dot
+      name += "." + expect(TokenKind.Ident).value;
+    }
+    return name;
+  }
 
   // Collect import/package statements
   // Build a map: simple name -> internal JVM name (e.g. "Ok" -> "net/unit8/raoh/Ok")
   const importMap = new Map<string, string>();
-  const wildcardImports: string[] = [];
+  const packageImports: string[] = ["java/lang"];
+  const staticWildcardImports: string[] = [];
   while (at(TokenKind.KwImport) || at(TokenKind.KwPackage)) {
     const isImport = at(TokenKind.KwImport);
     advance(); // consume 'import' or 'package'
     if (isImport) {
-      // Skip optional 'static' keyword (import static ...)
-      if (at(TokenKind.KwStatic)) advance();
-      // Collect the dotted name until semicolon
-      let fqn = "";
-      while (!at(TokenKind.Semi) && !at(TokenKind.EOF)) {
-        fqn += peek().value;
-        advance();
-      }
-      // fqn e.g. "net.unit8.raoh.Ok"  or "net.unit8.raoh.*"
-      if (fqn.endsWith(".*")) {
-        // Wildcard import: record the class before ".*"
-        const classPath = fqn.slice(0, -2).replace(/\./g, "/");
-        wildcardImports.push(classPath);
+      const isStaticImport = match(TokenKind.KwStatic);
+      const base = parseQualifiedName();
+      if (match(TokenKind.Dot)) {
+        if (match(TokenKind.Star)) {
+          if (isStaticImport) {
+            staticWildcardImports.push(base.replace(/\./g, "/"));
+          } else {
+            const internalBase = base.replace(/\./g, "/");
+            packageImports.push(internalBase);
+            // Backward compatibility: if wildcard target looks like a type, allow unqualified static calls.
+            if (/^[A-Z]/.test(base.split(".").pop() ?? "")) {
+              staticWildcardImports.push(internalBase);
+            }
+          }
+        } else {
+          const member = expect(TokenKind.Ident).value;
+          if (!isStaticImport) {
+            const fqn = `${base}.${member}`;
+            importMap.set(member, fqn.replace(/\./g, "/"));
+          }
+          // single static import is parsed but not resolved yet
+        }
+      } else if (!isStaticImport) {
+        const simpleName = base.split(".").pop()!;
+        importMap.set(simpleName, base.replace(/\./g, "/"));
       } else {
-        const parts = fqn.split(".");
-        const simpleName = parts[parts.length - 1];
-        const internalName = fqn.replace(/\./g, "/");
-        importMap.set(simpleName, internalName);
+        const lastDot = base.lastIndexOf(".");
+        if (lastDot < 0) throw new Error(`Invalid static import near "${base}"`);
+        // single static import is parsed but not resolved yet
       }
     } else {
       // package — skip
@@ -413,13 +536,13 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       const recordMethods: MethodDecl[] = [];
       // Parse any explicitly declared methods inside the record body
       while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
-        parseMember(recordFields, recordMethods);
+        parseMember(recordFields, recordMethods, recordName, true);
       }
       expect(TokenKind.RBrace);
 
       // Generate fields from components
       for (const c of components) {
-        recordFields.push({ name: c.name, type: c.type, isStatic: false });
+        recordFields.push({ name: c.name, type: c.type, isStatic: false, isPrivate: true, isFinal: true });
       }
 
       // Generate canonical constructor if not already declared
@@ -452,8 +575,55 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           });
         }
       }
+      // Basic Object method synthesis for records when not declared explicitly.
+      // Full JLS semantics require component-wise implementations.
+      if (!recordMethods.some(m => m.name === "equals" && m.params.length === 1)) {
+        recordMethods.push({
+          name: "equals",
+          returnType: "boolean",
+          params: [{ name: "other", type: { className: "java/lang/Object" } }],
+          body: [{
+            kind: "return",
+            value: {
+              kind: "binary",
+              op: "==",
+              left: { kind: "this" },
+              right: { kind: "ident", name: "other" },
+            },
+          }],
+          isStatic: false,
+        });
+      }
+      if (!recordMethods.some(m => m.name === "hashCode" && m.params.length === 0)) {
+        recordMethods.push({
+          name: "hashCode",
+          returnType: "int",
+          params: [],
+          body: [{ kind: "return", value: { kind: "intLit", value: 0 } }],
+          isStatic: false,
+        });
+      }
+      if (!recordMethods.some(m => m.name === "toString" && m.params.length === 0)) {
+        recordMethods.push({
+          name: "toString",
+          returnType: "String",
+          params: [],
+          body: [{ kind: "return", value: { kind: "stringLit", value: `${recordName}[]` } }],
+          isStatic: false,
+        });
+      }
 
-      return { name: recordName, superClass: "java/lang/Record", fields: recordFields, methods: recordMethods, importMap, wildcardImports };
+      return {
+        name: recordName,
+        superClass: "java/lang/Record",
+        isRecord: true,
+        recordComponents: components,
+        fields: recordFields,
+        methods: recordMethods,
+        importMap,
+        packageImports,
+        staticWildcardImports,
+      };
     }
 
     expect(TokenKind.KwClass);
@@ -461,13 +631,12 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
     let superClass = "java/lang/Object";
     if (match(TokenKind.KwExtends)) {
-      superClass = expect(TokenKind.Ident).value;
-      superClass = superClass.replace(/\./g, "/");
+      superClass = parseQualifiedName().replace(/\./g, "/");
     }
     // Skip implements
     if (match(TokenKind.KwImplements)) {
-      expect(TokenKind.Ident);
-      while (match(TokenKind.Comma)) expect(TokenKind.Ident);
+      parseQualifiedName();
+      while (match(TokenKind.Comma)) parseQualifiedName();
     }
 
     expect(TokenKind.LBrace);
@@ -476,20 +645,29 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     const methods: MethodDecl[] = [];
 
     while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
-      parseMember(fields, methods);
+      parseMember(fields, methods, className, false);
     }
     expect(TokenKind.RBrace);
 
-    return { name: className, superClass, fields, methods, importMap, wildcardImports };
+    return {
+      name: className,
+      superClass,
+      isRecord: false,
+      recordComponents: [],
+      fields,
+      methods,
+      importMap,
+      packageImports,
+      staticWildcardImports,
+    };
   }
 
-  function parseMember(fields: FieldDecl[], methods: MethodDecl[]) {
+  function parseMember(fields: FieldDecl[], methods: MethodDecl[], ownerName: string, inRecord: boolean) {
     let isStatic = false;
-    let isPublic = false;
 
     // Consume modifiers
     while (true) {
-      if (at(TokenKind.KwPublic) || at(TokenKind.KwPrivate) || at(TokenKind.KwProtected)) { advance(); isPublic = true; continue; }
+      if (at(TokenKind.KwPublic) || at(TokenKind.KwPrivate) || at(TokenKind.KwProtected)) { advance(); continue; }
       if (at(TokenKind.KwStatic)) { advance(); isStatic = true; continue; }
       if (at(TokenKind.KwFinal) || at(TokenKind.KwAbstract)) { advance(); continue; }
       break;
@@ -497,8 +675,8 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
     // Constructor: modifiers followed by ClassName(...)
     // Detected by lookahead: current token is Ident and next is '('
-    if (at(TokenKind.Ident) && tokens[pos + 1]?.kind === TokenKind.LParen) {
-      advance(); // constructor name (same as class name, not needed)
+    if (at(TokenKind.Ident) && tokens[pos + 1]?.kind === TokenKind.LParen && peek().value === ownerName) {
+      advance(); // constructor name
       expect(TokenKind.LParen);
       const params: ParamDecl[] = [];
       if (!at(TokenKind.RParen)) {
@@ -542,17 +720,18 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         init = parseExpr();
       }
       expect(TokenKind.Semi);
-      fields.push({ name, type: retType, isStatic, initializer: init });
+      fields.push({ name, type: retType, isStatic, initializer: init, isPrivate: inRecord && !isStatic, isFinal: inRecord && !isStatic });
     }
   }
 
   function parseType(): Type {
     let base: Type;
     if (match(TokenKind.KwInt)) base = "int";
+    else if (match(TokenKind.KwLong)) base = "long";
     else if (match(TokenKind.KwBoolean)) base = "boolean";
     else if (match(TokenKind.KwVoid)) base = "void";
     else if (match(TokenKind.KwString)) base = "String";
-    else if (match(TokenKind.KwVar)) base = { className: "java/lang/Object" };
+    else if (match(TokenKind.KwVar)) throw new Error(`'var' is only allowed for local variables with initializer`);
     else {
       const name = expect(TokenKind.Ident).value;
       // Skip generic type parameters like <String>
@@ -583,6 +762,171 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     return stmts;
   }
 
+  function parseSwitchLabel(): SwitchLabel {
+    function parsePatternBindVar(): string {
+      if (match(TokenKind.KwVar)) return expect(TokenKind.Ident).value;
+      if ((at(TokenKind.KwInt) || at(TokenKind.KwBoolean) || at(TokenKind.KwString) || at(TokenKind.Ident))
+          && tokens[pos + 1]?.kind === TokenKind.Ident) {
+        advance(); // explicit component type
+      }
+      return expect(TokenKind.Ident).value;
+    }
+    function parseRecordPatternBindVars(): string[] {
+      const bindVars: string[] = [];
+      expect(TokenKind.LParen);
+      if (!at(TokenKind.RParen)) {
+        do { bindVars.push(parsePatternBindVar()); } while (match(TokenKind.Comma));
+      }
+      expect(TokenKind.RParen);
+      return bindVars;
+    }
+    if (match(TokenKind.LParen)) {
+      const nested = parseSwitchLabel();
+      if (nested.kind !== "typePattern") {
+        if (nested.kind !== "recordPattern") {
+          throw new Error("parenthesized switch label currently supports only type/record patterns");
+        }
+      }
+      expect(TokenKind.RParen);
+      return nested;
+    }
+    if (at(TokenKind.NullLiteral)) {
+      advance();
+      return { kind: "null" };
+    }
+    if (at(TokenKind.BoolLiteral)) {
+      return { kind: "bool", value: advance().value === "true" };
+    }
+    if (at(TokenKind.IntLiteral)) {
+      return { kind: "int", value: parseIntLiteral(advance().value) };
+    }
+    if (at(TokenKind.StringLiteral)) {
+      return { kind: "string", value: advance().value };
+    }
+    if (at(TokenKind.Ident)) {
+      const typeName = parseQualifiedName();
+      if (at(TokenKind.LParen)) {
+        return { kind: "recordPattern", typeName, bindVars: parseRecordPatternBindVars() };
+      }
+      const bindVar = expect(TokenKind.Ident).value;
+      return { kind: "typePattern", typeName, bindVar };
+    }
+    if (at(TokenKind.KwString)) {
+      advance();
+      const bindVar = expect(TokenKind.Ident).value;
+      return { kind: "typePattern", typeName: "java/lang/String", bindVar };
+    }
+    throw new Error(`Unsupported switch label at line ${peek().line}:${peek().col}`);
+  }
+
+  function parseSwitchCases(isExpr: boolean): SwitchCase[] {
+    const cases: SwitchCase[] = [];
+    expect(TokenKind.LBrace);
+    while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
+      const labels: SwitchLabel[] = [];
+      if (match(TokenKind.KwDefault)) {
+        labels.push({ kind: "default" });
+      } else {
+        expect(TokenKind.KwCase);
+        labels.push(parseSwitchLabel());
+        while (match(TokenKind.Comma)) labels.push(parseSwitchLabel());
+      }
+      let guard: Expr | undefined;
+      if (match(TokenKind.KwWhen)) {
+        guard = parseExpr();
+      }
+      expect(TokenKind.Arrow);
+      if (isExpr) {
+        if (at(TokenKind.LBrace)) {
+          expect(TokenKind.LBrace);
+          const stmts: Stmt[] = [];
+          while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) stmts.push(parseStmt());
+          expect(TokenKind.RBrace);
+          cases.push({ labels, guard, stmts });
+        } else {
+          const expr = parseExpr();
+          expect(TokenKind.Semi);
+          cases.push({ labels, guard, expr });
+        }
+      } else {
+        if (at(TokenKind.LBrace)) {
+          expect(TokenKind.LBrace);
+          const stmts: Stmt[] = [];
+          while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) stmts.push(parseStmt());
+          expect(TokenKind.RBrace);
+          cases.push({ labels, guard, stmts });
+        } else {
+          const stmt = parseStmt();
+          cases.push({ labels, guard, stmts: [stmt] });
+        }
+      }
+    }
+    expect(TokenKind.RBrace);
+    validateSwitchCases(cases, isExpr);
+    return cases;
+  }
+
+  function validateSwitchCases(cases: SwitchCase[], isExpr: boolean): void {
+    let defaultCount = 0;
+    let nullCount = 0;
+    let seenDefaultNoGuard = false;
+    const seenConstLabels = new Set<string>();
+    const seenUnguardedTypePatterns = new Set<string>();
+    for (const c of cases) {
+      let caseHasDefaultNoGuard = false;
+      for (const l of c.labels) {
+        if (l.kind === "default") {
+          defaultCount++;
+          if (defaultCount > 1) throw new Error("switch cannot have more than one default label");
+        }
+        if (l.kind === "null") {
+          nullCount++;
+          if (nullCount > 1) throw new Error("switch cannot have more than one null label");
+        }
+        if (l.kind === "default" && !c.guard) caseHasDefaultNoGuard = true;
+        if (l.kind === "int") {
+          const key = `int:${l.value}`;
+          if (seenConstLabels.has(key)) throw new Error(`duplicate switch label: ${l.value}`);
+          seenConstLabels.add(key);
+        }
+        if (l.kind === "bool") {
+          const key = `bool:${l.value ? 1 : 0}`;
+          if (seenConstLabels.has(key)) throw new Error(`duplicate switch label: ${l.value}`);
+          seenConstLabels.add(key);
+        }
+        if (l.kind === "string") {
+          const key = `str:${l.value}`;
+          if (seenConstLabels.has(key)) throw new Error(`duplicate switch label: "${l.value}"`);
+          seenConstLabels.add(key);
+        }
+        if (l.kind === "null") {
+          const key = "null";
+          if (seenConstLabels.has(key)) throw new Error("duplicate switch label: null");
+          seenConstLabels.add(key);
+        }
+        if ((l.kind === "typePattern" || l.kind === "recordPattern") && seenUnguardedTypePatterns.has(l.typeName) && !c.guard) {
+          throw new Error(`dominated switch label pattern: ${l.typeName}`);
+        }
+      }
+      if (c.guard) {
+        if (c.labels.length !== 1 || (c.labels[0].kind !== "typePattern" && c.labels[0].kind !== "recordPattern")) {
+          throw new Error("switch guard 'when' is only supported with a single type pattern label");
+        }
+      }
+      const unguardedPattern = c.labels.find(l => l.kind === "typePattern" || l.kind === "recordPattern");
+      if (unguardedPattern && !c.guard) {
+        seenUnguardedTypePatterns.add(unguardedPattern.typeName);
+      }
+      if (isExpr && !c.expr && !(c.stmts && c.stmts.some(s => s.kind === "yield"))) {
+        throw new Error("switch expression case must provide value expression or yield");
+      }
+      if (seenDefaultNoGuard && !caseHasDefaultNoGuard) {
+        throw new Error("switch has unreachable case after unguarded default");
+      }
+      if (caseHasDefaultNoGuard) seenDefaultNoGuard = true;
+    }
+  }
+
   function parseStmt(): Stmt {
     // Block
     if (at(TokenKind.LBrace)) {
@@ -599,6 +943,13 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       const value = parseExpr();
       expect(TokenKind.Semi);
       return { kind: "return", value };
+    }
+
+    if (at(TokenKind.KwYield)) {
+      advance();
+      const value = parseExpr();
+      expect(TokenKind.Semi);
+      return { kind: "yield", value };
     }
 
     // If
@@ -659,8 +1010,25 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       return { kind: "for", init, cond, update, body };
     }
 
+    if (at(TokenKind.KwSwitch)) {
+      advance();
+      expect(TokenKind.LParen);
+      const selector = parseExpr();
+      expect(TokenKind.RParen);
+      const cases = parseSwitchCases(false);
+      return { kind: "switch", selector, cases };
+    }
+
     // Variable declaration or expression statement
     // Check if it looks like a type followed by an identifier (var decl)
+    if (at(TokenKind.KwVar)) {
+      advance();
+      const name = expect(TokenKind.Ident).value;
+      expect(TokenKind.Assign);
+      const init = parseExpr();
+      expect(TokenKind.Semi);
+      return { kind: "varDecl", name, type: inferLocalVarType(init), init };
+    }
     if (isTypeStart() && isVarDecl()) {
       const type = parseType();
       const name = expect(TokenKind.Ident).value;
@@ -693,6 +1061,13 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
   function parseStmtNoSemi(): Stmt {
     // For init/update — similar to parseStmt but no semicolon
+    if (at(TokenKind.KwVar)) {
+      advance();
+      const name = expect(TokenKind.Ident).value;
+      expect(TokenKind.Assign);
+      const init = parseExpr();
+      return { kind: "varDecl", name, type: inferLocalVarType(init), init };
+    }
     if (isTypeStart() && isVarDecl()) {
       const type = parseType();
       const name = expect(TokenKind.Ident).value;
@@ -721,7 +1096,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
   function isTypeStart(): boolean {
     const k = peek().kind;
     return k === TokenKind.KwInt || k === TokenKind.KwBoolean || k === TokenKind.KwVoid
-      || k === TokenKind.KwString || k === TokenKind.KwVar || k === TokenKind.Ident;
+      || k === TokenKind.KwString || k === TokenKind.Ident;
   }
 
   function isVarDecl(): boolean {
@@ -729,13 +1104,10 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     const saved = pos;
     try {
       // Skip type (including generic params)
-      if (at(TokenKind.KwInt) || at(TokenKind.KwBoolean) || at(TokenKind.KwVoid) || at(TokenKind.KwString) || at(TokenKind.KwVar)) {
-        const wasVar = at(TokenKind.KwVar);
+      if (at(TokenKind.KwInt) || at(TokenKind.KwBoolean) || at(TokenKind.KwVoid) || at(TokenKind.KwString)) {
         advance();
         // Skip array suffix []
         if (at(TokenKind.LBracket) && tokens[pos + 1]?.kind === TokenKind.RBracket) { advance(); advance(); }
-        // var is always followed by a variable name
-        if (wasVar) return at(TokenKind.Ident);
       } else if (at(TokenKind.Ident)) {
         advance();
         // Skip generics
@@ -769,6 +1141,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
   // Expression parsing with precedence climbing
   function parseExpr(): Expr {
+    if (isLambdaStart()) {
+      return parseLambdaExpr();
+    }
     const expr = parseOr();
     if (at(TokenKind.Question)) {
       advance(); // consume '?'
@@ -778,6 +1153,63 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       return { kind: "ternary", cond: expr, thenExpr, elseExpr };
     }
     return expr;
+  }
+
+  function isLambdaStart(): boolean {
+    if (at(TokenKind.Ident) && tokens[pos + 1]?.kind === TokenKind.Arrow) return true;
+    if (!at(TokenKind.LParen)) return false;
+    let i = pos + 1;
+    let expectIdent = true;
+    while (i < tokens.length && tokens[i].kind !== TokenKind.RParen) {
+      const k = tokens[i].kind;
+      if (expectIdent) {
+        if (k !== TokenKind.Ident) return false;
+        expectIdent = false;
+      } else {
+        if (k !== TokenKind.Comma) return false;
+        expectIdent = true;
+      }
+      i++;
+    }
+    if (i >= tokens.length || tokens[i].kind !== TokenKind.RParen) return false;
+    return tokens[i + 1]?.kind === TokenKind.Arrow;
+  }
+
+  function parseLambdaExpr(): Expr {
+    const params: string[] = [];
+    if (at(TokenKind.Ident) && tokens[pos + 1]?.kind === TokenKind.Arrow) {
+      params.push(advance().value);
+      expect(TokenKind.Arrow);
+    } else {
+      expect(TokenKind.LParen);
+      if (!at(TokenKind.RParen)) {
+        do { params.push(expect(TokenKind.Ident).value); } while (match(TokenKind.Comma));
+      }
+      expect(TokenKind.RParen);
+      expect(TokenKind.Arrow);
+    }
+    if (at(TokenKind.LBrace)) {
+      expect(TokenKind.LBrace);
+      const bodyStmts = parseBlock();
+      expect(TokenKind.RBrace);
+      return { kind: "lambda", params, bodyStmts };
+    }
+    const bodyExpr = parseExpr();
+    return { kind: "lambda", params, bodyExpr };
+  }
+
+  function inferLocalVarType(init: Expr): Type {
+    switch (init.kind) {
+      case "intLit": return "int";
+      case "longLit": return "long";
+      case "boolLit": return "boolean";
+      case "stringLit": return "String";
+      case "newArray": return { array: init.elemType };
+      case "arrayLit": return { array: init.elemType };
+      case "newExpr": return { className: init.className };
+      case "cast": return init.type;
+      default: return { className: "java/lang/Object" };
+    }
   }
 
   function parseOr(): Expr {
@@ -805,23 +1237,51 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     while (at(TokenKind.Eq) || at(TokenKind.Ne) || at(TokenKind.KwInstanceof)) {
       if (at(TokenKind.KwInstanceof)) {
         advance();
-        // Parse type (possibly with generic wildcard)
-        const typeName = expect(TokenKind.Ident).value;
-        // Skip generic params like <?>
-        if (at(TokenKind.Lt)) {
-          let depth = 1; advance();
-          while (depth > 0 && !at(TokenKind.EOF)) {
-            if (at(TokenKind.Lt)) depth++;
-            if (at(TokenKind.Gt)) depth--;
-            advance();
+        function parsePatternBindVar(): string {
+          if (match(TokenKind.KwVar)) return expect(TokenKind.Ident).value;
+          if ((at(TokenKind.KwInt) || at(TokenKind.KwBoolean) || at(TokenKind.KwString) || at(TokenKind.Ident))
+              && tokens[pos + 1]?.kind === TokenKind.Ident) {
+            advance(); // explicit component type
           }
+          return expect(TokenKind.Ident).value;
         }
-        // Optional pattern variable: instanceof Ok<?> ok
-        let bindVar: string | undefined;
-        if (at(TokenKind.Ident)) {
-          bindVar = advance().value;
+        function parseInstanceofPattern(): { typeName: string; bindVar?: string; recordBindVars?: string[] } {
+          if (match(TokenKind.LParen)) {
+            const inner = parseInstanceofPattern();
+            expect(TokenKind.RParen);
+            return inner;
+          }
+          let typeName: string;
+          if (at(TokenKind.KwString)) {
+            advance();
+            typeName = "java/lang/String";
+          } else {
+            typeName = parseQualifiedName();
+          }
+          // Skip generic params like <?>
+          if (at(TokenKind.Lt)) {
+            let depth = 1; advance();
+            while (depth > 0 && !at(TokenKind.EOF)) {
+              if (at(TokenKind.Lt)) depth++;
+              if (at(TokenKind.Gt)) depth--;
+              advance();
+            }
+          }
+          if (at(TokenKind.LParen)) {
+            const bindVars: string[] = [];
+            advance();
+            if (!at(TokenKind.RParen)) {
+              do { bindVars.push(parsePatternBindVar()); } while (match(TokenKind.Comma));
+            }
+            expect(TokenKind.RParen);
+            return { typeName, recordBindVars: bindVars };
+          }
+          let bindVar: string | undefined;
+          if (at(TokenKind.Ident)) bindVar = advance().value;
+          return { typeName, bindVar };
         }
-        left = { kind: "instanceof", expr: left, checkType: typeName, bindVar };
+        const p = parseInstanceofPattern();
+        left = { kind: "instanceof", expr: left, checkType: p.typeName, bindVar: p.bindVar, recordBindVars: p.recordBindVars };
       } else {
         const op = advance().value;
         const right = parseComparison();
@@ -906,6 +1366,15 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       } else if (at(TokenKind.MinusMinus)) {
         advance();
         expr = { kind: "postIncrement", operand: expr, op: "--" };
+      } else if (at(TokenKind.ColonColon)) {
+        advance();
+        if (match(TokenKind.KwNew)) {
+          expr = { kind: "methodRef", target: expr, method: "<init>", isConstructor: true };
+        } else {
+          const method = expect(TokenKind.Ident).value;
+          expr = { kind: "methodRef", target: expr, method, isConstructor: false };
+        }
+        break;
       } else {
         break;
       }
@@ -916,7 +1385,11 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
   function parsePrimary(): Expr {
     // Int literal
     if (at(TokenKind.IntLiteral)) {
-      return { kind: "intLit", value: parseInt(advance().value, 10) };
+      return { kind: "intLit", value: parseIntLiteral(advance().value) };
+    }
+    // Long literal
+    if (at(TokenKind.LongLiteral)) {
+      return { kind: "longLit", value: parseIntLiteral(advance().value) };
     }
     // String literal
     if (at(TokenKind.StringLiteral)) {
@@ -935,6 +1408,20 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     if (at(TokenKind.KwThis)) {
       advance();
       return { kind: "this" };
+    }
+    // String class literal-like reference in expressions (e.g., String::length)
+    if (at(TokenKind.KwString)) {
+      advance();
+      return { kind: "ident", name: "String" };
+    }
+    // switch expression
+    if (at(TokenKind.KwSwitch)) {
+      advance();
+      expect(TokenKind.LParen);
+      const selector = parseExpr();
+      expect(TokenKind.RParen);
+      const cases = parseSwitchCases(true);
+      return { kind: "switchExpr", selector, cases };
     }
     // super(args) — explicit superclass constructor call
     if (at(TokenKind.KwSuper)) {
@@ -1016,7 +1503,8 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           advance(); // consume ')'
           // Check if this looks like a cast (next token starts an expression but not an operator)
           if (at(TokenKind.Ident) || at(TokenKind.KwThis) || at(TokenKind.KwNew) ||
-              at(TokenKind.LParen) || at(TokenKind.IntLiteral) || at(TokenKind.StringLiteral)) {
+              at(TokenKind.LParen) || at(TokenKind.IntLiteral) || at(TokenKind.StringLiteral) ||
+              at(TokenKind.BoolLiteral) || at(TokenKind.NullLiteral)) {
             const castExpr = parseUnary();
             const castType: Type = typeName === "String" ? "String"
               : typeName === "int" ? "int"
@@ -1087,6 +1575,21 @@ class ConstantPoolBuilder {
     return idx;
   }
 
+  addLong(v: number): number {
+    // CONSTANT_Long uses tag 5 and occupies 2 CP entries
+    const hi = Math.floor(v / 0x100000000);
+    const lo = v >>> 0;
+    const data = [
+      (hi >> 24) & 0xff, (hi >> 16) & 0xff, (hi >> 8) & 0xff, hi & 0xff,
+      (lo >> 24) & 0xff, (lo >> 16) & 0xff, (lo >> 8) & 0xff, lo & 0xff,
+    ];
+    const idx = this.entries.length;
+    this.entries.push({ tag: 5, data });
+    // Long/Double constants occupy two entries; add a placeholder
+    this.entries.push({ tag: 0, data: [] });
+    return idx;
+  }
+
   addClass(name: string): number {
     const nameIdx = this.addUtf8(name);
     const idx = this.entries.length;
@@ -1145,6 +1648,29 @@ class ConstantPoolBuilder {
     return idx;
   }
 
+  addMethodHandle(referenceKind: number, referenceIndex: number): number {
+    const idx = this.entries.length;
+    this.entries.push({ tag: 15, data: [referenceKind & 0xff, (referenceIndex >> 8) & 0xff, referenceIndex & 0xff] });
+    return idx;
+  }
+
+  addMethodType(descriptor: string): number {
+    const descIdx = this.addUtf8(descriptor);
+    const idx = this.entries.length;
+    this.entries.push({ tag: 16, data: [(descIdx >> 8) & 0xff, descIdx & 0xff] });
+    return idx;
+  }
+
+  addInvokeDynamic(bootstrapMethodAttrIndex: number, name: string, descriptor: string): number {
+    const natIdx = this.addNameAndType(name, descriptor);
+    const idx = this.entries.length;
+    this.entries.push({ tag: 18, data: [
+      (bootstrapMethodAttrIndex >> 8) & 0xff, bootstrapMethodAttrIndex & 0xff,
+      (natIdx >> 8) & 0xff, natIdx & 0xff,
+    ]});
+    return idx;
+  }
+
   serialize(): number[] {
     const out: number[] = [];
     // count (u16)
@@ -1198,6 +1724,16 @@ class BytecodeEmitter {
     return true;
   }
 
+  emitLconst(v: number, cp: ConstantPoolBuilder): void {
+    if (v === 0) { this.emit(0x09); } // lconst_0
+    else if (v === 1) { this.emit(0x0a); } // lconst_1
+    else {
+      const cpIdx = cp.addLong(v);
+      this.emit(0x14); this.emitU16(cpIdx); // ldc2_w
+    }
+    this.adjustStack(1);
+  }
+
   emitLdc(cpIdx: number) {
     if (cpIdx <= 255) {
       this.emit(0x12); // ldc
@@ -1233,6 +1769,18 @@ class BytecodeEmitter {
     this.adjustStack(-1);
   }
 
+  emitLload(idx: number) {
+    if (idx <= 3) this.emit(0x1e + idx); // lload_0..3
+    else { this.emit(0x16); this.emit(idx); }
+    this.adjustStack(1);
+  }
+
+  emitLstore(idx: number) {
+    if (idx <= 3) this.emit(0x3f + idx); // lstore_0..3
+    else { this.emit(0x37); this.emit(idx); }
+    this.adjustStack(-1);
+  }
+
   emitInvokevirtual(cpIdx: number, argCount: number, hasReturn: boolean) {
     this.emit(0xb6);
     this.emitU16(cpIdx);
@@ -1260,6 +1808,14 @@ class BytecodeEmitter {
     this.adjustStack(-(argCount + 1) + (hasReturn ? 1 : 0));
   }
 
+  emitInvokedynamic(cpIdx: number, argCount: number, hasReturn: boolean) {
+    this.emit(0xba);
+    this.emitU16(cpIdx);
+    this.emit(0);
+    this.emit(0);
+    this.adjustStack(-argCount + (hasReturn ? 1 : 0));
+  }
+
   // Branch helpers: emit placeholder offset, return patch position
   emitBranch(opcode: number): number {
     this.emit(opcode);
@@ -1276,6 +1832,7 @@ class BytecodeEmitter {
 
   emitReturn(type: Type) {
     if (type === "void") this.emit(0xb1);
+    else if (type === "long") { this.emit(0xad); this.adjustStack(-1); } // lreturn
     else if (type === "int" || type === "boolean") { this.emit(0xac); this.adjustStack(-1); }
     else { this.emit(0xb0); this.adjustStack(-1); } // areturn
   }
@@ -1284,6 +1841,7 @@ class BytecodeEmitter {
 // Type descriptor helpers
 function typeToDescriptor(t: Type): string {
   if (t === "int") return "I";
+  if (t === "long") return "J";
   if (t === "boolean") return "Z";
   if (t === "void") return "V";
   if (t === "String") return "Ljava/lang/String;";
@@ -1297,7 +1855,82 @@ function methodDescriptor(params: ParamDecl[], returnType: Type): string {
 }
 
 function isRefType(t: Type): boolean {
-  return t !== "int" && t !== "boolean" && t !== "void";
+  return t !== "int" && t !== "long" && t !== "boolean" && t !== "void";
+}
+
+function isPrimitiveType(t: Type): boolean {
+  return t === "int" || t === "long" || t === "boolean";
+}
+
+function sameType(a: Type, b: Type): boolean {
+  if (a === b) return true;
+  if (typeof a === "object" && typeof b === "object") {
+    if ("className" in a && "className" in b) return a.className === b.className;
+    if ("array" in a && "array" in b) return sameType(a.array, b.array);
+  }
+  return false;
+}
+
+function isAssignable(to: Type, from: Type): boolean {
+  if (sameType(to, from)) return true;
+  if (isRefType(to) && isRefType(from)) return true;
+  if (to === "long" && from === "int") return true; // widening int→long
+  if (to === "int" && from === "boolean") return false;
+  if (to === "boolean" && from === "int") return false;
+  return false;
+}
+
+function isKnownClass(ctx: CompileContext, cls: string): boolean {
+  return cls === "java/lang/Object" || ctx.classSupers.has(cls) || !!BUILTIN_SUPERS[cls];
+}
+
+function isAssignableInContext(ctx: CompileContext, to: Type, from: Type): boolean {
+  if (sameType(to, from)) return true;
+
+  // Widening: int → long
+  if (to === "long" && from === "int") return true;
+  // Primitive assignments: exact type only in this subset.
+  if (isPrimitiveType(to) || isPrimitiveType(from)) return false;
+
+  // Array assignments: exact array type or to Object.
+  if (typeof to === "object" && "array" in to) {
+    return typeof from === "object" && "array" in from && isAssignableInContext(ctx, to.array, from.array);
+  }
+  if (typeof from === "object" && "array" in from) {
+    const toCls = toInternalClassName(ctx, to);
+    return toCls === "java/lang/Object";
+  }
+
+  const toCls = toInternalClassName(ctx, to);
+  const fromCls = toInternalClassName(ctx, from);
+  if (!toCls || !fromCls) return isAssignable(to, from);
+  if (toCls === "java/lang/Object") return true;
+  if (fromCls === "java/lang/Object") return true;
+  if (isClassSupertype(ctx, toCls, fromCls)) return true;
+
+  // If both classes are known in hierarchy and not related, reject.
+  if (isKnownClass(ctx, toCls) && isKnownClass(ctx, fromCls)) return false;
+  // Unknown external hierarchy: keep permissive compatibility.
+  return true;
+}
+
+function isCastConvertible(to: Type, from: Type): boolean {
+  if (sameType(to, from)) return true;
+  const toPrim = isPrimitiveType(to);
+  const fromPrim = isPrimitiveType(from);
+  if (toPrim || fromPrim) {
+    // In this subset, only identity primitive casts are supported.
+    return false;
+  }
+  return true;
+}
+
+function mergeTernaryType(a: Type, b: Type): Type {
+  if (sameType(a, b)) return a;
+  if ((a === "int" && b === "boolean") || (a === "boolean" && b === "int")) return "int";
+  if ((a === "long" && b === "int") || (a === "int" && b === "long")) return "long";
+  if (isRefType(a) && isRefType(b)) return { className: "java/lang/Object" };
+  return a;
 }
 
 // Known class type mappings for method return types
@@ -1306,11 +1939,12 @@ interface MethodSig {
   returnType: Type;
   paramTypes: Type[];
   isInterface?: boolean;
+  isStatic?: boolean;
 }
 
-const KNOWN_METHODS: Record<string, MethodSig> = {
+let knownMethods: Record<string, MethodSig> = {
   // Integer
-  "java/lang/Integer.valueOf(I)": { owner: "java/lang/Integer", returnType: { className: "java/lang/Integer" }, paramTypes: ["int"] },
+  "java/lang/Integer.valueOf(I)": { owner: "java/lang/Integer", returnType: { className: "java/lang/Integer" }, paramTypes: ["int"], isStatic: true },
   "java/lang/Integer.toString()": { owner: "java/lang/Integer", returnType: "String", paramTypes: [] },
   "java/lang/Integer.intValue()": { owner: "java/lang/Integer", returnType: "int", paramTypes: [] },
   // String
@@ -1322,10 +1956,14 @@ const KNOWN_METHODS: Record<string, MethodSig> = {
   "java/lang/String.isEmpty()": { owner: "java/lang/String", returnType: "boolean", paramTypes: [] },
   "java/lang/String.contains(Ljava/lang/CharSequence;)": { owner: "java/lang/String", returnType: "boolean", paramTypes: [{ className: "java/lang/CharSequence" }] },
   "java/lang/String.concat(Ljava/lang/String;)": { owner: "java/lang/String", returnType: "String", paramTypes: ["String"] },
+  "java/lang/String.toString()": { owner: "java/lang/String", returnType: "String", paramTypes: [] },
+  // Object
+  "java/lang/Object.toString()": { owner: "java/lang/Object", returnType: "String", paramTypes: [] },
   // StringBuilder
   "java/lang/StringBuilder.<init>()": { owner: "java/lang/StringBuilder", returnType: "void", paramTypes: [] },
   "java/lang/StringBuilder.append(Ljava/lang/String;)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["String"] },
   "java/lang/StringBuilder.append(I)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["int"] },
+  "java/lang/StringBuilder.append(J)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["long"] },
   "java/lang/StringBuilder.append(Z)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["boolean"] },
   "java/lang/StringBuilder.append(Ljava/lang/Object;)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: [{ className: "java/lang/Object" }] },
   "java/lang/StringBuilder.toString()": { owner: "java/lang/StringBuilder", returnType: "String", paramTypes: [] },
@@ -1341,6 +1979,43 @@ const KNOWN_METHODS: Record<string, MethodSig> = {
   "java/util/List.add(Ljava/lang/Object;)": { owner: "java/util/List", returnType: "boolean", paramTypes: [{ className: "java/lang/Object" }], isInterface: true },
   "java/util/List.get(I)": { owner: "java/util/List", returnType: { className: "java/lang/Object" }, paramTypes: ["int"], isInterface: true },
   "java/util/List.size()": { owner: "java/util/List", returnType: "int", paramTypes: [], isInterface: true },
+  // Functional interfaces
+  "java/util/function/Function.apply(Ljava/lang/Object;)": {
+    owner: "java/util/function/Function",
+    returnType: { className: "java/lang/Object" },
+    paramTypes: [{ className: "java/lang/Object" }],
+    isInterface: true,
+  },
+  "java/util/function/BiFunction.apply(Ljava/lang/Object;Ljava/lang/Object;)": {
+    owner: "java/util/function/BiFunction",
+    returnType: { className: "java/lang/Object" },
+    paramTypes: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }],
+    isInterface: true,
+  },
+  "java/util/function/Predicate.test(Ljava/lang/Object;)": {
+    owner: "java/util/function/Predicate",
+    returnType: "boolean",
+    paramTypes: [{ className: "java/lang/Object" }],
+    isInterface: true,
+  },
+  "java/util/function/Consumer.accept(Ljava/lang/Object;)": {
+    owner: "java/util/function/Consumer",
+    returnType: "void",
+    paramTypes: [{ className: "java/lang/Object" }],
+    isInterface: true,
+  },
+  "java/util/function/Supplier.get()": {
+    owner: "java/util/function/Supplier",
+    returnType: { className: "java/lang/Object" },
+    paramTypes: [],
+    isInterface: true,
+  },
+  "java/lang/Runnable.run()": {
+    owner: "java/lang/Runnable",
+    returnType: "void",
+    paramTypes: [],
+    isInterface: true,
+  },
   // PrintStream
   "java/io/PrintStream.println(Ljava/lang/String;)": { owner: "java/io/PrintStream", returnType: "void", paramTypes: ["String"] },
   "java/io/PrintStream.println(I)": { owner: "java/io/PrintStream", returnType: "void", paramTypes: ["int"] },
@@ -1348,6 +2023,11 @@ const KNOWN_METHODS: Record<string, MethodSig> = {
   "java/io/PrintStream.print(Ljava/lang/String;)": { owner: "java/io/PrintStream", returnType: "void", paramTypes: ["String"] },
   "java/io/PrintStream.print(I)": { owner: "java/io/PrintStream", returnType: "void", paramTypes: ["int"] },
 };
+
+/** Merge an externally-built method registry into the known methods table. */
+export function setMethodRegistry(reg: Record<string, MethodSig>): void {
+  knownMethods = { ...knownMethods, ...reg };
+}
 
 // Environment for tracking local variables
 interface LocalVar {
@@ -1367,19 +2047,113 @@ interface CompileContext {
   inheritedFields: FieldDecl[]; // fields from superclass(es)
   allMethods: MethodDecl[];
   importMap: Map<string, string>;
-  wildcardImports: string[];
+  packageImports: string[];
+  staticWildcardImports: string[];
+  classSupers: Map<string, string>;
+  classDecls: Map<string, ClassDecl>;
+  lambdaCounter: { value: number };
+  generatedMethods: MethodDecl[];
+  lambdaBootstraps: LambdaBootstrap[];
+  ownerIsStatic: boolean;
 }
 
-/** Look up a method in KNOWN_METHODS, falling back to name-only match if exact arg types don't match. */
+interface FunctionalSig {
+  samMethod: string;
+  params: Type[];
+  returnType: Type;
+}
+
+interface LambdaBootstrap {
+  implOwner: string;
+  implMethodName: string;
+  implDescriptor: string;
+  implIsInterface?: boolean;
+  invokedName: string;
+  invokedDescriptor: string;
+  implRefKind: number;
+}
+
+const FUNCTIONAL_IFACES: Record<string, FunctionalSig> = {
+  "java/lang/Runnable": { samMethod: "run", params: [], returnType: "void" },
+  "java/util/function/Supplier": { samMethod: "get", params: [], returnType: { className: "java/lang/Object" } },
+  "java/util/function/Consumer": { samMethod: "accept", params: [{ className: "java/lang/Object" }], returnType: "void" },
+  "java/util/function/Predicate": { samMethod: "test", params: [{ className: "java/lang/Object" }], returnType: "boolean" },
+  "java/util/function/Function": { samMethod: "apply", params: [{ className: "java/lang/Object" }], returnType: { className: "java/lang/Object" } },
+  "java/util/function/BiFunction": {
+    samMethod: "apply",
+    params: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }],
+    returnType: { className: "java/lang/Object" },
+  },
+};
+
+/** Look up a method in knownMethods, falling back to name-only match if exact arg types don't match. */
 function lookupKnownMethod(owner: string, method: string, argDescs: string): MethodSig | undefined {
-  const exact = KNOWN_METHODS[`${owner}.${method}(${argDescs})`];
+  const exact = knownMethods[`${owner}.${method}(${argDescs})`];
   if (exact) return exact;
-  // Fallback: find by owner.method prefix (handles e.g. String arg passed to Object param)
+  // Fallback: choose compatible overload by arity and primitive/ref compatibility.
   const prefix = `${owner}.${method}(`;
-  for (const key of Object.keys(KNOWN_METHODS)) {
-    if (key.startsWith(prefix)) return KNOWN_METHODS[key];
+  const wantedArgs = splitDescriptorArgs(argDescs);
+  let firstCompatible: MethodSig | undefined;
+  for (const key of Object.keys(knownMethods)) {
+    if (!key.startsWith(prefix)) continue;
+    const start = key.indexOf("(");
+    const end = key.indexOf(")");
+    if (start < 0 || end < 0) continue;
+    const keyArgs = splitDescriptorArgs(key.slice(start + 1, end));
+    if (keyArgs.length !== wantedArgs.length) continue;
+    const compatible = keyArgs.every((a, i) => {
+      const b = wantedArgs[i];
+      if (a === b) return true;
+      const aRef = a.startsWith("L") || a.startsWith("[");
+      const bRef = b.startsWith("L") || b.startsWith("[");
+      return aRef && bRef;
+    });
+    if (compatible) {
+      firstCompatible = knownMethods[key];
+      break;
+    }
+  }
+  return firstCompatible;
+}
+
+function findKnownMethodByArity(owner: string, method: string, arity: number, wantStatic: boolean): MethodSig | undefined {
+  const prefix = `${owner}.${method}(`;
+  for (const key of Object.keys(knownMethods)) {
+    if (!key.startsWith(prefix)) continue;
+    const sig = knownMethods[key];
+    const isStatic = sig.isStatic ?? false;
+    if (isStatic !== wantStatic) continue;
+    if (sig.paramTypes.length === arity) return sig;
   }
   return undefined;
+}
+
+function splitDescriptorArgs(descs: string): string[] {
+  const args: string[] = [];
+  for (let i = 0; i < descs.length;) {
+    if (descs[i] === "[") {
+      let j = i;
+      while (descs[j] === "[") j++;
+      if (descs[j] === "L") {
+        const semi = descs.indexOf(";", j);
+        args.push(descs.slice(i, semi + 1));
+        i = semi + 1;
+      } else {
+        args.push(descs.slice(i, j + 1));
+        i = j + 1;
+      }
+      continue;
+    }
+    if (descs[i] === "L") {
+      const semi = descs.indexOf(";", i);
+      args.push(descs.slice(i, semi + 1));
+      i = semi + 1;
+      continue;
+    }
+    args.push(descs[i]);
+    i++;
+  }
+  return args;
 }
 
 /** Resolve a simple class name to its internal JVM name using the import map. */
@@ -1387,7 +2161,17 @@ function resolveClassName(ctx: CompileContext, name: string): string {
   // Already internal (contains '/') or fully qualified (contains '.')
   if (name.includes("/")) return name;
   if (name.includes(".")) return name.replace(/\./g, "/");
-  return ctx.importMap.get(name) ?? name;
+  const explicit = ctx.importMap.get(name);
+  if (explicit) return explicit;
+  if (ctx.classDecls.has(name)) return name;
+  if (/^[A-Z]/.test(name) && ctx.packageImports.length > 0) {
+    for (const pkg of ctx.packageImports) {
+      const candidate = `${pkg}/${name}`;
+      if (Object.keys(knownMethods).some(k => k.startsWith(`${candidate}.`))) return candidate;
+    }
+    return `${ctx.packageImports[0]}/${name}`;
+  }
+  return name;
 }
 
 function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
@@ -1404,6 +2188,7 @@ function addLocal(ctx: CompileContext, name: string, type: Type): number {
 function inferType(ctx: CompileContext, expr: Expr): Type {
   switch (expr.kind) {
     case "intLit": return "int";
+    case "longLit": return "long";
     case "stringLit": return "String";
     case "boolLit": return "boolean";
     case "nullLit": return { className: "java/lang/Object" };
@@ -1423,11 +2208,13 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
         const rt = inferType(ctx, expr.right);
         // String concatenation
         if (expr.op === "+" && (lt === "String" || rt === "String")) return "String";
+        // Long promotion
+        if (lt === "long" || rt === "long") return "long";
         return "int";
       }
       return "boolean"; // comparison operators
     }
-    case "unary": return expr.op === "!" ? "boolean" : "int";
+    case "unary": return expr.op === "!" ? "boolean" : inferType(ctx, expr.operand) === "long" ? "long" : "int";
     case "newExpr": return { className: resolveClassName(ctx, expr.className) };
     case "call": {
       if (expr.object) {
@@ -1436,7 +2223,7 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
           : typeof objType === "object" && "className" in objType ? objType.className
           : "java/lang/Object";
         const ownerClass = resolveClassName(ctx, rawOwner);
-        // Look in KNOWN_METHODS
+        // Look in knownMethods
         const argDescs = expr.args.map(a => typeToDescriptor(inferType(ctx, a))).join("");
         const sig = lookupKnownMethod(ownerClass, expr.method, argDescs);
         if (sig) return sig.returnType;
@@ -1447,7 +2234,7 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
         // Unqualified call — look in user-defined methods
         const userMethod = ctx.allMethods.find(m => m.name === expr.method);
         if (userMethod) return userMethod.returnType;
-        // Wildcard-imported static method — return type unknown, assume Object
+        // Static import-on-demand method — return type unknown, assume Object
       }
       return { className: "java/lang/Object" };
     }
@@ -1469,7 +2256,7 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
       return { className: "java/lang/Object" };
     }
     case "cast": return expr.type;
-    case "postIncrement": return "int";
+    case "postIncrement": return inferType(ctx, expr.operand);
     case "instanceof": return "boolean";
     case "staticField": return { className: "java/lang/Object" };
     case "arrayAccess": {
@@ -1480,17 +2267,45 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
     case "arrayLit": return { array: expr.elemType };
     case "newArray": return { array: expr.elemType };
     case "superCall": return "void";
-    case "ternary": return inferType(ctx, expr.thenExpr);
+    case "ternary": return mergeTernaryType(inferType(ctx, expr.thenExpr), inferType(ctx, expr.elseExpr));
+    case "switchExpr": {
+      let current: Type | undefined;
+      for (const c of expr.cases) {
+        if (c.expr) {
+          const t = inferType(ctx, c.expr);
+          current = current ? mergeTernaryType(current, t) : t;
+        } else if (c.stmts) {
+          for (const s of c.stmts) {
+            if (s.kind === "yield") {
+              const t = inferType(ctx, s.value);
+              current = current ? mergeTernaryType(current, t) : t;
+            }
+          }
+        }
+      }
+      return current ?? { className: "java/lang/Object" };
+    }
+    case "lambda": return { className: "java/lang/Object" };
+    case "methodRef": return { className: "java/lang/Object" };
   }
 }
 
-function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr): void {
+function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, expectedType?: Type): void {
   switch (expr.kind) {
     case "intLit": {
+      // If expected type is long, emit as long constant
+      if (expectedType === "long") {
+        emitter.emitLconst(expr.value, ctx.cp);
+        break;
+      }
       if (!emitter.emitIconst(expr.value)) {
         const cpIdx = ctx.cp.addInteger(expr.value);
         emitter.emitLdc(cpIdx);
       }
+      break;
+    }
+    case "longLit": {
+      emitter.emitLconst(expr.value, ctx.cp);
       break;
     }
     case "stringLit": {
@@ -1555,51 +2370,148 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr):
         break;
       }
 
-      // Integer arithmetic
-      compileExpr(ctx, emitter, expr.left);
-      compileExpr(ctx, emitter, expr.right);
-
-      switch (expr.op) {
-        case "+": emitter.emit(0x60); break; // iadd
-        case "-": emitter.emit(0x64); break; // isub
-        case "*": emitter.emit(0x68); break; // imul
-        case "/": emitter.emit(0x6c); break; // idiv
-        case "%": emitter.emit(0x70); break; // irem
-
-        // Comparisons — produce 0 or 1
-        case "==": case "!=": case "<": case ">": case "<=": case ">=": {
-          const jumpOp = {
-            "==": 0xa0, // if_icmpne
-            "!=": 0x9f, // if_icmpeq
-            "<": 0xa2,  // if_icmpge
-            ">": 0xa4,  // if_icmple
-            "<=": 0xa3, // if_icmpgt
-            ">=": 0xa1, // if_icmplt
-          }[expr.op]!;
-          const patchFalse = emitter.emitBranch(jumpOp);
-          emitter.emitIconst(1);
-          const patchEnd = emitter.emitBranch(0xa7); // goto
-          emitter.patchBranch(patchFalse, emitter.pc);
-          emitter.emitIconst(0);
-          emitter.patchBranch(patchEnd, emitter.pc);
-          break;
+      // Logical operators with short-circuit
+      if (expr.op === "&&") {
+        if (!(leftType === "boolean" && rightType === "boolean")) {
+          throw new Error("Operator '&&' requires boolean operands");
         }
-        case "&&": case "||": break; // handled separately below
+        compileExpr(ctx, emitter, expr.left);
+        const patchFalse = emitter.emitBranch(0x99); // ifeq
+        compileExpr(ctx, emitter, expr.right);
+        const patchEnd = emitter.emitBranch(0xa7); // goto
+        emitter.patchBranch(patchFalse, emitter.pc);
+        emitter.emitIconst(0);
+        emitter.patchBranch(patchEnd, emitter.pc);
+        break;
+      }
+      if (expr.op === "||") {
+        if (!(leftType === "boolean" && rightType === "boolean")) {
+          throw new Error("Operator '||' requires boolean operands");
+        }
+        compileExpr(ctx, emitter, expr.left);
+        const patchEvalRight = emitter.emitBranch(0x99); // ifeq
+        emitter.emitIconst(1);
+        const patchEnd = emitter.emitBranch(0xa7); // goto
+        emitter.patchBranch(patchEvalRight, emitter.pc);
+        compileExpr(ctx, emitter, expr.right);
+        emitter.patchBranch(patchEnd, emitter.pc);
+        break;
       }
 
-      // Logical operators (short-circuit)
-      if (expr.op === "&&") {
-        // Redo: compile with short-circuit
-        // Pop the two values we already pushed
-        emitter.code.length -= emitter.code.length - emitter.pc; // nope, too late
-        // Actually, let's handle && and || at the top before compiling both sides
+      // Determine if long arithmetic is needed
+      const isLongOp = leftType === "long" || rightType === "long";
+
+      // Arithmetic/comparison type checks
+      if (["+", "-", "*", "/", "%"].includes(expr.op)) {
+        const validInt = leftType === "int" && rightType === "int";
+        const validLong = isLongOp && (leftType === "int" || leftType === "long") && (rightType === "int" || rightType === "long");
+        if (!validInt && !validLong) {
+          throw new Error(`Operator '${expr.op}' requires int or long operands`);
+        }
+      }
+      if (["<", ">", "<=", ">="].includes(expr.op)) {
+        const validInt = leftType === "int" && rightType === "int";
+        const validLong = isLongOp && (leftType === "int" || leftType === "long") && (rightType === "int" || rightType === "long");
+        if (!validInt && !validLong) {
+          throw new Error(`Operator '${expr.op}' requires int or long operands`);
+        }
+      }
+      if (expr.op === "==" || expr.op === "!=") {
+        const leftRef = isRefType(leftType);
+        const rightRef = isRefType(rightType);
+        if (leftRef !== rightRef) {
+          throw new Error(`Operator '${expr.op}' requires operands of compatible categories`);
+        }
+        if (!leftRef && !rightRef && !sameType(leftType, rightType) && !isLongOp) {
+          throw new Error(`Operator '${expr.op}' requires operands of the same primitive type`);
+        }
+      }
+
+      // Emit operands with widening i2l if needed
+      compileExpr(ctx, emitter, expr.left);
+      if (isLongOp && leftType === "int") emitter.emit(0x85); // i2l
+      compileExpr(ctx, emitter, expr.right);
+      if (isLongOp && rightType === "int") emitter.emit(0x85); // i2l
+
+      if (isLongOp) {
+        switch (expr.op) {
+          case "+": emitter.emit(0x61); break; // ladd
+          case "-": emitter.emit(0x65); break; // lsub
+          case "*": emitter.emit(0x69); break; // lmul
+          case "/": emitter.emit(0x6d); break; // ldiv
+          case "%": emitter.emit(0x71); break; // lrem
+          case "==": case "!=": case "<": case ">": case "<=": case ">=": {
+            emitter.emitPush(0x94); // lcmp: pops 2 longs, pushes 1 int; net with adjustStack(+1) from emit+push gives correct -1 after the two operands
+            const jumpOp = {
+              "==": 0x9a, // ifne
+              "!=": 0x99, // ifeq
+              "<": 0x9c,  // ifge
+              ">": 0x9e,  // ifle
+              "<=": 0x9d, // ifgt
+              ">=": 0x9b, // iflt
+            }[expr.op]!;
+            const patchFalse = emitter.emitBranch(jumpOp);
+            emitter.emitIconst(1);
+            const patchEnd = emitter.emitBranch(0xa7); // goto
+            emitter.patchBranch(patchFalse, emitter.pc);
+            emitter.emitIconst(0);
+            emitter.patchBranch(patchEnd, emitter.pc);
+            break;
+          }
+          default:
+            throw new Error(`Unsupported binary operator for long: ${expr.op}`);
+        }
+      } else {
+        switch (expr.op) {
+          case "+": emitter.emit(0x60); break; // iadd
+          case "-": emitter.emit(0x64); break; // isub
+          case "*": emitter.emit(0x68); break; // imul
+          case "/": emitter.emit(0x6c); break; // idiv
+          case "%": emitter.emit(0x70); break; // irem
+
+          // Comparisons — produce 0 or 1
+          case "==": case "!=": case "<": case ">": case "<=": case ">=": {
+            const refCompare = expr.op === "==" || expr.op === "!="
+              ? (isRefType(leftType) || isRefType(rightType))
+              : false;
+            const jumpOp = refCompare
+              ? (expr.op === "==" ? 0xa6 : 0xa5) // if_acmpne / if_acmpeq
+              : {
+                  "==": 0xa0, // if_icmpne
+                  "!=": 0x9f, // if_icmpeq
+                  "<": 0xa2,  // if_icmpge
+                  ">": 0xa4,  // if_icmple
+                  "<=": 0xa3, // if_icmpgt
+                  ">=": 0xa1, // if_icmplt
+                }[expr.op]!;
+            const patchFalse = emitter.emitBranch(jumpOp);
+            emitter.emitIconst(1);
+            const patchEnd = emitter.emitBranch(0xa7); // goto
+            emitter.patchBranch(patchFalse, emitter.pc);
+            emitter.emitIconst(0);
+            emitter.patchBranch(patchEnd, emitter.pc);
+            break;
+          }
+          default:
+            throw new Error(`Unsupported binary operator: ${expr.op}`);
+        }
       }
       break;
     }
     case "unary": {
+      const operandType = inferType(ctx, expr.operand);
       compileExpr(ctx, emitter, expr.operand);
-      if (expr.op === "-") emitter.emit(0x74); // ineg
+      if (expr.op === "-") {
+        if (operandType === "long") {
+          emitter.emit(0x75); // lneg
+        } else if (operandType === "int") {
+          emitter.emit(0x74); // ineg
+        } else {
+          throw new Error("Unary '-' requires int or long operand");
+        }
+      }
       if (expr.op === "!") {
+        if (operandType !== "boolean") throw new Error("Unary '!' requires boolean operand");
         // XOR with 1
         emitter.emitIconst(1);
         emitter.emit(0x82); // ixor
@@ -1655,6 +2567,10 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr):
       break;
     }
     case "cast": {
+      const srcType = inferType(ctx, expr.expr);
+      if (!isCastConvertible(expr.type, srcType)) {
+        throw new Error(`Invalid cast from ${typeToDescriptor(srcType)} to ${typeToDescriptor(expr.type)}`);
+      }
       compileExpr(ctx, emitter, expr.expr);
       if (isRefType(expr.type)) {
         const castClass = typeof expr.type === "object" && "className" in expr.type
@@ -1753,6 +2669,15 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr):
     }
     case "ternary": {
       // cond ? thenExpr : elseExpr
+      if (inferType(ctx, expr.cond) !== "boolean") {
+        throw new Error("Ternary condition must be boolean");
+      }
+      const thenType = inferType(ctx, expr.thenExpr);
+      const elseType = inferType(ctx, expr.elseExpr);
+      const refCompatible = isRefType(thenType) && isRefType(elseType);
+      if (!refCompatible && !isAssignableInContext(ctx, thenType, elseType) && !isAssignableInContext(ctx, elseType, thenType)) {
+        throw new Error("Ternary branches must have compatible types");
+      }
       compileExpr(ctx, emitter, expr.cond);
       const patchElse = emitter.emitBranch(0x99); // ifeq — jump to else if cond == 0
       compileExpr(ctx, emitter, expr.thenExpr);
@@ -1760,6 +2685,194 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr):
       emitter.patchBranch(patchElse, emitter.pc);
       compileExpr(ctx, emitter, expr.elseExpr);
       emitter.patchBranch(patchEnd, emitter.pc);
+      break;
+    }
+    case "switchExpr": {
+      compileSwitchExpr(ctx, emitter, expr, expectedType);
+      break;
+    }
+    case "lambda": {
+      if (!expectedType) {
+        throw new Error("Lambda expression requires target type context");
+      }
+      const { ifaceName, sig } = functionalSigForType(ctx, expectedType);
+      if (expr.params.length !== sig.params.length) {
+        throw new Error(`Lambda parameter count mismatch: expected ${sig.params.length}, got ${expr.params.length}`);
+      }
+
+      // Non-capturing lambdas only for now.
+      const used = new Set<string>();
+      if (expr.bodyExpr) collectExprIdentifiers(expr.bodyExpr, used);
+      if (expr.bodyStmts) for (const s of expr.bodyStmts) collectStmtIdentifiers(s, used);
+      const paramSet = new Set(expr.params);
+      const captures = ctx.locals.filter(l => used.has(l.name) && !paramSet.has(l.name));
+      const needsThisCapture = !ctx.ownerIsStatic;
+
+      const lambdaId = ctx.lambdaCounter.value++;
+      const implName = `lambda$${ctx.method.name}$${lambdaId}`;
+      const captureParams: ParamDecl[] = captures.map(c => ({ name: c.name, type: c.type }));
+      const lambdaParams: ParamDecl[] = expr.params.map((p, i) => ({ name: p, type: sig.params[i] }));
+      const implParams: ParamDecl[] = [...captureParams, ...lambdaParams];
+      const implBody: Stmt[] = expr.bodyExpr
+        ? [{ kind: "return", value: expr.bodyExpr }]
+        : (expr.bodyStmts ?? []);
+      const implMethod: MethodDecl = {
+        name: implName,
+        returnType: sig.returnType,
+        params: implParams,
+        body: implBody,
+        isStatic: !needsThisCapture,
+      };
+      ctx.generatedMethods.push(implMethod);
+
+      const implDesc = methodDescriptor(implParams, sig.returnType);
+      const capturedTypes: Type[] = [
+        ...(needsThisCapture ? [{ className: ctx.className } as Type] : []),
+        ...captures.map(c => c.type),
+      ];
+      for (const cap of captures) {
+        if (cap.type === "void") throw new Error("Unsupported capture type: void");
+      }
+      for (let i = 0; i < capturedTypes.length; i++) {
+        compileExpr(ctx, emitter, needsThisCapture && i === 0 ? ({ kind: "this" } as Expr) : ({ kind: "ident", name: captures[needsThisCapture ? i - 1 : i].name } as Expr));
+      }
+      const invokedDesc = "(" + capturedTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(expectedType);
+      ctx.lambdaBootstraps.push({
+        implOwner: ctx.className,
+        implMethodName: implName,
+        implDescriptor: implDesc,
+        invokedName: sig.samMethod,
+        invokedDescriptor: invokedDesc,
+        implRefKind: needsThisCapture ? 5 : 6,
+      });
+      const bootstrapIdx = ctx.lambdaBootstraps.length - 1;
+      const indyIdx = ctx.cp.addInvokeDynamic(bootstrapIdx, sig.samMethod, invokedDesc);
+      emitter.emitInvokedynamic(indyIdx, capturedTypes.length, true);
+      break;
+    }
+    case "methodRef": {
+      if (!expectedType) throw new Error("Method reference requires target type context");
+      const { sig } = functionalSigForType(ctx, expectedType);
+
+      let implOwner = "";
+      let implName = expr.method;
+      let implDescriptor = "";
+      let implRefKind = 6;
+      let implIsInterface = false;
+      let captureTypes: Type[] = [];
+
+      const isClassRef = expr.target.kind === "ident"
+        && !findLocal(ctx, expr.target.name)
+        && (/^[A-Z]/.test(expr.target.name) || ctx.importMap.has(expr.target.name) || resolveClassName(ctx, expr.target.name) !== expr.target.name);
+
+      if (expr.isConstructor) {
+        if (!(expr.target.kind === "ident" && isClassRef)) {
+          throw new Error("Constructor method reference target must be a class name");
+        }
+        const targetClass = resolveClassName(ctx, expr.target.name);
+        const ctorId = ctx.lambdaCounter.value++;
+        const ctorImplName = `lambda$ctor$${ctorId}`;
+        const ctorParams: ParamDecl[] = sig.params.map((p, i) => ({ name: `p${i}`, type: p }));
+        const argDescs = ctorParams.map(p => typeToDescriptor(p.type)).join("");
+        const ctorKnown = lookupKnownMethod(targetClass, "<init>", argDescs)
+          ?? findKnownMethodByArity(targetClass, "<init>", ctorParams.length, false);
+        const ctorTypes = ctorKnown?.paramTypes ?? ctorParams.map(p => p.type);
+        const ctorArgs: Expr[] = ctorParams.map((p, i) => {
+          const need = ctorTypes[i];
+          if (need && !sameType(need, p.type)) {
+            return { kind: "cast", type: need, expr: { kind: "ident", name: p.name } } as Expr;
+          }
+          return { kind: "ident", name: p.name } as Expr;
+        });
+        const ctorMethod: MethodDecl = {
+          name: ctorImplName,
+          returnType: sig.returnType,
+          params: ctorParams,
+          body: [{ kind: "return", value: { kind: "newExpr", className: targetClass, args: ctorArgs } }],
+          isStatic: true,
+        };
+        ctx.generatedMethods.push(ctorMethod);
+        const implDescCtor = methodDescriptor(ctorMethod.params, ctorMethod.returnType);
+        const invokedDescriptorCtor = "()" + typeToDescriptor(expectedType);
+        ctx.lambdaBootstraps.push({
+          implOwner: ctx.className,
+          implMethodName: ctorImplName,
+          implDescriptor: implDescCtor,
+          invokedName: sig.samMethod,
+          invokedDescriptor: invokedDescriptorCtor,
+          implRefKind: 6,
+        });
+        const bootstrapIdx = ctx.lambdaBootstraps.length - 1;
+        const indyIdx = ctx.cp.addInvokeDynamic(bootstrapIdx, sig.samMethod, invokedDescriptorCtor);
+        emitter.emitInvokedynamic(indyIdx, 0, true);
+        break;
+      }
+
+      if (isClassRef && expr.target.kind === "ident") {
+        implOwner = resolveClassName(ctx, expr.target.name);
+        // Prefer static method reference
+        const staticSig = findKnownMethodByArity(implOwner, expr.method, sig.params.length, true);
+        if (staticSig) {
+          implDescriptor = "(" + staticSig.paramTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(staticSig.returnType);
+          implRefKind = 6;
+          implIsInterface = staticSig.isInterface ?? false;
+        } else {
+          // Unbound instance: first SAM arg is receiver
+          const instSig = findKnownMethodByArity(implOwner, expr.method, Math.max(0, sig.params.length - 1), false);
+          if (instSig) {
+            implDescriptor = "(" + instSig.paramTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(instSig.returnType);
+            implRefKind = instSig.isInterface ? 9 : 5;
+            implIsInterface = instSig.isInterface ?? false;
+          } else if (implOwner === ctx.className) {
+            const staticUser = ctx.allMethods.find(m => m.name === expr.method && m.isStatic && m.params.length === sig.params.length);
+            if (staticUser) {
+              implDescriptor = methodDescriptor(staticUser.params, staticUser.returnType);
+              implRefKind = 6;
+            } else {
+              const instUser = ctx.allMethods.find(m => m.name === expr.method && !m.isStatic && m.params.length === Math.max(0, sig.params.length - 1));
+              if (!instUser) throw new Error(`Cannot resolve method reference ${implOwner}::${expr.method}`);
+              implDescriptor = methodDescriptor(instUser.params, instUser.returnType);
+              implRefKind = 5;
+            }
+          } else {
+            throw new Error(`Cannot resolve method reference ${implOwner}::${expr.method}`);
+          }
+        }
+      } else {
+        const t = inferType(ctx, expr.target);
+        implOwner = t === "String" ? "java/lang/String"
+          : (typeof t === "object" && "className" in t ? resolveClassName(ctx, t.className) : "java/lang/Object");
+        captureTypes = [t === "String" ? "String" : t];
+        compileExpr(ctx, emitter, expr.target);
+
+        const boundSig = findKnownMethodByArity(implOwner, expr.method, sig.params.length, false);
+        if (boundSig) {
+          implDescriptor = "(" + boundSig.paramTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(boundSig.returnType);
+          implRefKind = boundSig.isInterface ? 9 : 5;
+          implIsInterface = boundSig.isInterface ?? false;
+        } else if (implOwner === ctx.className) {
+          const m = ctx.allMethods.find(mm => mm.name === expr.method && !mm.isStatic && mm.params.length === sig.params.length);
+          if (!m) throw new Error(`Cannot resolve method reference target::${expr.method}`);
+          implDescriptor = methodDescriptor(m.params, m.returnType);
+          implRefKind = 5;
+        } else {
+          throw new Error(`Cannot resolve method reference target::${expr.method}`);
+        }
+      }
+
+      const invokedDescriptor = "(" + captureTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(expectedType);
+      ctx.lambdaBootstraps.push({
+        implOwner,
+        implMethodName: implName,
+        implDescriptor,
+        implIsInterface,
+        invokedName: sig.samMethod,
+        invokedDescriptor,
+        implRefKind,
+      });
+      const bootstrapIdx = ctx.lambdaBootstraps.length - 1;
+      const indyIdx = ctx.cp.addInvokeDynamic(bootstrapIdx, sig.samMethod, invokedDescriptor);
+      emitter.emitInvokedynamic(indyIdx, captureTypes.length, true);
       break;
     }
     default:
@@ -1798,6 +2911,8 @@ function compileStringConcat(ctx: CompileContext, emitter: BytecodeEmitter, expr
     let appendDesc: string;
     if (partType === "int") {
       appendDesc = "(I)Ljava/lang/StringBuilder;";
+    } else if (partType === "long") {
+      appendDesc = "(J)Ljava/lang/StringBuilder;";
     } else if (partType === "boolean") {
       appendDesc = "(Z)Ljava/lang/StringBuilder;";
     } else if (partType === "String") {
@@ -1846,16 +2961,17 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
       if ((/^[A-Z]/.test(name) || ctx.importMap.has(name)) && !findLocal(ctx, name)) {
         const internalName = resolveClassName(ctx, name);
         const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
-        for (const arg of expr.args) compileExpr(ctx, emitter, arg);
 
         // Try known methods
         const sig = lookupKnownMethod(internalName, expr.method, argTypes.join(""));
         if (sig) {
+          expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, sig.paramTypes[i]));
           const sigArgDescs = sig.paramTypes.map(t => typeToDescriptor(t)).join("");
           const desc = "(" + sigArgDescs + ")" + typeToDescriptor(sig.returnType);
           const mRef = ctx.cp.addMethodref(internalName, expr.method, desc);
           emitter.emitInvokestatic(mRef, expr.args.length, sig.returnType !== "void");
         } else {
+          for (const arg of expr.args) compileExpr(ctx, emitter, arg);
           // User-defined static method in same or another class
           const userMethod = ctx.allMethods.find(m => m.name === expr.method && m.isStatic);
           const retType = userMethod ? userMethod.returnType : { className: "java/lang/Object" } as Type;
@@ -1870,7 +2986,6 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     // Instance method call
     compileExpr(ctx, emitter, expr.object);
     const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
-    for (const arg of expr.args) compileExpr(ctx, emitter, arg);
 
     const rawOwner = objType === "String" ? "java/lang/String"
       : typeof objType === "object" && "className" in objType ? objType.className
@@ -1885,6 +3000,7 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     let isInterface = false;
 
     if (sig) {
+      expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, sig.paramTypes[i]));
       retType = sig.returnType;
       const sigArgDescs = sig.paramTypes.map(t => typeToDescriptor(t)).join("");
       desc = "(" + sigArgDescs + ")" + typeToDescriptor(retType);
@@ -1892,6 +3008,11 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     } else {
       // Check user-defined methods
       const userMethod = ctx.allMethods.find(m => m.name === expr.method && !m.isStatic);
+      if (userMethod) {
+        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, userMethod.params[i]?.type));
+      } else {
+        for (const arg of expr.args) compileExpr(ctx, emitter, arg);
+      }
       retType = userMethod ? userMethod.returnType : { className: "java/lang/Object" } as Type;
       desc = "(" + argTypes.join("") + ")" + typeToDescriptor(retType);
     }
@@ -1907,22 +3028,22 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     // Unqualified method call — call on this or static
     const userMethod = ctx.allMethods.find(m => m.name === expr.method);
     if (userMethod) {
-      const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
-      for (const arg of expr.args) compileExpr(ctx, emitter, arg);
       const desc = methodDescriptor(userMethod.params, userMethod.returnType);
       const mRef = ctx.cp.addMethodref(ctx.className, expr.method, desc);
       if (userMethod.isStatic) {
+        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, userMethod.params[i]?.type));
         emitter.emitInvokestatic(mRef, expr.args.length, userMethod.returnType !== "void");
       } else {
         emitter.emitAload(0); // this
+        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, userMethod.params[i]?.type));
         emitter.emitInvokevirtual(mRef, expr.args.length, userMethod.returnType !== "void");
       }
-    } else if (ctx.wildcardImports.length > 0) {
-      // Try each wildcard-imported class as a static call target
+    } else if (ctx.staticWildcardImports.length > 0) {
+      // Try static-import-on-demand owners in order
       const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
       for (const arg of expr.args) compileExpr(ctx, emitter, arg);
-      // Use the first wildcard import (most specific import wins)
-      const ownerClass = ctx.wildcardImports[0];
+      const ownerClass = ctx.staticWildcardImports.find(owner => !!lookupKnownMethod(owner, expr.method, argTypes.join("")))
+        ?? ctx.staticWildcardImports[0];
       const retType: Type = { className: "java/lang/Object" };
       const desc = "(" + argTypes.join("") + ")" + typeToDescriptor(retType);
       const mRef = ctx.cp.addMethodref(ownerClass, expr.method, desc);
@@ -1940,7 +3061,9 @@ function compileFieldAccess(ctx: CompileContext, emitter: BytecodeEmitter, expr:
     const isLocal = !!findLocal(ctx, name);
     const isClassRef = !isLocal && (/^[A-Z]/.test(name) || ctx.importMap.has(name) || resolved !== name);
     if (isClassRef) {
-      const fieldRef = ctx.cp.addFieldref(resolved, expr.field, "Ljava/lang/Object;");
+      let desc = "Ljava/lang/Object;";
+      if (resolved === "java/lang/System" && expr.field === "out") desc = "Ljava/io/PrintStream;";
+      const fieldRef = ctx.cp.addFieldref(resolved, expr.field, desc);
       emitter.emit(0xb2); // getstatic
       emitter.emitU16(fieldRef);
       return;
@@ -1962,7 +3085,9 @@ function compileFieldAccess(ctx: CompileContext, emitter: BytecodeEmitter, expr:
     const chain = collapseChain(expr.object);
     if (chain) {
       const ownerClass = (chain.field ? chain.className + "/" + chain.field : chain.className).replace(/\./g, "/");
-      const fieldRef = ctx.cp.addFieldref(ownerClass, expr.field, "Ljava/lang/Object;");
+      let desc = "Ljava/lang/Object;";
+      if (ownerClass === "java/lang/System" && expr.field === "out") desc = "Ljava/io/PrintStream;";
+      const fieldRef = ctx.cp.addFieldref(ownerClass, expr.field, desc);
       emitter.emit(0xb2); // getstatic
       emitter.emitU16(fieldRef);
       return;
@@ -1990,6 +3115,465 @@ function compileFieldAccess(ctx: CompileContext, emitter: BytecodeEmitter, expr:
   emitter.emitU16(fieldRef);
 }
 
+function withScopedLocals(ctx: CompileContext, fn: () => void): void {
+  const savedLen = ctx.locals.length;
+  const savedNext = ctx.nextSlot;
+  fn();
+  ctx.locals.length = savedLen;
+  ctx.nextSlot = savedNext;
+}
+
+function ensureAssignable(ctx: CompileContext, target: Type, value: Type, reason: string): void {
+  if (!isAssignableInContext(ctx, target, value)) {
+    throw new Error(`Type mismatch for ${reason}: cannot assign ${typeToDescriptor(value)} to ${typeToDescriptor(target)}`);
+  }
+}
+
+function collectExprIdentifiers(expr: Expr, out: Set<string>): void {
+  switch (expr.kind) {
+    case "ident": out.add(expr.name); break;
+    case "binary": collectExprIdentifiers(expr.left, out); collectExprIdentifiers(expr.right, out); break;
+    case "unary": collectExprIdentifiers(expr.operand, out); break;
+    case "call":
+      if (expr.object) collectExprIdentifiers(expr.object, out);
+      for (const a of expr.args) collectExprIdentifiers(a, out);
+      break;
+    case "staticCall": for (const a of expr.args) collectExprIdentifiers(a, out); break;
+    case "fieldAccess": collectExprIdentifiers(expr.object, out); break;
+    case "newExpr": for (const a of expr.args) collectExprIdentifiers(a, out); break;
+    case "cast": collectExprIdentifiers(expr.expr, out); break;
+    case "postIncrement": collectExprIdentifiers(expr.operand, out); break;
+    case "instanceof": collectExprIdentifiers(expr.expr, out); break;
+    case "arrayAccess": collectExprIdentifiers(expr.array, out); collectExprIdentifiers(expr.index, out); break;
+    case "arrayLit": for (const e of expr.elements) collectExprIdentifiers(e, out); break;
+    case "newArray": collectExprIdentifiers(expr.size, out); break;
+    case "superCall": for (const a of expr.args) collectExprIdentifiers(a, out); break;
+    case "ternary":
+      collectExprIdentifiers(expr.cond, out);
+      collectExprIdentifiers(expr.thenExpr, out);
+      collectExprIdentifiers(expr.elseExpr, out);
+      break;
+    case "switchExpr":
+      collectExprIdentifiers(expr.selector, out);
+      for (const c of expr.cases) {
+        if (c.guard) collectExprIdentifiers(c.guard, out);
+        if (c.expr) collectExprIdentifiers(c.expr, out);
+        if (c.stmts) for (const s of c.stmts) collectStmtIdentifiers(s, out);
+      }
+      break;
+    case "lambda":
+      // Nested lambdas are treated independently.
+      break;
+    case "methodRef":
+      collectExprIdentifiers(expr.target, out);
+      break;
+    default:
+      break;
+  }
+}
+
+function collectStmtIdentifiers(stmt: Stmt, out: Set<string>): void {
+  switch (stmt.kind) {
+    case "varDecl": if (stmt.init) collectExprIdentifiers(stmt.init, out); break;
+    case "assign": collectExprIdentifiers(stmt.target, out); collectExprIdentifiers(stmt.value, out); break;
+    case "exprStmt": collectExprIdentifiers(stmt.expr, out); break;
+    case "return": if (stmt.value) collectExprIdentifiers(stmt.value, out); break;
+    case "yield": collectExprIdentifiers(stmt.value, out); break;
+    case "if":
+      collectExprIdentifiers(stmt.cond, out);
+      for (const s of stmt.then) collectStmtIdentifiers(s, out);
+      if (stmt.else_) for (const s of stmt.else_) collectStmtIdentifiers(s, out);
+      break;
+    case "while":
+      collectExprIdentifiers(stmt.cond, out);
+      for (const s of stmt.body) collectStmtIdentifiers(s, out);
+      break;
+    case "for":
+      if (stmt.init) collectStmtIdentifiers(stmt.init, out);
+      if (stmt.cond) collectExprIdentifiers(stmt.cond, out);
+      if (stmt.update) collectStmtIdentifiers(stmt.update, out);
+      for (const s of stmt.body) collectStmtIdentifiers(s, out);
+      break;
+    case "switch":
+      collectExprIdentifiers(stmt.selector, out);
+      for (const c of stmt.cases) {
+        if (c.guard) collectExprIdentifiers(c.guard, out);
+        if (c.expr) collectExprIdentifiers(c.expr, out);
+        if (c.stmts) for (const s of c.stmts) collectStmtIdentifiers(s, out);
+      }
+      break;
+    case "block":
+      for (const s of stmt.stmts) collectStmtIdentifiers(s, out);
+      break;
+  }
+}
+
+function descriptorToType(desc: string): Type {
+  if (desc === "I") return "int";
+  if (desc === "J") return "long";
+  if (desc === "Z") return "boolean";
+  if (desc === "V") return "void";
+  if (desc.startsWith("L") && desc.endsWith(";")) {
+    const cls = desc.slice(1, -1);
+    if (cls === "java/lang/String") return "String";
+    return { className: cls };
+  }
+  if (desc.startsWith("[")) return { array: descriptorToType(desc.slice(1)) };
+  return { className: "java/lang/Object" };
+}
+
+function functionalSigForType(ctx: CompileContext, t: Type): { ifaceName: string; sig: FunctionalSig } {
+  if (!(typeof t === "object" && "className" in t)) {
+    throw new Error("Lambda target type must be a functional interface");
+  }
+  const ifaceName = resolveClassName(ctx, t.className);
+  const sig = FUNCTIONAL_IFACES[ifaceName];
+  if (!sig) throw new Error(`Unsupported functional interface for lambda: ${ifaceName}`);
+  return { ifaceName, sig };
+}
+
+const BUILTIN_SUPERS: Record<string, string> = {
+  "java/lang/String": "java/lang/Object",
+  "java/lang/Integer": "java/lang/Object",
+  "java/lang/StringBuilder": "java/lang/Object",
+  "java/util/ArrayList": "java/lang/Object",
+  "java/io/PrintStream": "java/lang/Object",
+};
+
+function toInternalClassName(ctx: CompileContext, t: Type): string | undefined {
+  if (t === "String") return "java/lang/String";
+  if (typeof t === "object" && "className" in t) return resolveClassName(ctx, t.className);
+  return undefined;
+}
+
+function isClassSupertype(ctx: CompileContext, maybeSuper: string, maybeSub: string): boolean {
+  if (maybeSuper === maybeSub) return true;
+  let cur = maybeSub;
+  const seen = new Set<string>();
+  while (!seen.has(cur)) {
+    seen.add(cur);
+    const next = ctx.classSupers.get(cur) ?? BUILTIN_SUPERS[cur];
+    if (!next) return false;
+    if (next === maybeSuper) return true;
+    cur = next;
+  }
+  return false;
+}
+
+function isPatternTotalForSelector(ctx: CompileContext, selectorType: Type, patternTypeName: string): boolean {
+  const selectorClass = toInternalClassName(ctx, selectorType);
+  if (!selectorClass) return false;
+  const patternClass = resolveClassName(ctx, patternTypeName);
+  return isClassSupertype(ctx, patternClass, selectorClass);
+}
+
+function validateSwitchSemanticsCompile(ctx: CompileContext, selectorType: Type, cases: SwitchCase[], isExpr: boolean): void {
+  let seenTotalNonNullPattern = false;
+  let seenNullCase = false;
+  const unguardedPatterns: string[] = [];
+
+  for (const c of cases) {
+    const hasGuard = !!c.guard;
+    for (const l of c.labels) {
+      if (l.kind === "bool" && selectorType !== "boolean") {
+        throw new Error("boolean case label requires boolean switch selector");
+      }
+      if (l.kind === "int" && selectorType !== "int") {
+        throw new Error("int case label requires int switch selector");
+      }
+      if (l.kind === "null" && !isRefType(selectorType)) {
+        throw new Error("null case label requires reference switch selector");
+      }
+      if (l.kind === "string" && !isRefType(selectorType)) {
+        throw new Error("String case label requires reference switch selector");
+      }
+      if ((l.kind === "typePattern" || l.kind === "recordPattern") && !isRefType(selectorType)) {
+        throw new Error("type pattern case requires reference switch selector");
+      }
+      if (l.kind === "null") {
+        seenNullCase = true;
+        if (seenTotalNonNullPattern) {
+          // Non-null total patterns do not dominate null.
+        }
+      } else {
+        if (seenTotalNonNullPattern) {
+          throw new Error("switch label is dominated by previous total type pattern");
+        }
+      }
+      if (l.kind === "typePattern" || l.kind === "recordPattern") {
+        const pat = resolveClassName(ctx, l.typeName);
+        if (!hasGuard) {
+          for (const prev of unguardedPatterns) {
+            if (isClassSupertype(ctx, prev, pat)) {
+              throw new Error(`dominated switch label pattern: ${"typeName" in l ? l.typeName : pat}`);
+            }
+          }
+          unguardedPatterns.push(pat);
+          if (isPatternTotalForSelector(ctx, selectorType, "typeName" in l ? l.typeName : pat)) {
+            seenTotalNonNullPattern = true;
+          }
+        }
+      }
+    }
+    if (c.guard && inferType(ctx, c.guard) !== "boolean") {
+      throw new Error("switch guard must be boolean");
+    }
+  }
+
+  if (isExpr) {
+    const hasUnguardedDefault = cases.some(c => !c.guard && c.labels.some(l => l.kind === "default"));
+    if (hasUnguardedDefault) return;
+    const hasTrue = cases.some(c => !c.guard && c.labels.some(l => l.kind === "bool" && l.value));
+    const hasFalse = cases.some(c => !c.guard && c.labels.some(l => l.kind === "bool" && !l.value));
+    const exhaustiveBoolean = selectorType === "boolean" && hasTrue && hasFalse;
+    const exhaustiveRef = isRefType(selectorType) && seenNullCase && seenTotalNonNullPattern;
+    if (!exhaustiveBoolean && !exhaustiveRef) {
+      throw new Error("switch expression is not exhaustive: provide default or exhaustive labels");
+    }
+  }
+}
+
+function resolveClassDecl(ctx: CompileContext, typeName: string): ClassDecl | undefined {
+  const internal = resolveClassName(ctx, typeName);
+  return ctx.classDecls.get(internal) ?? ctx.classDecls.get(typeName);
+}
+
+function emitStoreLocalByType(emitter: BytecodeEmitter, slot: number, t: Type): void {
+  if (t === "long") emitter.emitLstore(slot);
+  else if (t === "int" || t === "boolean") emitter.emitIstore(slot);
+  else emitter.emitAstore(slot);
+}
+
+function emitLoadLocalByType(emitter: BytecodeEmitter, slot: number, t: Type): void {
+  if (t === "long") emitter.emitLload(slot);
+  else if (t === "int" || t === "boolean") emitter.emitIload(slot);
+  else emitter.emitAload(slot);
+}
+
+function bindPatternLabelLocals(
+  ctx: CompileContext,
+  emitter: BytecodeEmitter,
+  selectorSlot: number,
+  selectorType: Type,
+  label: SwitchLabel,
+): void {
+  if (label.kind !== "typePattern" && label.kind !== "recordPattern") {
+    throw new Error("internal: expected pattern label");
+  }
+  emitLoadLocalByType(emitter, selectorSlot, selectorType);
+  const checkClass = resolveClassName(ctx, label.typeName);
+  const classIdx = ctx.cp.addClass(checkClass);
+  emitter.emit(0xc0); emitter.emitU16(classIdx); // checkcast
+
+  if (label.kind === "typePattern") {
+    const slot = addLocal(ctx, label.bindVar, { className: checkClass });
+    if (emitter.maxLocals <= slot) emitter.maxLocals = slot + 1;
+    emitter.emitAstore(slot);
+    return;
+  }
+
+  const recordDecl = resolveClassDecl(ctx, label.typeName);
+  if (!recordDecl?.isRecord || !recordDecl.recordComponents) {
+    throw new Error(`record pattern requires known record declaration: ${label.typeName}`);
+  }
+  if (recordDecl.recordComponents.length !== label.bindVars.length) {
+    throw new Error(`record pattern arity mismatch for ${label.typeName}`);
+  }
+  const recSlot = addLocal(ctx, "$rec_pat", { className: checkClass });
+  if (emitter.maxLocals <= recSlot) emitter.maxLocals = recSlot + 1;
+  emitter.emitAstore(recSlot);
+
+  for (let i = 0; i < label.bindVars.length; i++) {
+    const c = recordDecl.recordComponents[i];
+    emitter.emitAload(recSlot);
+    const mRef = ctx.cp.addMethodref(checkClass, c.name, "()" + typeToDescriptor(c.type));
+    emitter.emitInvokevirtual(mRef, 0, true);
+    const slot = addLocal(ctx, label.bindVars[i], c.type);
+    if (emitter.maxLocals <= slot) emitter.maxLocals = slot + 1;
+    emitStoreLocalByType(emitter, slot, c.type);
+  }
+}
+
+function emitSwitchLabelMatch(
+  ctx: CompileContext,
+  emitter: BytecodeEmitter,
+  selectorSlot: number,
+  selectorType: Type,
+  label: SwitchLabel,
+): number {
+  if (label.kind === "default") return emitter.emitBranch(0xa7); // goto
+  if (label.kind === "bool") {
+    if (selectorType !== "boolean") {
+      throw new Error("boolean case label requires boolean switch selector");
+    }
+    emitter.emitIload(selectorSlot);
+    emitter.emitIconst(label.value ? 1 : 0);
+    return emitter.emitBranch(0x9f); // if_icmpeq
+  }
+  if (label.kind === "int") {
+    if (selectorType !== "int") {
+      throw new Error("int case label requires int switch selector");
+    }
+    emitter.emitIload(selectorSlot);
+    if (!emitter.emitIconst(label.value)) {
+      emitter.emitLdc(ctx.cp.addInteger(label.value));
+    }
+    return emitter.emitBranch(0x9f); // if_icmpeq
+  }
+  if (label.kind === "null") {
+    if (!isRefType(selectorType)) throw new Error("null case label requires reference switch selector");
+    emitter.emitAload(selectorSlot);
+    return emitter.emitBranch(0xc6); // ifnull
+  }
+  if (label.kind === "string") {
+    if (selectorType !== "String" && !(typeof selectorType === "object" && "className" in selectorType)) {
+      throw new Error("String case label requires reference switch selector");
+    }
+    emitter.emitAload(selectorSlot);
+    const patchNull = emitter.emitBranch(0xc6); // ifnull -> skip this label
+    emitter.emitAload(selectorSlot);
+    emitter.emitLdc(ctx.cp.addString(label.value));
+    const equalsRef = ctx.cp.addMethodref("java/lang/String", "equals", "(Ljava/lang/Object;)Z");
+    emitter.emitInvokevirtual(equalsRef, 1, true);
+    const patchMatch = emitter.emitBranch(0x9a); // ifne
+    emitter.patchBranch(patchNull, emitter.pc);
+    return patchMatch;
+  }
+  // type/record pattern
+  if (!isRefType(selectorType)) throw new Error("type pattern case requires reference switch selector");
+  emitter.emitAload(selectorSlot);
+  const checkClass = resolveClassName(ctx, label.typeName);
+  const classIdx = ctx.cp.addClass(checkClass);
+  emitter.emit(0xc1); // instanceof
+  emitter.emitU16(classIdx);
+  return emitter.emitBranch(0x9a); // ifne
+}
+
+function compileSwitchCaseStmts(ctx: CompileContext, emitter: BytecodeEmitter, c: SwitchCase): void {
+  if (c.expr) {
+    compileExpr(ctx, emitter, c.expr);
+    emitter.emit(0x57); // pop
+    return;
+  }
+  for (const s of c.stmts ?? []) compileStmt(ctx, emitter, s);
+}
+
+function compileSwitchStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Extract<Stmt, { kind: "switch" }>): void {
+  withScopedLocals(ctx, () => {
+    const selectorType = inferType(ctx, stmt.selector);
+    validateSwitchSemanticsCompile(ctx, selectorType, stmt.cases, false);
+    const selectorSlot = addLocal(ctx, "$switch_sel", selectorType);
+    if (selectorType === "int" || selectorType === "boolean") {
+      compileExpr(ctx, emitter, stmt.selector, selectorType);
+      emitter.emitIstore(selectorSlot);
+    } else {
+      compileExpr(ctx, emitter, stmt.selector, selectorType);
+      emitter.emitAstore(selectorSlot);
+    }
+
+    const endPatches: number[] = [];
+    for (const c of stmt.cases) {
+      const matches = c.labels.map(l => ({ label: l, patch: emitSwitchLabelMatch(ctx, emitter, selectorSlot, selectorType, l) }));
+      const patchNext = emitter.emitBranch(0xa7); // no match -> next case checks
+      const bodyStart = emitter.pc;
+      for (const m of matches) emitter.patchBranch(m.patch, bodyStart);
+      withScopedLocals(ctx, () => {
+        const patternLabel = c.labels.find(l => l.kind === "typePattern" || l.kind === "recordPattern");
+        if (patternLabel) {
+          bindPatternLabelLocals(ctx, emitter, selectorSlot, selectorType, patternLabel);
+        }
+        if (c.guard) {
+          if (inferType(ctx, c.guard) !== "boolean") {
+            throw new Error("switch guard must be boolean");
+          }
+          compileExpr(ctx, emitter, c.guard, "boolean");
+          const guardFail = emitter.emitBranch(0x99); // ifeq
+          compileSwitchCaseStmts(ctx, emitter, c);
+          endPatches.push(emitter.emitBranch(0xa7));
+          emitter.patchBranch(guardFail, emitter.pc);
+        } else {
+          compileSwitchCaseStmts(ctx, emitter, c);
+          endPatches.push(emitter.emitBranch(0xa7));
+        }
+      });
+      emitter.patchBranch(patchNext, emitter.pc);
+    }
+    for (const p of endPatches) emitter.patchBranch(p, emitter.pc);
+  });
+}
+
+function compileSwitchExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Extract<Expr, { kind: "switchExpr" }>, expectedType?: Type): void {
+  const resultType = expectedType ?? inferType(ctx, expr);
+  withScopedLocals(ctx, () => {
+    const selectorType = inferType(ctx, expr.selector);
+    validateSwitchSemanticsCompile(ctx, selectorType, expr.cases, true);
+    const selectorSlot = addLocal(ctx, "$switch_expr_sel", selectorType);
+    if (selectorType === "int" || selectorType === "boolean") {
+      compileExpr(ctx, emitter, expr.selector, selectorType);
+      emitter.emitIstore(selectorSlot);
+    } else {
+      compileExpr(ctx, emitter, expr.selector, selectorType);
+      emitter.emitAstore(selectorSlot);
+    }
+
+    const endPatches: number[] = [];
+    for (const c of expr.cases) {
+      const matches = c.labels.map(l => ({ label: l, patch: emitSwitchLabelMatch(ctx, emitter, selectorSlot, selectorType, l) }));
+      const patchNext = emitter.emitBranch(0xa7); // no match -> next checks
+      const bodyStart = emitter.pc;
+      for (const m of matches) emitter.patchBranch(m.patch, bodyStart);
+      withScopedLocals(ctx, () => {
+        const patternLabel = c.labels.find(l => l.kind === "typePattern" || l.kind === "recordPattern");
+        if (patternLabel) {
+          bindPatternLabelLocals(ctx, emitter, selectorSlot, selectorType, patternLabel);
+        }
+        if (c.guard) {
+          if (inferType(ctx, c.guard) !== "boolean") {
+            throw new Error("switch guard must be boolean");
+          }
+          compileExpr(ctx, emitter, c.guard, "boolean");
+          const guardFail = emitter.emitBranch(0x99); // ifeq
+          if (c.expr) {
+            compileExpr(ctx, emitter, c.expr, resultType);
+            endPatches.push(emitter.emitBranch(0xa7));
+          } else {
+            let yielded = false;
+            for (const s of c.stmts ?? []) {
+              if (s.kind === "yield") {
+                compileExpr(ctx, emitter, s.value, resultType);
+                endPatches.push(emitter.emitBranch(0xa7));
+                yielded = true;
+                break;
+              }
+              compileStmt(ctx, emitter, s);
+            }
+            if (!yielded) throw new Error("switch expression block must yield a value");
+          }
+          emitter.patchBranch(guardFail, emitter.pc);
+        } else if (c.expr) {
+          compileExpr(ctx, emitter, c.expr, resultType);
+          endPatches.push(emitter.emitBranch(0xa7));
+        } else {
+          let yielded = false;
+          for (const s of c.stmts ?? []) {
+            if (s.kind === "yield") {
+              compileExpr(ctx, emitter, s.value, resultType);
+              endPatches.push(emitter.emitBranch(0xa7));
+              yielded = true;
+              break;
+            }
+            compileStmt(ctx, emitter, s);
+          }
+          if (!yielded) throw new Error("switch expression block must yield a value");
+        }
+      });
+      emitter.patchBranch(patchNext, emitter.pc);
+    }
+    if (endPatches.length === 0) throw new Error("switch expression has no producible branch");
+    for (const p of endPatches) emitter.patchBranch(p, emitter.pc);
+  });
+}
+
 function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt): void {
   switch (stmt.kind) {
     case "varDecl": {
@@ -2001,9 +3585,11 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         if (init.kind === "arrayLit" && typeof stmt.type === "object" && "array" in stmt.type) {
           init = { ...init, elemType: stmt.type.array };
         }
-        compileExpr(ctx, emitter, init);
-        if (stmt.type === "int" || stmt.type === "boolean") emitter.emitIstore(slot);
-        else emitter.emitAstore(slot);
+        const initType = inferType(ctx, init);
+        ensureAssignable(ctx, stmt.type, initType, `local '${stmt.name}'`);
+        compileExpr(ctx, emitter, init, stmt.type);
+        if (stmt.type === "long" && initType === "int") emitter.emit(0x85); // i2l
+        emitStoreLocalByType(emitter, slot, stmt.type);
       }
       break;
     }
@@ -2011,21 +3597,24 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       if (stmt.target.kind === "ident") {
         const loc = findLocal(ctx, stmt.target.name);
         if (loc) {
-          compileExpr(ctx, emitter, stmt.value);
-          if (loc.type === "int" || loc.type === "boolean") emitter.emitIstore(loc.slot);
-          else emitter.emitAstore(loc.slot);
+          const valType = inferType(ctx, stmt.value);
+          ensureAssignable(ctx, loc.type, valType, `local '${stmt.target.name}'`);
+          compileExpr(ctx, emitter, stmt.value, loc.type);
+          if (loc.type === "long" && valType === "int") emitter.emit(0x85); // i2l
+          emitStoreLocalByType(emitter, loc.slot, loc.type);
         } else {
           // Field assignment
           const field = ctx.fields.find(f => f.name === stmt.target.name);
           if (field) {
+            ensureAssignable(ctx, field.type, inferType(ctx, stmt.value), `field '${stmt.target.name}'`);
             if (field.isStatic) {
-              compileExpr(ctx, emitter, stmt.value);
+              compileExpr(ctx, emitter, stmt.value, field.type);
               const fRef = ctx.cp.addFieldref(ctx.className, field.name, typeToDescriptor(field.type));
               emitter.emit(0xb3); // putstatic
               emitter.emitU16(fRef);
             } else {
               emitter.emitAload(0); // this
-              compileExpr(ctx, emitter, stmt.value);
+              compileExpr(ctx, emitter, stmt.value, field.type);
               const fRef = ctx.cp.addFieldref(ctx.className, field.name, typeToDescriptor(field.type));
               emitter.emit(0xb5); // putfield
               emitter.emitU16(fRef);
@@ -2034,7 +3623,9 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         }
       } else if (stmt.target.kind === "fieldAccess") {
         compileExpr(ctx, emitter, stmt.target.object);
-        compileExpr(ctx, emitter, stmt.value);
+        const targetType = inferType(ctx, stmt.target);
+        ensureAssignable(ctx, targetType, inferType(ctx, stmt.value), `field '${stmt.target.field}'`);
+        compileExpr(ctx, emitter, stmt.value, targetType);
         const objType = inferType(ctx, stmt.target.object);
         const ownerClass = typeof objType === "object" && "className" in objType ? objType.className : ctx.className;
         const fld = ctx.fields.find(f => f.name === stmt.target.field);
@@ -2045,8 +3636,8 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       } else if (stmt.target.kind === "arrayAccess") {
         compileExpr(ctx, emitter, stmt.target.array);
         compileExpr(ctx, emitter, stmt.target.index);
-        compileExpr(ctx, emitter, stmt.value);
         const elemType = inferType(ctx, stmt.target);
+        compileExpr(ctx, emitter, stmt.value, elemType);
         if (elemType === "int" || elemType === "boolean") {
           emitter.emit(0x4f); // iastore
         } else {
@@ -2066,31 +3657,62 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
     }
     case "return": {
       if (stmt.value) {
-        compileExpr(ctx, emitter, stmt.value);
+        ensureAssignable(ctx, ctx.method.returnType, inferType(ctx, stmt.value), `return in ${ctx.method.name}`);
+        compileExpr(ctx, emitter, stmt.value, ctx.method.returnType);
       }
       emitter.emitReturn(ctx.method.returnType);
       break;
     }
+    case "yield": {
+      throw new Error("yield statement is only allowed in switch expressions");
+    }
     case "if": {
+      if (inferType(ctx, stmt.cond) !== "boolean") throw new Error("if condition must be boolean");
       compileExpr(ctx, emitter, stmt.cond);
       const patchElse = emitter.emitBranch(0x99); // ifeq (jump if false)
       // If condition is instanceof with a pattern variable, bind it at the start of then-branch
-      if (stmt.cond.kind === "instanceof" && stmt.cond.bindVar) {
-        const bindVar = stmt.cond.bindVar;
-        const checkClass = resolveClassName(ctx, stmt.cond.checkType);
-        // Re-load the source expression and cast it to the pattern type
-        compileExpr(ctx, emitter, stmt.cond.expr);
-        const classIdx = ctx.cp.addClass(checkClass);
-        emitter.emit(0xc0); emitter.emitU16(classIdx); // checkcast
-        const slot = addLocal(ctx, bindVar, { className: checkClass });
-        if (emitter.maxLocals <= slot) emitter.maxLocals = slot + 1;
-        emitter.emitAstore(slot);
-      }
-      for (const s of stmt.then) compileStmt(ctx, emitter, s);
+      withScopedLocals(ctx, () => {
+        if (stmt.cond.kind === "instanceof" && (stmt.cond.bindVar || stmt.cond.recordBindVars)) {
+          const checkClass = resolveClassName(ctx, stmt.cond.checkType);
+          // Re-load the source expression and cast it to the pattern type
+          compileExpr(ctx, emitter, stmt.cond.expr);
+          const classIdx = ctx.cp.addClass(checkClass);
+          emitter.emit(0xc0); emitter.emitU16(classIdx); // checkcast
+          if (stmt.cond.bindVar) {
+            const slot = addLocal(ctx, stmt.cond.bindVar, { className: checkClass });
+            if (emitter.maxLocals <= slot) emitter.maxLocals = slot + 1;
+            emitter.emitAstore(slot);
+          } else {
+            const recordDecl = resolveClassDecl(ctx, stmt.cond.checkType);
+            if (!recordDecl?.isRecord || !recordDecl.recordComponents) {
+              throw new Error(`record pattern requires known record declaration: ${stmt.cond.checkType}`);
+            }
+            const bindVars = stmt.cond.recordBindVars ?? [];
+            if (bindVars.length !== recordDecl.recordComponents.length) {
+              throw new Error(`record pattern arity mismatch for ${stmt.cond.checkType}`);
+            }
+            const recSlot = addLocal(ctx, "$if_rec_pat", { className: checkClass });
+            if (emitter.maxLocals <= recSlot) emitter.maxLocals = recSlot + 1;
+            emitter.emitAstore(recSlot);
+            for (let i = 0; i < bindVars.length; i++) {
+              const c = recordDecl.recordComponents[i];
+              emitter.emitAload(recSlot);
+              const mRef = ctx.cp.addMethodref(checkClass, c.name, "()" + typeToDescriptor(c.type));
+              emitter.emitInvokevirtual(mRef, 0, true);
+              const slot = addLocal(ctx, bindVars[i], c.type);
+              if (emitter.maxLocals <= slot) emitter.maxLocals = slot + 1;
+              emitStoreLocalByType(emitter, slot, c.type);
+            }
+          }
+        }
+        for (const s of stmt.then) compileStmt(ctx, emitter, s);
+      });
       if (stmt.else_) {
         const patchEnd = emitter.emitBranch(0xa7); // goto
         emitter.patchBranch(patchElse, emitter.pc);
-        for (const s of stmt.else_) compileStmt(ctx, emitter, s);
+        withScopedLocals(ctx, () => {
+          for (const s of stmt.else_!) compileStmt(ctx, emitter, s);
+        });
         emitter.patchBranch(patchEnd, emitter.pc);
       } else {
         emitter.patchBranch(patchElse, emitter.pc);
@@ -2098,10 +3720,13 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       break;
     }
     case "while": {
+      if (inferType(ctx, stmt.cond) !== "boolean") throw new Error("while condition must be boolean");
       const loopStart = emitter.pc;
       compileExpr(ctx, emitter, stmt.cond);
       const patchExit = emitter.emitBranch(0x99); // ifeq
-      for (const s of stmt.body) compileStmt(ctx, emitter, s);
+      withScopedLocals(ctx, () => {
+        for (const s of stmt.body) compileStmt(ctx, emitter, s);
+      });
       // goto loopStart
       const gotoOp = emitter.emitBranch(0xa7);
       emitter.patchBranch(gotoOp, loopStart);
@@ -2109,28 +3734,52 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       break;
     }
     case "for": {
-      if (stmt.init) compileStmt(ctx, emitter, stmt.init);
-      const loopStart = emitter.pc;
-      let patchExit = -1;
-      if (stmt.cond) {
-        compileExpr(ctx, emitter, stmt.cond);
-        patchExit = emitter.emitBranch(0x99); // ifeq
-      }
-      for (const s of stmt.body) compileStmt(ctx, emitter, s);
-      if (stmt.update) compileStmt(ctx, emitter, stmt.update);
-      const gotoOp = emitter.emitBranch(0xa7);
-      emitter.patchBranch(gotoOp, loopStart);
-      if (patchExit >= 0) emitter.patchBranch(patchExit, emitter.pc);
+      withScopedLocals(ctx, () => {
+        if (stmt.init) compileStmt(ctx, emitter, stmt.init);
+        const loopStart = emitter.pc;
+        let patchExit = -1;
+        if (stmt.cond) {
+          if (inferType(ctx, stmt.cond) !== "boolean") throw new Error("for condition must be boolean");
+          compileExpr(ctx, emitter, stmt.cond);
+          patchExit = emitter.emitBranch(0x99); // ifeq
+        }
+        withScopedLocals(ctx, () => {
+          for (const s of stmt.body) compileStmt(ctx, emitter, s);
+        });
+        if (stmt.update) compileStmt(ctx, emitter, stmt.update);
+        const gotoOp = emitter.emitBranch(0xa7);
+        emitter.patchBranch(gotoOp, loopStart);
+        if (patchExit >= 0) emitter.patchBranch(patchExit, emitter.pc);
+      });
+      break;
+    }
+    case "switch": {
+      compileSwitchStmt(ctx, emitter, stmt);
       break;
     }
     case "block": {
-      for (const s of stmt.stmts) compileStmt(ctx, emitter, s);
+      withScopedLocals(ctx, () => {
+        for (const s of stmt.stmts) compileStmt(ctx, emitter, s);
+      });
       break;
     }
+    default:
+      throw new Error(`Unsupported statement: ${(stmt as Stmt).kind}`);
   }
 }
 
-function compileMethod(classDecl: ClassDecl, method: MethodDecl, cp: ConstantPoolBuilder, allMethods: MethodDecl[], inheritedFields: FieldDecl[]): { code: number[]; maxStack: number; maxLocals: number } {
+function compileMethod(
+  classDecl: ClassDecl,
+  method: MethodDecl,
+  cp: ConstantPoolBuilder,
+  allMethods: MethodDecl[],
+  inheritedFields: FieldDecl[],
+  classSupers: Map<string, string>,
+  classDecls: Map<string, ClassDecl>,
+  lambdaCounter: { value: number },
+  generatedMethods: MethodDecl[],
+  lambdaBootstraps: LambdaBootstrap[],
+): { code: number[]; maxStack: number; maxLocals: number } {
   const emitter = new BytecodeEmitter();
   const locals: LocalVar[] = [];
   let nextSlot = 0;
@@ -2157,7 +3806,14 @@ function compileMethod(classDecl: ClassDecl, method: MethodDecl, cp: ConstantPoo
     inheritedFields,
     allMethods,
     importMap: classDecl.importMap,
-    wildcardImports: classDecl.wildcardImports,
+    packageImports: classDecl.packageImports,
+    staticWildcardImports: classDecl.staticWildcardImports,
+    classSupers,
+    classDecls,
+    lambdaCounter,
+    generatedMethods,
+    lambdaBootstraps,
+    ownerIsStatic: method.isStatic,
   };
 
   emitter.maxLocals = nextSlot;
@@ -2174,6 +3830,79 @@ function compileMethod(classDecl: ClassDecl, method: MethodDecl, cp: ConstantPoo
   }
 
   return { code: emitter.code, maxStack: Math.max(emitter.maxStack, 4), maxLocals: emitter.maxLocals };
+}
+
+function exprHasSuperCall(expr: Expr): boolean {
+  switch (expr.kind) {
+    case "superCall": return true;
+    case "binary": return exprHasSuperCall(expr.left) || exprHasSuperCall(expr.right);
+    case "unary": return exprHasSuperCall(expr.operand);
+    case "call": return (expr.object ? exprHasSuperCall(expr.object) : false) || expr.args.some(exprHasSuperCall);
+    case "staticCall": return expr.args.some(exprHasSuperCall);
+    case "fieldAccess": return exprHasSuperCall(expr.object);
+    case "newExpr": return expr.args.some(exprHasSuperCall);
+    case "cast": return exprHasSuperCall(expr.expr);
+    case "postIncrement": return exprHasSuperCall(expr.operand);
+    case "instanceof": return exprHasSuperCall(expr.expr);
+    case "arrayAccess": return exprHasSuperCall(expr.array) || exprHasSuperCall(expr.index);
+    case "arrayLit": return expr.elements.some(exprHasSuperCall);
+    case "newArray": return exprHasSuperCall(expr.size);
+    case "ternary": return exprHasSuperCall(expr.cond) || exprHasSuperCall(expr.thenExpr) || exprHasSuperCall(expr.elseExpr);
+    case "switchExpr":
+      return exprHasSuperCall(expr.selector)
+        || expr.cases.some(c => (c.expr && exprHasSuperCall(c.expr)) || (c.stmts && c.stmts.some(stmtHasSuperCall)));
+    case "lambda":
+      return !!expr.bodyExpr && exprHasSuperCall(expr.bodyExpr)
+        || !!expr.bodyStmts && expr.bodyStmts.some(stmtHasSuperCall);
+    case "methodRef":
+      return exprHasSuperCall(expr.target);
+    default: return false;
+  }
+}
+
+function stmtHasSuperCall(stmt: Stmt): boolean {
+  switch (stmt.kind) {
+    case "varDecl": return !!stmt.init && exprHasSuperCall(stmt.init);
+    case "assign": return exprHasSuperCall(stmt.target) || exprHasSuperCall(stmt.value);
+    case "exprStmt": return exprHasSuperCall(stmt.expr);
+    case "return": return !!stmt.value && exprHasSuperCall(stmt.value);
+    case "yield": return exprHasSuperCall(stmt.value);
+    case "if": return exprHasSuperCall(stmt.cond) || stmt.then.some(stmtHasSuperCall) || !!stmt.else_?.some(stmtHasSuperCall);
+    case "while": return exprHasSuperCall(stmt.cond) || stmt.body.some(stmtHasSuperCall);
+    case "for": return !!stmt.init && stmtHasSuperCall(stmt.init) || !!stmt.cond && exprHasSuperCall(stmt.cond) || !!stmt.update && stmtHasSuperCall(stmt.update) || stmt.body.some(stmtHasSuperCall);
+    case "switch":
+      return exprHasSuperCall(stmt.selector)
+        || stmt.cases.some(c => (c.expr && exprHasSuperCall(c.expr)) || (c.stmts && c.stmts.some(stmtHasSuperCall)));
+    case "block": return stmt.stmts.some(stmtHasSuperCall);
+  }
+}
+
+function validateConstructorBody(method: MethodDecl): void {
+  if (method.name !== "<init>") {
+    if (method.body.some(stmtHasSuperCall)) {
+      throw new Error("super(...) call is only allowed in constructors");
+    }
+    return;
+  }
+  const topLevelSuperCalls = method.body.filter(s => s.kind === "exprStmt" && s.expr.kind === "superCall");
+  if (topLevelSuperCalls.length === 0) {
+    if (method.body.some(stmtHasSuperCall)) {
+      throw new Error("super(...) call must be the first statement in constructor");
+    }
+    return;
+  }
+  const first = method.body[0];
+  if (!(first.kind === "exprStmt" && first.expr.kind === "superCall")) {
+    throw new Error("super(...) call must be the first statement in constructor");
+  }
+  if (topLevelSuperCalls.length > 1) {
+    throw new Error("super(...) call may appear at most once in constructor body");
+  }
+  for (let i = 1; i < method.body.length; i++) {
+    if (stmtHasSuperCall(method.body[i])) {
+      throw new Error("super(...) call must be the first statement in constructor");
+    }
+  }
 }
 
 // Produce bundle bytes for all classes in source.
@@ -2204,6 +3933,15 @@ export function compile(source: string): Uint8Array {
 
 export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl[] = [classDecl]): Uint8Array {
   const allMethods = allClassDecls.flatMap(cd => cd.methods);
+  const classSupers = new Map<string, string>();
+  const classDecls = new Map<string, ClassDecl>();
+  for (const cd of allClassDecls) {
+    classSupers.set(cd.name, cd.superClass);
+    classDecls.set(cd.name, cd);
+  }
+  const lambdaCounter = { value: 0 };
+  const generatedMethods: MethodDecl[] = [];
+  const lambdaBootstraps: LambdaBootstrap[] = [];
   // Collect fields from superclass chain
   const inheritedFields: FieldDecl[] = [];
   let superName = classDecl.superClass;
@@ -2241,7 +3979,11 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     maxLocals: number;
   }[] = [];
 
-  for (const method of classDecl.methods) {
+  const methodQueue: MethodDecl[] = [...classDecl.methods];
+  let generatedDrain = 0;
+  for (let mi = 0; mi < methodQueue.length; mi++) {
+    const method = methodQueue[mi];
+    validateConstructorBody(method);
     const nameIdx = cp.addUtf8(method.name);
     const desc = methodDescriptor(method.params, method.returnType);
     const descIdx = cp.addUtf8(desc);
@@ -2269,7 +4011,14 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         nextSlot: method.params.length + 1,
         fields: classDecl.fields, inheritedFields, allMethods,
         importMap: classDecl.importMap,
-        wildcardImports: classDecl.wildcardImports,
+        packageImports: classDecl.packageImports,
+        staticWildcardImports: classDecl.staticWildcardImports,
+        classSupers,
+        classDecls,
+        lambdaCounter,
+        generatedMethods,
+        lambdaBootstraps,
+        ownerIsStatic: false,
       };
       if (emitter.maxLocals < method.params.length + 1) emitter.maxLocals = method.params.length + 1;
 
@@ -2277,7 +4026,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       for (const field of classDecl.fields) {
         if (!field.isStatic && field.initializer) {
           emitter.emitAload(0); // this
-          compileExpr(initCtx, emitter, field.initializer);
+          compileExpr(initCtx, emitter, field.initializer, field.type);
           const fRef = cp.addFieldref(classDecl.name, field.name, typeToDescriptor(field.type));
           emitter.emit(0xb5); // putfield
           emitter.emitU16(fRef);
@@ -2297,13 +4046,22 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         maxLocals: Math.max(emitter.maxLocals, method.params.length + 1),
       });
     } else {
-      const result = compileMethod(classDecl, method, cp, allMethods, inheritedFields);
+      const result = compileMethod(
+        classDecl, method, cp, allMethods, inheritedFields,
+        classSupers, classDecls,
+        lambdaCounter, generatedMethods, lambdaBootstraps,
+      );
       compiledMethods.push({
         nameIdx, descIdx, accessFlags,
         code: result.code,
         maxStack: result.maxStack,
         maxLocals: result.maxLocals,
       });
+    }
+    while (generatedDrain < generatedMethods.length) {
+      const gm = generatedMethods[generatedDrain++];
+      methodQueue.push(gm);
+      allMethods.push(gm);
     }
   }
 
@@ -2312,13 +4070,26 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   for (const field of classDecl.fields) {
     const nameIdx = cp.addUtf8(field.name);
     const descIdx = cp.addUtf8(typeToDescriptor(field.type));
-    let accessFlags = 0x0001; // ACC_PUBLIC (simplified)
+    let accessFlags = field.isPrivate ? 0x0002 : 0x0001; // ACC_PRIVATE/ACC_PUBLIC
     if (field.isStatic) accessFlags |= 0x0008;
+    if (field.isFinal) accessFlags |= 0x0010;
     compiledFields.push({ nameIdx, descIdx, accessFlags });
   }
 
   // Code attribute name
   const codeAttrName = cp.addUtf8("Code");
+  const bootstrapAttrName = cp.addUtf8("BootstrapMethods");
+  const serializedBootstrapMethods: { methodRef: number; args: number[] }[] = [];
+  for (const lb of lambdaBootstraps) {
+    const metafactoryRef = cp.addMethodref("java/lang/invoke/LambdaMetafactory", "metafactory", "()V");
+    const bootstrapMethodRef = cp.addMethodHandle(6, metafactoryRef);
+    const implMethodRef = lb.implIsInterface
+      ? cp.addInterfaceMethodref(lb.implOwner, lb.implMethodName, lb.implDescriptor)
+      : cp.addMethodref(lb.implOwner, lb.implMethodName, lb.implDescriptor);
+    const implHandle = cp.addMethodHandle(lb.implRefKind, implMethodRef);
+    const samType = cp.addMethodType(lb.implDescriptor);
+    serializedBootstrapMethods.push({ methodRef: bootstrapMethodRef, args: [samType, implHandle] });
+  }
 
   // Now serialize the class file
   const out: number[] = [];
@@ -2333,7 +4104,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   out.push(...cp.serialize());
 
   // Access flags: ACC_PUBLIC | ACC_SUPER
-  const classFlags = 0x0021;
+  const classFlags = classDecl.isRecord ? 0x0031 : 0x0021; // record classes are final
   out.push((classFlags >> 8) & 0xff, classFlags & 0xff);
   // this_class
   out.push((thisClassIdx >> 8) & 0xff, thisClassIdx & 0xff);
@@ -2373,8 +4144,21 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     out.push(0x00, 0x00); // attributes_count = 0
   }
 
-  // class attributes_count = 0
-  out.push(0x00, 0x00);
+  // class attributes
+  const classAttrCount = serializedBootstrapMethods.length > 0 ? 1 : 0;
+  out.push((classAttrCount >> 8) & 0xff, classAttrCount & 0xff);
+  if (serializedBootstrapMethods.length > 0) {
+    out.push((bootstrapAttrName >> 8) & 0xff, bootstrapAttrName & 0xff);
+    const bmCount = serializedBootstrapMethods.length;
+    const bodyLen = 2 + serializedBootstrapMethods.reduce((s, bm) => s + 4 + bm.args.length * 2, 0);
+    out.push((bodyLen >> 24) & 0xff, (bodyLen >> 16) & 0xff, (bodyLen >> 8) & 0xff, bodyLen & 0xff);
+    out.push((bmCount >> 8) & 0xff, bmCount & 0xff);
+    for (const bm of serializedBootstrapMethods) {
+      out.push((bm.methodRef >> 8) & 0xff, bm.methodRef & 0xff);
+      out.push((bm.args.length >> 8) & 0xff, bm.args.length & 0xff);
+      for (const a of bm.args) out.push((a >> 8) & 0xff, a & 0xff);
+    }
+  }
 
   return new Uint8Array(out);
 }

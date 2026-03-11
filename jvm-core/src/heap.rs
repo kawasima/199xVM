@@ -39,6 +39,22 @@ impl JValue {
         }
     }
 
+    /// Unwrap as `f32` or panic.
+    pub fn as_float(&self) -> f32 {
+        match self {
+            JValue::Float(v) => *v,
+            other => panic!("Expected Float, got {other:?}"),
+        }
+    }
+
+    /// Unwrap as `f64` or panic.
+    pub fn as_double(&self) -> f64 {
+        match self {
+            JValue::Double(v) => *v,
+            other => panic!("Expected Double, got {other:?}"),
+        }
+    }
+
     /// Unwrap as object reference (may be null).
     /// `Int(0)` is treated as null because uninitialized local slots and
     /// some bytecode paths (e.g. `iconst_0` used as `aconst_null` equivalent)

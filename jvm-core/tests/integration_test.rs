@@ -70,3 +70,19 @@ fn arraylist_basics() {
     );
     assert_eq!(result, "2: hello world");
 }
+
+// ---------------------------------------------------------------------------
+// try/catch: NullPointerException caught in handler
+// ---------------------------------------------------------------------------
+
+#[test]
+fn try_catch_npe() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "TryCatchTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "CAUGHT");
+}

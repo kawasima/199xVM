@@ -9,6 +9,9 @@ public interface List<E> extends Collection<E> {
     E set(int index, E element);
     void add(int index, E element);
     E remove(int index);
+    boolean addAll(int index, Collection<? extends E> c);
+    int indexOf(Object o);
+    int lastIndexOf(Object o);
 
     default Stream<E> stream() {
         ArrayList<E> copy = new ArrayList<>();

@@ -309,7 +309,7 @@
   </div>
 
   <script type="module">
-    import { compile, disassemble } from "./javac.js";
+    import { compile, disassemble, parseBundleMeta, buildMethodRegistry, setMethodRegistry, readJar, classFilesToBundle } from "./javac.js";
 
     // CodeMirror 6
     import { EditorState } from "https://esm.sh/@codemirror/state@6";
@@ -648,11 +648,47 @@ public class ListOps {
         const shimResp = await fetch("../jdk-shim/bundle.bin");
         if (!shimResp.ok) throw new Error(`shim bundle: HTTP ${shimResp.status}`);
         classBundle = new Uint8Array(await shimResp.arrayBuffer());
-        log("info", `Shim bundle loaded: ${classBundle.byteLength}B`);
+        const classMetas = parseBundleMeta(classBundle);
+        const registry = buildMethodRegistry(classMetas);
+        setMethodRegistry(registry);
+        const methodCount = Object.keys(registry).length;
+        log("info", `Shim bundle loaded: ${classBundle.byteLength}B — ${methodCount} methods from ${classMetas.length} classes`);
       } catch (e) {
         log("info", `Bundle load failed: ${e.message}\nRun ./build-shim.sh first.`);
       }
     }
+
+    /** Load a JAR from a URL, register its methods, and append to classBundle. */
+    window.loadJar = async function(url) {
+      try {
+        log("info", `Loading JAR: ${url} ...`);
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const jarBytes = new Uint8Array(await resp.arrayBuffer());
+        const classFiles = await readJar(jarBytes);
+        const jarBundle = classFilesToBundle(classFiles);
+
+        // Register methods from the JAR classes
+        const metas = parseBundleMeta(jarBundle);
+        const reg = buildMethodRegistry(metas);
+        setMethodRegistry(reg);
+
+        // Append to classBundle
+        if (classBundle) {
+          const combined = new Uint8Array(classBundle.length + jarBundle.length);
+          combined.set(classBundle, 0);
+          combined.set(jarBundle, classBundle.length);
+          classBundle = combined;
+        } else {
+          classBundle = jarBundle;
+        }
+
+        const methodCount = Object.keys(reg).length;
+        log("info", `JAR loaded: ${classFiles.size} classes, ${methodCount} methods from ${url}`);
+      } catch (e) {
+        log("err", `JAR load failed: ${e.message}`);
+      }
+    };
 
     // Build a combined bundle: shim + user class
     function buildBundle(userClassBundle) {
@@ -847,7 +883,7 @@ public class ListOps {
     // Init
     document.getElementById("run-btn").disabled = true;
     initWasm();
-    loadClassBundle();
+    loadClassBundle().then(() => window.loadJar("./raoh-0.4.0.jar"));
   </script>
 </body>
 </html>

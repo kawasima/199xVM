@@ -62,6 +62,37 @@ public class Collections {
         @Override public E remove(int index) {
             throw new UnsupportedOperationException();
         }
+        @Override public boolean remove(Object o) {
+            throw new UnsupportedOperationException();
+        }
+        @Override public boolean removeAll(Collection<?> c) {
+            throw new UnsupportedOperationException();
+        }
+        @Override public boolean retainAll(Collection<?> c) {
+            throw new UnsupportedOperationException();
+        }
+        @Override public boolean addAll(int index, Collection<? extends E> c) {
+            throw new UnsupportedOperationException();
+        }
+        @Override public boolean containsAll(Collection<?> c) {
+            for (Object e : c) {
+                if (!contains(e)) return false;
+            }
+            return true;
+        }
+        @Override public Object[] toArray() {
+            return list.toArray();
+        }
+        @Override @SuppressWarnings("unchecked")
+        public <T> T[] toArray(T[] a) {
+            return list.toArray(a);
+        }
+        @Override public int indexOf(Object o) {
+            return list.indexOf(o);
+        }
+        @Override public int lastIndexOf(Object o) {
+            return list.lastIndexOf(o);
+        }
         @Override public void clear() {
             throw new UnsupportedOperationException();
         }

@@ -21,6 +21,10 @@ public final class String implements CharSequence, Comparable<String> {
     public native String concat(String str);
     public native boolean contains(CharSequence s);
     public native boolean startsWith(String prefix);
+    public boolean startsWith(String prefix, int toffset) {
+        if (toffset < 0 || toffset + prefix.length() > length()) return false;
+        return substring(toffset, toffset + prefix.length()).equals(prefix);
+    }
     public native boolean endsWith(String suffix);
     public native int indexOf(String str);
     public native int indexOf(int ch);

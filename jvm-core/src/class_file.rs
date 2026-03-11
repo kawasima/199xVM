@@ -120,7 +120,7 @@ impl MethodInfo {
 }
 
 /// A class/method/field attribute (JVMS §4.7).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Attribute {
     Code(CodeAttribute),
     ConstantValue { constantvalue_index: u16 },
@@ -140,7 +140,7 @@ pub enum Attribute {
 }
 
 /// The `Code` attribute containing bytecode and exception table.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CodeAttribute {
     pub max_stack: u16,
     pub max_locals: u16,
@@ -150,7 +150,7 @@ pub struct CodeAttribute {
 }
 
 /// One entry in an exception table.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExceptionTableEntry {
     pub start_pc: u16,
     pub end_pc: u16,
@@ -165,13 +165,13 @@ pub struct BootstrapMethod {
     pub bootstrap_arguments: Vec<u16>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LineNumberEntry {
     pub start_pc: u16,
     pub line_number: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LocalVariableEntry {
     pub start_pc: u16,
     pub length: u16,
@@ -180,7 +180,7 @@ pub struct LocalVariableEntry {
     pub index: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InnerClassEntry {
     pub inner_class_info_index: u16,
     pub outer_class_info_index: u16,
@@ -188,7 +188,7 @@ pub struct InnerClassEntry {
     pub inner_class_access_flags: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RecordComponentInfo {
     pub name_index: u16,
     pub descriptor_index: u16,
