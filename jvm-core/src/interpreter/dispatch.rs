@@ -128,7 +128,7 @@ impl Vm {
             other => return Err(format!("Expected InvokeDynamic at cp[{idx}], got {other:?}")),
         };
 
-        let (_method_name, descriptor) = match &cp[nat_index as usize] {
+        let (method_name, descriptor) = match &cp[nat_index as usize] {
             ConstantPoolEntry::NameAndType { name_index, descriptor_index } => {
                 let n = match &cp[*name_index as usize] { ConstantPoolEntry::Utf8(s) => s.clone(), _ => String::new() };
                 let d = match &cp[*descriptor_index as usize] { ConstantPoolEntry::Utf8(s) => s.clone(), _ => String::new() };
@@ -225,7 +225,7 @@ impl Vm {
                         class_name: "$$Lambda".to_owned(),
                         fields: std::collections::HashMap::new(),
                         native: NativePayload::BytecodeLambda {
-                            sam_method: _method_name,
+                            sam_method: method_name,
                             sam_desc,
                             impl_class,
                             impl_method,

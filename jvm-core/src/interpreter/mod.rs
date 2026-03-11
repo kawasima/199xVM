@@ -47,21 +47,21 @@ extern "C" {
 /// The central virtual machine that holds loaded classes and drives execution.
 pub struct Vm {
     /// Loaded class files keyed by internal name (`net/unit8/raoh/Result`).
-    pub(super) classes: HashMap<String, ClassFile>,
+    pub(in crate::interpreter) classes: HashMap<String, ClassFile>,
     /// Interned strings cache (not strictly required but saves allocations).
-    pub(super) string_pool: HashMap<String, JRef>,
+    pub(in crate::interpreter) string_pool: HashMap<String, JRef>,
     /// Static field storage keyed by "ClassName.fieldName".
-    pub(super) static_fields: HashMap<String, JValue>,
+    pub(in crate::interpreter) static_fields: HashMap<String, JValue>,
     /// Canonical Class objects keyed by internal class name or descriptor.
-    pub(super) class_pool: HashMap<String, JRef>,
+    pub(in crate::interpreter) class_pool: HashMap<String, JRef>,
     /// Pending exception object — set by athrow, consumed by exception handler.
     /// This preserves the full exception object (with message, cause, fields)
     /// across the Err(String) propagation path.
-    pub(super) pending_exception: Option<JRef>,
+    pub(in crate::interpreter) pending_exception: Option<JRef>,
     /// Buffered `System.out.print` content until newline/println.
-    pub(super) stdout_buffer: String,
+    pub(in crate::interpreter) stdout_buffer: String,
     /// Buffered `System.err.print` content until newline/println.
-    pub(super) stderr_buffer: String,
+    pub(in crate::interpreter) stderr_buffer: String,
 }
 
 impl Vm {

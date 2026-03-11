@@ -154,8 +154,6 @@ impl super::Vm {
         }
     }
 
-
-
     pub(super) fn native_virtual(
         &mut self,
         this: &JRef,
@@ -1126,67 +1124,6 @@ impl super::Vm {
                 let is_err = matches!(this.borrow().native, NativePayload::PrintStream(true));
                 let text = _args.first().map(|v| self.printstream_text_for(v)).unwrap_or_default();
                 self.write_printstream(is_err, &text, method_name == "println");
-                Some(JValue::Void)
-            }
-            // System.arraycopy — native
-            ("java/lang/System", "arraycopy") => {
-                // arraycopy(src, srcPos, dest, destPos, length)
-                let src_ref = _args.first().and_then(|v| v.as_ref());
-                let src_pos = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
-                let dest_ref = _args.get(2).and_then(|v| v.as_ref());
-                let dest_pos = _args.get(3).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
-                let length = _args.get(4).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
-                if let (Some(src), Some(dest)) = (src_ref, dest_ref) {
-                    // Extract source elements first to avoid simultaneous borrow
-                    // (src and dest may alias the same object in degenerate cases).
-                    enum Copied { Ref(Vec<JValue>), Byte(Vec<u8>), Int(Vec<i32>), Long(Vec<i64>) }
-                    let copied = match &src.borrow().native {
-                        NativePayload::Array(v) => {
-                            let end = (src_pos + length).min(v.len());
-                            Copied::Ref(v[src_pos.min(v.len())..end].to_vec())
-                        }
-                        NativePayload::ByteArray(v) => {
-                            let end = (src_pos + length).min(v.len());
-                            Copied::Byte(v[src_pos.min(v.len())..end].to_vec())
-                        }
-                        NativePayload::IntArray(v) => {
-                            let end = (src_pos + length).min(v.len());
-                            Copied::Int(v[src_pos.min(v.len())..end].to_vec())
-                        }
-                        NativePayload::LongArray(v) => {
-                            let end = (src_pos + length).min(v.len());
-                            Copied::Long(v[src_pos.min(v.len())..end].to_vec())
-                        }
-                        _ => Copied::Ref(vec![]),
-                    };
-                    match (copied, &mut dest.borrow_mut().native) {
-                        (Copied::Ref(elems), NativePayload::Array(dv)) => {
-                            for (i, elem) in elems.into_iter().enumerate() {
-                                let di = dest_pos + i;
-                                if di < dv.len() { dv[di] = elem; }
-                            }
-                        }
-                        (Copied::Byte(elems), NativePayload::ByteArray(dv)) => {
-                            for (i, elem) in elems.into_iter().enumerate() {
-                                let di = dest_pos + i;
-                                if di < dv.len() { dv[di] = elem; }
-                            }
-                        }
-                        (Copied::Int(elems), NativePayload::IntArray(dv)) => {
-                            for (i, elem) in elems.into_iter().enumerate() {
-                                let di = dest_pos + i;
-                                if di < dv.len() { dv[di] = elem; }
-                            }
-                        }
-                        (Copied::Long(elems), NativePayload::LongArray(dv)) => {
-                            for (i, elem) in elems.into_iter().enumerate() {
-                                let di = dest_pos + i;
-                                if di < dv.len() { dv[di] = elem; }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
                 Some(JValue::Void)
             }
             _ => None,
