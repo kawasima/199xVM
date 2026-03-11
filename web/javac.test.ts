@@ -612,6 +612,13 @@ describe("Parser", () => {
     }`;
     assert.throws(() => parse(lex(src)));
   });
+
+  test("class method declaration ending with semicolon is rejected unless abstract", () => {
+    const src = `public class BadMethodDecl {
+      void m();
+    }`;
+    assert.throws(() => parse(lex(src)));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1621,6 +1628,18 @@ describe("Runtime (WASM)", () => {
         }
       }`, "RuntimeForkJoin");
     assert.equal(result, "210");
+  });
+
+  test("interface default method call executes via invokeinterface", async () => {
+    const result = await runSnippet(`public interface Named {
+      String name();
+      default String label() { return name(); }
+    }
+    public class NamedImpl implements Named {
+      public String name() { return "ok"; }
+      public static String run() { return new NamedImpl().label(); }
+    }`, "NamedImpl");
+    assert.equal(result, "ok");
   });
 
 });

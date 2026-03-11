@@ -565,7 +565,11 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         return;
       }
       if (match(TokenKind.Semi)) {
-        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: true });
+        const inInterfaceLike = ownerKind === "interface" || ownerKind === "annotation";
+        if (!inInterfaceLike && !isAbstract) {
+          throw new Error("Method declarations in classes, enums, and records must have a body unless declared abstract.");
+        }
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: inInterfaceLike || isAbstract });
       } else {
         expect(TokenKind.LBrace);
         const body = parseBlock();
