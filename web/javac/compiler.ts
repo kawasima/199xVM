@@ -180,6 +180,7 @@ class ConstantPoolBuilder {
     out.push((count >> 8) & 0xff, count & 0xff);
     for (let i = 1; i < count; i++) {
       const e = this.entries[i];
+      if (e.tag === 0) continue; // placeholder for long/double second slot — no bytes emitted
       out.push(e.tag, ...e.data);
     }
     return out;
