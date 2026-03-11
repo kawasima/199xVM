@@ -1,6 +1,8 @@
 package java.lang;
 
 public final class Void {
-    public static final Class<Void> TYPE = null;
+    @SuppressWarnings("unchecked")
+    public static final Class<Void> TYPE = (Class<Void>) primitiveType("void");
+    private static Class<?> primitiveType(String name) { try { return Class.forName(name); } catch (ClassNotFoundException e) { return null; } }
     private Void() {}
 }

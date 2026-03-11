@@ -144,4 +144,14 @@ public interface Map<K, V> {
         m.put(k3, v3);
         return m;
     }
+
+    static <K, V> Map<K, V> copyOf(Map<? extends K, ? extends V> src) {
+        HashMap<K, V> m = new HashMap<>();
+        if (src != null) {
+            for (Map.Entry<? extends K, ? extends V> e : src.entrySet()) {
+                m.put(e.getKey(), e.getValue());
+            }
+        }
+        return m;
+    }
 }

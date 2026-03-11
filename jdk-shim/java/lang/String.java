@@ -37,11 +37,32 @@ public final class String implements CharSequence, Comparable<String> {
     }
     public native boolean endsWith(String suffix);
     public native int indexOf(String str);
+    public int indexOf(String str, int fromIndex) {
+        if (str == null) return -1;
+        if (fromIndex < 0) fromIndex = 0;
+        int n = length();
+        int m = str.length();
+        if (m == 0) return fromIndex <= n ? fromIndex : n;
+        if (m > n) return -1;
+        for (int i = fromIndex; i <= n - m; i++) {
+            boolean ok = true;
+            for (int j = 0; j < m; j++) {
+                if (charAt(i + j) != str.charAt(j)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) return i;
+        }
+        return -1;
+    }
     public native int indexOf(int ch);
     public native int lastIndexOf(int ch);
     public native String trim();
     public native String toLowerCase();
     public native String toUpperCase();
+    public String toLowerCase(java.util.Locale locale) { return toLowerCase(); }
+    public String toUpperCase(java.util.Locale locale) { return toUpperCase(); }
     public native char[] toCharArray();
     public native byte[] getBytes();
     public void getChars(int srcBegin, int srcEnd, char[] dst, int dstBegin) {
@@ -53,6 +74,49 @@ public final class String implements CharSequence, Comparable<String> {
 
     @Override
     public native String toString();
+    public String replace(String target, String replacement) {
+        if (target == null || replacement == null) throw new NullPointerException();
+        if (target.length() == 0) return this;
+        StringBuilder sb = new StringBuilder();
+        int from = 0;
+        int at;
+        while ((at = indexOf(target, from)) >= 0) {
+            sb.append(substring(from, at));
+            sb.append(replacement);
+            from = at + target.length();
+        }
+        sb.append(substring(from));
+        return sb.toString();
+    }
+
+    public String[] split(String regex) {
+        return split(regex, 0);
+    }
+
+    public String[] split(String regex, int limit) {
+        if (regex == null) throw new NullPointerException();
+        if (regex.length() == 0) return new String[] { this };
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        int from = 0;
+        int at;
+        while ((at = indexOf(regex, from)) >= 0) {
+            if (limit > 0 && out.size() + 1 >= limit) break;
+            out.add(substring(from, at));
+            from = at + regex.length();
+        }
+        out.add(substring(from));
+        return out.toArray(new String[out.size()]);
+    }
+
+    public boolean matches(String regex) {
+        return java.util.regex.Pattern.matches(regex, this);
+    }
+
+    public String replaceFirst(String regex, String replacement) {
+        return java.util.regex.Pattern.compile(regex).matcher(this).replaceAll(replacement);
+    }
+
+    public String intern() { return this; }
 
     @Override
     public CharSequence subSequence(int start, int end) {

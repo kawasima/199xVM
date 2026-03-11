@@ -3,6 +3,7 @@ package java.util;
 import java.io.Serializable;
 
 public final class Locale implements Cloneable, Serializable {
+    public enum Category { DISPLAY, FORMAT }
     public static final Locale ROOT = new Locale("", "", "");
     public static final Locale US = new Locale("en", "US");
     public static final Locale ENGLISH = new Locale("en", "");
@@ -25,6 +26,10 @@ public final class Locale implements Cloneable, Serializable {
 
     public static Locale getDefault() {
         return defaultLocale;
+    }
+
+    public static Locale getDefault(Category category) {
+        return getDefault();
     }
 
     public static void setDefault(Locale newLocale) {
@@ -61,6 +66,10 @@ public final class Locale implements Cloneable, Serializable {
             return language;
         }
         return language + "-" + country;
+    }
+
+    public String getUnicodeLocaleType(String key) {
+        return null;
     }
 
     @Override

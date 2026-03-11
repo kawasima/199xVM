@@ -46,6 +46,47 @@ public final class Math {
         return r;
     }
 
+    public static int multiplyExact(int x, int y) {
+        long r = (long) x * (long) y;
+        if ((int) r != r) throw new ArithmeticException("integer overflow");
+        return (int) r;
+    }
+
+    public static long multiplyExact(long x, long y) {
+        long r = x * y;
+        if (((x | y) >>> 31 != 0) && y != 0 && r / y != x) throw new ArithmeticException("long overflow");
+        return r;
+    }
+
+    public static long floorDiv(long x, long y) {
+        long r = x / y;
+        if ((x ^ y) < 0 && (r * y != x)) r--;
+        return r;
+    }
+
+    public static int floorDiv(int x, int y) {
+        int r = x / y;
+        if ((x ^ y) < 0 && (r * y != x)) r--;
+        return r;
+    }
+
+    public static long floorMod(long x, long y) {
+        return x - floorDiv(x, y) * y;
+    }
+
+    public static int floorMod(int x, int y) {
+        return x - (int) floorDiv(x, y) * y;
+    }
+
+    public static int floorMod(Long x, int y) { return (int) floorMod(x.longValue(), (long) y); }
+
+    public static int toIntExact(long value) {
+        if ((int) value != value) throw new ArithmeticException("integer overflow");
+        return (int) value;
+    }
+
+    public static int toIntExact(Long value) { return toIntExact(value.longValue()); }
+
     public static double sqrt(double x) {
         if (x < 0.0 || x != x) return 0.0d / 0.0d;
         if (x == 0.0 || x == 1.0) return x;
@@ -97,6 +138,12 @@ public final class Math {
     }
 
     public static long clamp(long value, long min, long max) {
+        if (value < min) return min;
+        if (value > max) return max;
+        return value;
+    }
+
+    public static int clamp(int value, int min, int max) {
         if (value < min) return min;
         if (value > max) return max;
         return value;

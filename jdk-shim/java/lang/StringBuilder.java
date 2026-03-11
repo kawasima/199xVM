@@ -3,7 +3,7 @@ package java.lang;
 /**
  * StringBuilder for string concatenation and mutable character sequences.
  */
-public final class StringBuilder implements CharSequence {
+public final class StringBuilder implements CharSequence, Appendable {
     private char[] value;
     private int count;
 

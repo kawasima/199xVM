@@ -47,6 +47,11 @@ public final class Optional<T> {
         return value != null ? value : supplier.get();
     }
 
+    public <X extends Throwable> T orElseThrow(Supplier<? extends X> exceptionSupplier) throws X {
+        if (value != null) return value;
+        throw exceptionSupplier.get();
+    }
+
     public <U> Optional<U> map(Function<? super T, ? extends U> mapper) {
         if (!isPresent()) return empty();
         return Optional.ofNullable(mapper.apply(value));

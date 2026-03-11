@@ -8,6 +8,11 @@ public class Collections {
         return (List<T>) EMPTY_LIST;
     }
 
+    @SuppressWarnings("unchecked")
+    public static <T> Set<T> emptySet() {
+        return (Set<T>) EMPTY_SET;
+    }
+
     public static <T> List<T> unmodifiableList(List<? extends T> list) {
         return new UnmodifiableList<>(list);
     }
@@ -16,6 +21,25 @@ public class Collections {
         ArrayList<T> list = new ArrayList<>();
         list.add(o);
         return unmodifiableList(list);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static <T> Iterator<T> emptyIterator() {
+        return (Iterator<T>) EMPTY_LIST.iterator();
+    }
+
+    public static <K, V> Map<K, V> singletonMap(K key, V value) {
+        HashMap<K, V> map = new HashMap<>(1);
+        map.put(key, value);
+        return map;
+    }
+
+    public static <T> Set<T> unmodifiableSet(Set<? extends T> set) {
+        HashSet<T> copy = new HashSet<>();
+        for (T e : set) {
+            copy.add(e);
+        }
+        return new UnmodifiableSet<>(copy);
     }
 
     public static void reverse(List<?> list) {
@@ -44,6 +68,7 @@ public class Collections {
     }
 
     private static final List<?> EMPTY_LIST = new UnmodifiableList<>(new ArrayList<>());
+    private static final Set<?> EMPTY_SET = new UnmodifiableSet<>(new HashSet<>());
 
     private static class UnmodifiableList<E> implements List<E> {
         private final List<? extends E> list;
@@ -127,5 +152,27 @@ public class Collections {
 
         @Override
         public String toString() { return list.toString(); }
+    }
+
+    private static class UnmodifiableSet<E> implements Set<E> {
+        private final Set<? extends E> set;
+
+        UnmodifiableSet(Set<? extends E> set) {
+            this.set = set;
+        }
+
+        @Override public int size() { return set.size(); }
+        @Override public boolean isEmpty() { return set.isEmpty(); }
+        @Override public boolean contains(Object o) { return set.contains(o); }
+        @Override public Iterator<E> iterator() { @SuppressWarnings("unchecked") Iterator<E> it = (Iterator<E>) set.iterator(); return it; }
+        @Override public Object[] toArray() { return set.toArray(); }
+        @Override public <T> T[] toArray(T[] a) { return set.toArray(a); }
+        @Override public boolean add(E e) { throw new UnsupportedOperationException(); }
+        @Override public boolean remove(Object o) { throw new UnsupportedOperationException(); }
+        @Override public boolean containsAll(Collection<?> c) { return set.containsAll(c); }
+        @Override public boolean addAll(Collection<? extends E> c) { throw new UnsupportedOperationException(); }
+        @Override public boolean retainAll(Collection<?> c) { throw new UnsupportedOperationException(); }
+        @Override public boolean removeAll(Collection<?> c) { throw new UnsupportedOperationException(); }
+        @Override public void clear() { throw new UnsupportedOperationException(); }
     }
 }

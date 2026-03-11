@@ -29,6 +29,10 @@ public class HashMap<K, V> implements Map<K, V> {
         putAll(m);
     }
 
+    public static <K, V> HashMap<K, V> newHashMap(int expectedSize) {
+        return new HashMap<>(Math.max(expectedSize, DEFAULT_CAPACITY));
+    }
+
     private int indexOf(Object key) {
         for (int i = 0; i < size; i++) {
             if (Objects.equals(keys[i], key)) return i;

@@ -1,5 +1,7 @@
 package java.util;
 
+import java.util.function.Supplier;
+
 public final class Objects {
     private Objects() {}
 
@@ -30,6 +32,11 @@ public final class Objects {
 
     public static <T> T requireNonNullElse(T obj, T defaultObj) {
         return (obj != null) ? obj : requireNonNull(defaultObj, "defaultObj");
+    }
+
+    public static <T> T requireNonNullElseGet(T obj, Supplier<? extends T> supplier) {
+        if (obj != null) return obj;
+        return requireNonNull(supplier.get(), "supplier.get()");
     }
 
     public static boolean equals(Object a, Object b) {

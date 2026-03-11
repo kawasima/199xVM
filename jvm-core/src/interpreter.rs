@@ -97,9 +97,19 @@ impl Vm {
     }
 
     fn pending_exception_err(&self) -> Option<String> {
-        self.pending_exception
-            .as_ref()
-            .map(|r| format!("Exception: {}", r.borrow().class_name))
+        self.pending_exception.as_ref().map(|r| {
+            let b = r.borrow();
+            let mut s = format!("Exception: {}", b.class_name);
+            if let Some(JValue::Ref(Some(msg_ref))) = b.fields.get("detailMessage") {
+                if let Some(msg) = msg_ref.borrow().as_java_string() {
+                    if !msg.is_empty() {
+                        s.push_str(": ");
+                        s.push_str(msg);
+                    }
+                }
+            }
+            s
+        })
     }
 
     fn class_object(&mut self, internal_name: impl Into<String>) -> JRef {
@@ -344,7 +354,8 @@ impl Vm {
             pc: 0,
         };
 
-        self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods, &exception_table)
+        let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
+        self.run_frame(&mut frame, &code, &cp_entries, &frame_owner, &bootstrap_methods, &exception_table)
     }
 
     /// Execute an instance method with invokespecial semantics.
@@ -446,7 +457,8 @@ impl Vm {
             pc: 0,
         };
 
-        self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods, &exception_table)
+        let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
+        self.run_frame(&mut frame, &code, &cp_entries, &frame_owner, &bootstrap_methods, &exception_table)
     }
 
     /// Execute an instance method (first local = `this` reference).
@@ -604,7 +616,8 @@ impl Vm {
             pc: 0,
         };
 
-        self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods, &exception_table)
+        let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
+        self.run_frame(&mut frame, &code, &cp_entries, &frame_owner, &bootstrap_methods, &exception_table)
     }
 
     fn adapt_lambda_return(
@@ -1265,12 +1278,24 @@ impl Vm {
                 // ---- Method invocation ----
                 0xb6 => { // invokevirtual
                     let idx = read_u16(code, &mut frame.pc);
-                    let result = self.dispatch_virtual(cp, idx, frame)?;
+                    let result = self.dispatch_virtual(cp, idx, frame).map_err(|e| {
+                        if e.starts_with("NullPointerException") {
+                            format!("{e} in {class_name}")
+                        } else {
+                            e
+                        }
+                    })?;
                     if !matches!(result, JValue::Void) { frame.stack.push(result); }
                 }
                 0xb7 => { // invokespecial
                     let idx = read_u16(code, &mut frame.pc);
-                    let result = self.dispatch_special(cp, idx, frame)?;
+                    let result = self.dispatch_special(cp, idx, frame).map_err(|e| {
+                        if e.starts_with("NullPointerException") {
+                            format!("{e} in {class_name}")
+                        } else {
+                            e
+                        }
+                    })?;
                     if !matches!(result, JValue::Void) { frame.stack.push(result); }
                 }
                 0xb8 => { // invokestatic
@@ -1281,7 +1306,13 @@ impl Vm {
                 0xb9 => { // invokeinterface
                     let idx = read_u16(code, &mut frame.pc);
                     frame.pc += 2; // count + 0
-                    let result = self.dispatch_interface(cp, idx, frame)?;
+                    let result = self.dispatch_interface(cp, idx, frame).map_err(|e| {
+                        if e.starts_with("NullPointerException") {
+                            format!("{e} in {class_name}")
+                        } else {
+                            e
+                        }
+                    })?;
                     if !matches!(result, JValue::Void) { frame.stack.push(result); }
                 }
                 0xba => { // invokedynamic
@@ -1418,14 +1449,43 @@ impl Vm {
                     let exc = frame.stack.pop().unwrap();
                     let (msg, exc_ref) = match exc {
                         JValue::Ref(Some(r)) => {
-                            let msg = format!("Exception: {}", r.borrow().class_name);
+                            let detail = r
+                                .borrow()
+                                .fields
+                                .get("detailMessage")
+                                .and_then(|v| v.as_ref())
+                                .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()));
+                            let msg = format!(
+                                "Exception: {}{} at {}:pc{}",
+                                r.borrow().class_name,
+                                detail
+                                    .as_ref()
+                                    .map(|d| format!(": {d}"))
+                                    .unwrap_or_default(),
+                                class_name,
+                                frame.pc.saturating_sub(1)
+                            );
                             (msg, Some(r))
                         }
                         JValue::Ref(None) => {
                             let npe = JObject::new("java/lang/NullPointerException");
-                            ("Exception: java/lang/NullPointerException".to_owned(), Some(npe))
+                            (
+                                format!(
+                                    "Exception: java/lang/NullPointerException at {}:pc{}",
+                                    class_name,
+                                    frame.pc.saturating_sub(1)
+                                ),
+                                Some(npe),
+                            )
                         }
-                        _ => ("Exception: java/lang/RuntimeException".to_owned(), None),
+                        _ => (
+                            format!(
+                                "Exception: java/lang/RuntimeException at {}:pc{}",
+                                class_name,
+                                frame.pc.saturating_sub(1)
+                            ),
+                            None,
+                        ),
                     };
                     if let Some(r) = exc_ref {
                         self.pending_exception = Some(r);
@@ -3043,13 +3103,19 @@ impl Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let super_name = self.classes.get(&target).and_then(|cf| {
+                let super_name = if target.starts_with('[') {
+                    Some("java/lang/Object".to_owned())
+                } else if let Some(cf) = self.classes.get(&target) {
                     if cf.super_class == 0 {
                         None
                     } else {
                         Some(cf.constant_pool.class_name(cf.super_class).to_owned())
                     }
-                });
+                } else if matches!(target.as_str(), "byte" | "short" | "int" | "long" | "float" | "double" | "char" | "boolean" | "void") {
+                    None
+                } else {
+                    Some("java/lang/Object".to_owned())
+                };
                 Some(JValue::Ref(super_name.map(|s| self.class_object(s))))
             }
             ("java/lang/Class", "getInterfaces") => {

@@ -90,6 +90,10 @@ public final class Matcher {
         return group == 0 ? group() : null;
     }
 
+    public String group(String name) {
+        return group();
+    }
+
     public String replaceAll(String replacement) {
         String r = pattern.pattern();
         if (r.length() == 0) {

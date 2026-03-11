@@ -5,6 +5,9 @@ import java.io.Serializable;
 public final class Boolean implements Serializable, Comparable<Boolean> {
     public static final Boolean TRUE = new Boolean(true);
     public static final Boolean FALSE = new Boolean(false);
+    @SuppressWarnings("unchecked")
+    public static final Class<Boolean> TYPE = (Class<Boolean>) primitiveType("boolean");
+    private static Class<?> primitiveType(String name) { try { return Class.forName(name); } catch (ClassNotFoundException e) { return null; } }
 
     private final boolean value;
 

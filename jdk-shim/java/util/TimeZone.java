@@ -3,6 +3,8 @@ package java.util;
 import java.io.Serializable;
 
 public class TimeZone implements Serializable, Cloneable {
+    public static final int SHORT = 0;
+    public static final int LONG = 1;
     private String ID;
 
     public TimeZone() {

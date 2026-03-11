@@ -21,6 +21,10 @@ public class HashSet<E> implements Set<E> {
         this.map = new HashMap<>(initialCapacity);
     }
 
+    public static <E> HashSet<E> newHashSet(int expectedSize) {
+        return new HashSet<>(Math.max(expectedSize, 16));
+    }
+
     @Override
     public Iterator<E> iterator() {
         return map.keySet().iterator();

@@ -9,7 +9,9 @@ public final class Double extends Number implements Comparable<Double> {
     public static final int SIZE = 64;
     public static final int BYTES = 8;
     public static final int PRECISION = 53;
-    public static final Class<Double> TYPE = null;
+    @SuppressWarnings("unchecked")
+    public static final Class<Double> TYPE = (Class<Double>) primitiveType("double");
+    private static Class<?> primitiveType(String name) { try { return Class.forName(name); } catch (ClassNotFoundException e) { return null; } }
     private final double value;
 
     public Double(double value) { this.value = value; }

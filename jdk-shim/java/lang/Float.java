@@ -9,7 +9,9 @@ public final class Float extends Number implements Comparable<Float> {
     public static final int SIZE = 32;
     public static final int BYTES = 4;
     public static final int PRECISION = 24;
-    public static final Class<Float> TYPE = null;
+    @SuppressWarnings("unchecked")
+    public static final Class<Float> TYPE = (Class<Float>) primitiveType("float");
+    private static Class<?> primitiveType(String name) { try { return Class.forName(name); } catch (ClassNotFoundException e) { return null; } }
     private final float value;
 
     public Float(float value) { this.value = value; }
