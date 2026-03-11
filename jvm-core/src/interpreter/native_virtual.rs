@@ -10,6 +10,15 @@ use super::descriptors::*;
 #[cfg(target_arch = "wasm32")]
 use super::{console_error, console_log};
 
+/// Convert a Java char-index to a UTF-8 byte offset within `s`.
+/// Returns `s.len()` when `char_idx` is beyond the end of the string.
+fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+}
+
 impl super::Vm {
     /// Extract a Rust `String` from `java/lang/String` constructor arguments based on the method descriptor.
     /// Returns an empty string if the descriptor is not recognized or arguments are invalid.
@@ -1011,20 +1020,19 @@ impl super::Vm {
                 let s = this.borrow().as_java_string().unwrap_or("").to_owned();
                 // fromIndex (char-index): default 0
                 let from_char = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
-                // Convert from_char to byte offset for slicing
-                let from_byte = s.char_indices().nth(from_char).map(|(b, _)| b).unwrap_or(s.len());
+                let from_byte = char_to_byte_offset(&s, from_char);
                 let search_str = &s[from_byte..];
                 let idx = match _args.first() {
                     Some(JValue::Ref(Some(r))) => {
                         let needle = r.borrow().as_java_string().unwrap_or("").to_owned();
                         search_str.find(needle.as_str()).map(|byte_pos| {
-                            (s[..from_byte + byte_pos].chars().count()) as i32
+                            s[..from_byte + byte_pos].chars().count() as i32
                         }).unwrap_or(-1)
                     }
                     Some(JValue::Int(ch)) => {
                         let c = char::from_u32(*ch as u32).unwrap_or('\0');
                         search_str.find(c).map(|byte_pos| {
-                            (s[..from_byte + byte_pos].chars().count()) as i32
+                            s[..from_byte + byte_pos].chars().count() as i32
                         }).unwrap_or(-1)
                     }
                     _ => -1,
@@ -1036,8 +1044,7 @@ impl super::Vm {
                 // fromIndex (char-index): default = end of string
                 let char_len = s.chars().count();
                 let from_char = _args.get(1).map(|v| (v.as_int() as usize).min(char_len)).unwrap_or(char_len);
-                // Convert from_char to byte offset for slicing (search up to from_char+1)
-                let from_byte = s.char_indices().nth(from_char).map(|(b, _)| b).unwrap_or(s.len());
+                let from_byte = char_to_byte_offset(&s, from_char);
                 let search_str = &s[..from_byte];
                 let idx = match _args.first() {
                     Some(JValue::Ref(Some(r))) => {
