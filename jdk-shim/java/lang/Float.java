@@ -1,6 +1,15 @@
 package java.lang;
 
 public final class Float extends Number implements Comparable<Float> {
+    public static final float POSITIVE_INFINITY = 1.0f / 0.0f;
+    public static final float NEGATIVE_INFINITY = -1.0f / 0.0f;
+    public static final float NaN = 0.0f / 0.0f;
+    public static final int MAX_EXPONENT = 127;
+    public static final int MIN_EXPONENT = -126;
+    public static final int SIZE = 32;
+    public static final int BYTES = 4;
+    public static final int PRECISION = 24;
+    public static final Class<Float> TYPE = null;
     private final float value;
 
     public Float(float value) { this.value = value; }
@@ -34,5 +43,18 @@ public final class Float extends Number implements Comparable<Float> {
         return 0;
     }
 
+    public static boolean isInfinite(float v) {
+        return v == POSITIVE_INFINITY || v == NEGATIVE_INFINITY;
+    }
+
+    public static boolean isNaN(float v) {
+        return v != v;
+    }
+
+    public static boolean isFinite(float v) {
+        return !isInfinite(v) && !isNaN(v);
+    }
+
     public static native int floatToIntBits(float value);
+    public static native float intBitsToFloat(int bits);
 }

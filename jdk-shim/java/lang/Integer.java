@@ -5,6 +5,7 @@ public final class Integer extends Number implements Comparable<Integer> {
     public static final int MAX_VALUE = 0x7fffffff;
     public static final int SIZE = 32;
     public static final int BYTES = 4;
+    public static final Class<Integer> TYPE = null;
 
     private final int value;
 

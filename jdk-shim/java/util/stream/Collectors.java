@@ -1,7 +1,9 @@
 package java.util.stream;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public final class Collectors {
     private Collectors() {}
@@ -21,6 +23,10 @@ public final class Collectors {
 
     public static <T> Collector<T, List<T>, List<T>> toList() {
         return new ToListCollector<>();
+    }
+
+    public static <T> Collector<T, Set<T>, Set<T>> toSet() {
+        return new ToSetCollector<>();
     }
 
     private static class JoiningCollector implements Collector<CharSequence, StringBuilder, String> {
@@ -65,6 +71,23 @@ public final class Collectors {
         @Override
         public List<T> finisher(List<T> list) {
             return list;
+        }
+    }
+
+    private static class ToSetCollector<T> implements Collector<T, Set<T>, Set<T>> {
+        @Override
+        public Set<T> supplier() {
+            return new HashSet<>();
+        }
+
+        @Override
+        public void accumulator(Set<T> set, T element) {
+            set.add(element);
+        }
+
+        @Override
+        public Set<T> finisher(Set<T> set) {
+            return set;
         }
     }
 }

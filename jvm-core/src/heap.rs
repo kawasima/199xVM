@@ -98,6 +98,8 @@ pub enum NativePayload {
     ByteArray(Vec<u8>),
     IntArray(Vec<i32>),
     LongArray(Vec<i64>),
+    /// `java.io.PrintStream` marker (`false` => stdout, `true` => stderr).
+    PrintStream(bool),
     /// A Rust closure captured as a lambda stand-in.
     Lambda(Rc<dyn Fn(Vec<JValue>) -> JValue>),
     /// A lambda backed by a bytecode method handle.
@@ -123,6 +125,7 @@ impl std::fmt::Debug for NativePayload {
             NativePayload::ByteArray(v) => write!(f, "ByteArray(len={})", v.len()),
             NativePayload::IntArray(v) => write!(f, "IntArray(len={})", v.len()),
             NativePayload::LongArray(v) => write!(f, "LongArray(len={})", v.len()),
+            NativePayload::PrintStream(is_err) => write!(f, "PrintStream(err={is_err})"),
             NativePayload::Lambda(_) => write!(f, "Lambda(...)"),
             NativePayload::BytecodeLambda { impl_class, impl_method, .. } => {
                 write!(f, "BytecodeLambda({impl_class}::{impl_method})")
@@ -165,6 +168,15 @@ impl JObject {
             class_name: "$$Lambda".to_owned(),
             fields: HashMap::new(),
             native: NativePayload::Lambda(Rc::new(f)),
+        }))
+    }
+
+    /// Create a `java.io.PrintStream` marker object.
+    pub fn new_print_stream(is_err: bool) -> JRef {
+        Rc::new(RefCell::new(JObject {
+            class_name: "java/io/PrintStream".to_owned(),
+            fields: HashMap::new(),
+            native: NativePayload::PrintStream(is_err),
         }))
     }
 

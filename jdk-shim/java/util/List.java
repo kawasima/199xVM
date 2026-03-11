@@ -12,6 +12,9 @@ public interface List<E> extends Collection<E> {
     boolean addAll(int index, Collection<? extends E> c);
     int indexOf(Object o);
     int lastIndexOf(Object o);
+    ListIterator<E> listIterator();
+    ListIterator<E> listIterator(int index);
+    List<E> subList(int fromIndex, int toIndex);
 
     default Stream<E> stream() {
         ArrayList<E> copy = new ArrayList<>();

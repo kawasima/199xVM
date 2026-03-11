@@ -3,6 +3,8 @@ package java.lang;
 import java.io.Serializable;
 
 public final class Character implements Serializable, Comparable<Character> {
+    public static final int MIN_RADIX = 2;
+    public static final int MAX_RADIX = 36;
     private final char value;
     public Character(char value) { this.value = value; }
     public static Character valueOf(char c) { return new Character(c); }
@@ -55,5 +57,13 @@ public final class Character implements Serializable, Comparable<Character> {
 
     public static boolean isWhitespace(char ch) {
         return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f';
+    }
+
+    public static boolean isJavaIdentifierStart(char ch) {
+        return isLetter(ch) || ch == '_' || ch == '$';
+    }
+
+    public static boolean isJavaIdentifierPart(char ch) {
+        return isJavaIdentifierStart(ch) || isDigit(ch);
     }
 }

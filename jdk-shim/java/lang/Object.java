@@ -16,4 +16,6 @@ public class Object {
 
     // Native — implemented in Rust
     public final native Class<?> getClass();
+
+    protected native Object clone() throws CloneNotSupportedException;
 }

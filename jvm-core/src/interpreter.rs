@@ -12,10 +12,22 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
 use crate::class_file::{
     Attribute, BootstrapMethod, ClassFile, ConstantPoolEntry, ExceptionTableEntry, MethodInfo,
 };
 use crate::heap::{JObject, JRef, JValue, NativePayload};
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn console_log(s: &str);
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(s: &str);
+}
 
 // ---------------------------------------------------------------------------
 // VM state
@@ -29,10 +41,16 @@ pub struct Vm {
     string_pool: HashMap<String, JRef>,
     /// Static field storage keyed by "ClassName.fieldName".
     static_fields: HashMap<String, JValue>,
+    /// Canonical Class objects keyed by internal class name or descriptor.
+    class_pool: HashMap<String, JRef>,
     /// Pending exception object — set by athrow, consumed by exception handler.
     /// This preserves the full exception object (with message, cause, fields)
     /// across the Err(String) propagation path.
     pending_exception: Option<JRef>,
+    /// Buffered `System.out.print` content until newline/println.
+    stdout_buffer: String,
+    /// Buffered `System.err.print` content until newline/println.
+    stderr_buffer: String,
 }
 
 impl Vm {
@@ -42,7 +60,10 @@ impl Vm {
             classes: HashMap::new(),
             string_pool: HashMap::new(),
             static_fields: HashMap::new(),
+            class_pool: HashMap::new(),
             pending_exception: None,
+            stdout_buffer: String::new(),
+            stderr_buffer: String::new(),
         }
     }
 
@@ -50,6 +71,18 @@ impl Vm {
     pub fn load_class(&mut self, class_file: ClassFile) {
         let name = class_file.constant_pool.class_name(class_file.this_class).to_owned();
         self.classes.insert(name, class_file);
+    }
+
+    /// Flush buffered PrintStream output (`print` without trailing `println`).
+    pub fn flush_printstreams(&mut self) {
+        if !self.stdout_buffer.is_empty() {
+            Self::emit_host_line(false, &self.stdout_buffer);
+            self.stdout_buffer.clear();
+        }
+        if !self.stderr_buffer.is_empty() {
+            Self::emit_host_line(true, &self.stderr_buffer);
+            self.stderr_buffer.clear();
+        }
     }
 
     /// Intern a Java string (returns same `JRef` for equal content).
@@ -61,6 +94,26 @@ impl Vm {
         let r = JObject::new_string(s.clone());
         self.string_pool.insert(s, Rc::clone(&r));
         r
+    }
+
+    fn pending_exception_err(&self) -> Option<String> {
+        self.pending_exception
+            .as_ref()
+            .map(|r| format!("Exception: {}", r.borrow().class_name))
+    }
+
+    fn class_object(&mut self, internal_name: impl Into<String>) -> JRef {
+        let internal_name = internal_name.into();
+        if let Some(r) = self.class_pool.get(&internal_name) {
+            return Rc::clone(r);
+        }
+        let obj = JObject::new("java/lang/Class");
+        obj.borrow_mut().fields.insert(
+            "__name_internal".to_owned(),
+            JValue::Ref(Some(self.intern_string(internal_name.clone()))),
+        );
+        self.class_pool.insert(internal_name, Rc::clone(&obj));
+        obj
     }
 
     /// Look up a loaded class by internal name.
@@ -177,6 +230,9 @@ impl Vm {
         let found = self.find_method(class_name, method_name, descriptor).is_some();
         if !found {
             if let Some(v) = self.native_static(class_name, method_name, descriptor, &args) {
+                if let Some(err) = self.pending_exception_err() {
+                    return Err(err);
+                }
                 return Ok(v);
             }
         }
@@ -223,9 +279,19 @@ impl Vm {
             let (_class, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
             method.code().map(|c| c.max_locals as usize).unwrap_or(0)
         };
-        let mut locals = vec![JValue::Void; max_locals.max(args.len())];
-        for (i, a) in args.into_iter().enumerate() {
-            locals[i] = a;
+        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
+        let required_slots: usize = param_tokens
+            .iter()
+            .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
+            .sum();
+        let mut locals = vec![JValue::Void; max_locals.max(required_slots)];
+        let mut local_idx = 0usize;
+        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
+            if local_idx >= locals.len() {
+                break;
+            }
+            locals[local_idx] = a;
+            local_idx += if t == "J" || t == "D" { 2 } else { 1 };
         }
 
         // If method has no code (native), fall back to native stubs.
@@ -234,7 +300,19 @@ impl Vm {
             method.code().is_some()
         };
         if !has_code {
-            if let Some(v) = self.native_static(&class_name_owned, method_name, &descriptor_owned, &locals) {
+            let (param_tokens, _) = Self::parse_method_descriptor_tokens(&descriptor_owned);
+            let mut native_args = Vec::with_capacity(param_tokens.len());
+            let mut slot = 0usize;
+            for t in &param_tokens {
+                if slot < locals.len() {
+                    native_args.push(locals[slot].clone());
+                }
+                slot += if t == "J" || t == "D" { 2 } else { 1 };
+            }
+            if let Some(v) = self.native_static(&class_name_owned, method_name, &descriptor_owned, &native_args) {
+                if let Some(err) = self.pending_exception_err() {
+                    return Err(err);
+                }
                 return Ok(v);
             }
             return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
@@ -309,11 +387,21 @@ impl Vm {
             method.code().map(|c| c.max_locals as usize).unwrap_or(0)
         };
 
-        let total = max_locals.max(args.len() + 1);
+        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
+        let required_slots = 1 + param_tokens
+            .iter()
+            .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
+            .sum::<usize>();
+        let total = max_locals.max(required_slots);
         let mut locals = vec![JValue::Void; total];
         locals[0] = JValue::Ref(Some(this.clone()));
-        for (i, a) in args.into_iter().enumerate() {
-            locals[i + 1] = a;
+        let mut local_idx = 1usize;
+        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
+            if local_idx >= locals.len() {
+                break;
+            }
+            locals[local_idx] = a;
+            local_idx += if t == "J" || t == "D" { 2 } else { 1 };
         }
 
         // If method has no code (native), fall back to native stubs.
@@ -426,6 +514,9 @@ impl Vm {
         if !found {
             // Method not in bytecode — try native stubs.
             if let Some(v) = self.native_virtual(&this, &runtime_class, method_name, descriptor, &args) {
+                if let Some(err) = self.pending_exception_err() {
+                    return Err(err);
+                }
                 return Ok(v);
             }
             return Err(format!("Virtual method not found: {resolve_class}.{method_name}{descriptor}"));
@@ -446,11 +537,21 @@ impl Vm {
         };
 
         // `this` goes into local[0], then arguments.
-        let total = max_locals.max(args.len() + 1);
+        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
+        let required_slots = 1 + param_tokens
+            .iter()
+            .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
+            .sum::<usize>();
+        let total = max_locals.max(required_slots);
         let mut locals = vec![JValue::Void; total];
         locals[0] = JValue::Ref(Some(this));
-        for (i, a) in args.into_iter().enumerate() {
-            locals[i + 1] = a;
+        let mut local_idx = 1usize;
+        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
+            if local_idx >= locals.len() {
+                break;
+            }
+            locals[local_idx] = a;
+            local_idx += if t == "J" || t == "D" { 2 } else { 1 };
         }
 
         // If method has no code (native), fall back to native stubs.
@@ -469,6 +570,9 @@ impl Vm {
                 .cloned()
                 .collect();
             if let Some(v) = self.native_virtual(&this_ref, &class_name_owned, method_name, &descriptor_owned, &virt_args) {
+                if let Some(err) = self.pending_exception_err() {
+                    return Err(err);
+                }
                 return Ok(v);
             }
             return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
@@ -1128,7 +1232,7 @@ impl Vm {
                     let val = frame.stack.pop().unwrap_or(JValue::Void);
                     let (cls, fld, _) = resolve_fieldref(cp, idx);
                     // Per JVMS §5.5: putstatic triggers class initialization.
-                    let _ = self.ensure_class_init(&cls);
+                    self.ensure_class_init(&cls)?;
                     self.static_fields.insert(format!("{cls}.{fld}"), val);
                 }
                 0xb4 => { // getfield
@@ -1195,7 +1299,7 @@ impl Vm {
                     let idx = read_u16(code, &mut frame.pc);
                     let new_class = resolve_class_name(cp, idx);
                     // Run <clinit> for the class being instantiated.
-                    let _ = self.ensure_class_init(&new_class);
+                    self.ensure_class_init(&new_class)?;
                     let obj = if self.classes.contains_key(&new_class) {
                         // Class is loaded (bytecode available) — use plain object.
                         JObject::new(new_class)
@@ -1365,8 +1469,7 @@ impl Vm {
                     ConstantPoolEntry::Utf8(s) => s.clone(),
                     _ => String::new(),
                 };
-                // Return a Class object stand-in with the class name stored.
-                let obj = JObject::new_string(name);
+                let obj = self.class_object(name);
                 frame.stack.push(JValue::Ref(Some(obj)));
             }
             _other => {
@@ -1383,7 +1486,7 @@ impl Vm {
     ) -> Result<JValue, String> {
         let (class_name, field_name, descriptor) = resolve_fieldref(cp, idx);
         // Run <clinit> if not yet done (initialises static fields via putstatic).
-        let _ = self.ensure_class_init(&class_name.clone());
+        self.ensure_class_init(&class_name.clone())?;
         // Search this class and its super-class chain for the static field (JVMS §5.4.3.2).
         if let Some(v) = self.resolve_static_field_in_hierarchy(&class_name, &field_name) {
             return Ok(v);
@@ -1391,8 +1494,24 @@ impl Vm {
         // Well-known JDK static fields that cannot be initialised via <clinit>
         // because the JDK classes are not in the bundle.
         match (class_name.as_str(), field_name.as_str()) {
-            ("java/lang/System", "out") => Ok(JValue::Ref(Some(JObject::new("java/io/PrintStream")))),
-            ("java/lang/System", "err") => Ok(JValue::Ref(Some(JObject::new("java/io/PrintStream")))),
+            ("java/lang/System", "out") => {
+                let key = format!("{class_name}.{field_name}");
+                if let Some(v) = self.static_fields.get(&key) {
+                    return Ok(v.clone());
+                }
+                let v = JValue::Ref(Some(JObject::new_print_stream(false)));
+                self.static_fields.insert(key, v.clone());
+                Ok(v)
+            }
+            ("java/lang/System", "err") => {
+                let key = format!("{class_name}.{field_name}");
+                if let Some(v) = self.static_fields.get(&key) {
+                    return Ok(v.clone());
+                }
+                let v = JValue::Ref(Some(JObject::new_print_stream(true)));
+                self.static_fields.insert(key, v.clone());
+                Ok(v)
+            }
             _ => Ok(default_value_for_descriptor(&descriptor)),
         }
     }
@@ -1463,7 +1582,7 @@ impl Vm {
     ) -> Result<JValue, String> {
         let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
         // Per JVMS §5.5: invokestatic triggers class initialization.
-        let _ = self.ensure_class_init(&class_name);
+        self.ensure_class_init(&class_name)?;
         let n_args = count_args(&descriptor);
         let args = pop_args(frame, n_args);
         self.invoke_static(&class_name, &method_name, &descriptor, args)
@@ -1780,8 +1899,228 @@ impl Vm {
         _descriptor: &str,
         _args: &[JValue],
     ) -> Option<JValue> {
-        // All static methods are now handled by JDK shim bytecode.
-        None
+        match (_class_name, _method_name, _descriptor) {
+            ("java/lang/Class", "forName0", "(Ljava/lang/String;)Ljava/lang/Class;") => {
+                let runtime_name = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))?;
+                let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
+                Some(JValue::Ref(Some(self.class_object(internal))))
+            }
+            ("java/lang/System", "currentTimeMillis", "()J") => {
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                Some(JValue::Long(ms))
+            }
+            ("java/lang/System", "identityHashCode", "(Ljava/lang/Object;)I") => {
+                let hc = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .map(|r| {
+                        let ptr = Rc::as_ptr(r) as usize;
+                        (ptr as u64 as u32) as i32
+                    })
+                    .unwrap_or(0);
+                Some(JValue::Int(hc))
+            }
+            (
+                "java/lang/System",
+                "arraycopy",
+                "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+            ) => {
+                let src = _args.first().and_then(|v| v.as_ref()).cloned()?;
+                let src_pos = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let dst = _args.get(2).and_then(|v| v.as_ref()).cloned()?;
+                let dst_pos = _args.get(3).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let len = _args.get(4).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+
+                let src_snapshot = {
+                    let src_b = src.borrow();
+                    match &src_b.native {
+                        NativePayload::Array(v) => Some(v.clone()),
+                        NativePayload::ByteArray(v) => {
+                            Some(v.iter().map(|b| JValue::Int(*b as i32)).collect())
+                        }
+                        NativePayload::IntArray(v) => {
+                            Some(v.iter().map(|i| JValue::Int(*i)).collect())
+                        }
+                        NativePayload::LongArray(v) => {
+                            Some(v.iter().map(|l| JValue::Long(*l)).collect())
+                        }
+                        _ => None,
+                    }
+                };
+
+                if let Some(src_vals) = src_snapshot {
+                    let src_end = src_pos.saturating_add(len).min(src_vals.len());
+                    let count = src_end.saturating_sub(src_pos);
+                    let mut dst_b = dst.borrow_mut();
+                    match &mut dst_b.native {
+                        NativePayload::Array(v) => {
+                            if dst_pos < v.len() && count > 0 {
+                                let dst_end = dst_pos.saturating_add(count).min(v.len());
+                                let write_count = dst_end.saturating_sub(dst_pos);
+                                let copy = &src_vals[src_pos..src_pos + write_count];
+                                v[dst_pos..dst_pos + write_count].clone_from_slice(copy);
+                            }
+                        }
+                        NativePayload::ByteArray(v) => {
+                            if dst_pos < v.len() && count > 0 {
+                                let dst_end = dst_pos.saturating_add(count).min(v.len());
+                                let write_count = dst_end.saturating_sub(dst_pos);
+                                for i in 0..write_count {
+                                    v[dst_pos + i] = src_vals[src_pos + i].as_int() as u8;
+                                }
+                            }
+                        }
+                        NativePayload::IntArray(v) => {
+                            if dst_pos < v.len() && count > 0 {
+                                let dst_end = dst_pos.saturating_add(count).min(v.len());
+                                let write_count = dst_end.saturating_sub(dst_pos);
+                                for i in 0..write_count {
+                                    v[dst_pos + i] = src_vals[src_pos + i].as_int();
+                                }
+                            }
+                        }
+                        NativePayload::LongArray(v) => {
+                            if dst_pos < v.len() && count > 0 {
+                                let dst_end = dst_pos.saturating_add(count).min(v.len());
+                                let write_count = dst_end.saturating_sub(dst_pos);
+                                for i in 0..write_count {
+                                    v[dst_pos + i] = src_vals[src_pos + i].as_long();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some(JValue::Void)
+            }
+            ("java/lang/reflect/Array", "newInstance", "(Ljava/lang/Class;I)Ljava/lang/Object;") => {
+                let component = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|c| self.class_internal_name_from_obj(c))
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let len = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let arr = match component.as_str() {
+                    "boolean" => JObject::new_array("[Z", vec![JValue::Int(0); len]),
+                    "byte" => JObject::new_array("[B", vec![JValue::Int(0); len]),
+                    "char" => JObject::new_array("[C", vec![JValue::Int(0); len]),
+                    "short" => JObject::new_array("[S", vec![JValue::Int(0); len]),
+                    "int" => JObject::new_array("[I", vec![JValue::Int(0); len]),
+                    "long" => JObject::new_array("[J", vec![JValue::Long(0); len]),
+                    "float" => JObject::new_array("[F", vec![JValue::Float(0.0); len]),
+                    "double" => JObject::new_array("[D", vec![JValue::Double(0.0); len]),
+                    _ if component.starts_with('[') => {
+                        JObject::new_array(format!("[{component}"), vec![JValue::Ref(None); len])
+                    }
+                    _ => JObject::new_array(format!("[L{component};"), vec![JValue::Ref(None); len]),
+                };
+                Some(JValue::Ref(Some(arr)))
+            }
+            ("java/lang/reflect/Array", "newInstance", "(Ljava/lang/Class;[I)Ljava/lang/Object;") => {
+                let component = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|c| self.class_internal_name_from_obj(c))
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let dims = _args
+                    .get(1)
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| match &r.borrow().native {
+                        NativePayload::Array(v) => Some(v.iter().map(|x| x.as_int().max(0) as usize).collect::<Vec<_>>()),
+                        NativePayload::IntArray(v) => Some(v.iter().map(|x| (*x).max(0) as usize).collect::<Vec<_>>()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                if dims.is_empty() {
+                    return Some(JValue::Ref(None));
+                }
+                let base_desc = match component.as_str() {
+                    "boolean" => "Z".to_owned(),
+                    "byte" => "B".to_owned(),
+                    "char" => "C".to_owned(),
+                    "short" => "S".to_owned(),
+                    "int" => "I".to_owned(),
+                    "long" => "J".to_owned(),
+                    "float" => "F".to_owned(),
+                    "double" => "D".to_owned(),
+                    _ if component.starts_with('[') => component,
+                    _ => format!("L{component};"),
+                };
+                let desc = format!("{}{}", "[".repeat(dims.len()), base_desc);
+                Some(JValue::Ref(Some(self.create_multi_array(&desc, &dims, 0))))
+            }
+            ("java/lang/reflect/Array", "getLength", "(Ljava/lang/Object;)I") => {
+                let len = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| match &r.borrow().native {
+                        NativePayload::Array(v) => Some(v.len() as i32),
+                        NativePayload::ByteArray(v) => Some(v.len() as i32),
+                        NativePayload::IntArray(v) => Some(v.len() as i32),
+                        NativePayload::LongArray(v) => Some(v.len() as i32),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                Some(JValue::Int(len))
+            }
+            ("java/lang/reflect/Array", "get", "(Ljava/lang/Object;I)Ljava/lang/Object;") => {
+                let idx = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let v = _args
+                    .first()
+                    .and_then(|x| x.as_ref())
+                    .and_then(|r| match &r.borrow().native {
+                        NativePayload::Array(v) => v.get(idx).cloned(),
+                        NativePayload::ByteArray(v) => v.get(idx).map(|x| JValue::Int(*x as i32)),
+                        NativePayload::IntArray(v) => v.get(idx).map(|x| JValue::Int(*x)),
+                        NativePayload::LongArray(v) => v.get(idx).map(|x| JValue::Long(*x)),
+                        _ => None,
+                    })
+                    .unwrap_or(JValue::Ref(None));
+                Some(self.wrap_primitive_value(v))
+            }
+            ("java/lang/reflect/Array", "set", "(Ljava/lang/Object;ILjava/lang/Object;)V") => {
+                let idx = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let value = _args.get(2).cloned().unwrap_or(JValue::Ref(None));
+                if let Some(r) = _args.first().and_then(|x| x.as_ref()) {
+                    let mut arr = r.borrow_mut();
+                    match &mut arr.native {
+                        NativePayload::Array(v) => {
+                            if idx < v.len() {
+                                v[idx] = value;
+                            }
+                        }
+                        NativePayload::ByteArray(v) => {
+                            if idx < v.len() {
+                                let iv = self.adapt_value_for_descriptor("B", value).as_int();
+                                v[idx] = iv as u8;
+                            }
+                        }
+                        NativePayload::IntArray(v) => {
+                            if idx < v.len() {
+                                let iv = self.adapt_value_for_descriptor("I", value).as_int();
+                                v[idx] = iv;
+                            }
+                        }
+                        NativePayload::LongArray(v) => {
+                            if idx < v.len() {
+                                let lv = self.adapt_value_for_descriptor("J", value).as_long();
+                                v[idx] = lv;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Some(JValue::Void)
+            }
+            _ => None,
+        }
     }
 
     /// Handle instance native methods. Returns `None` if not a known native.
@@ -1820,6 +2159,40 @@ impl Vm {
                     } else { String::new() }
                 } else { String::new() }
             }
+            "([BII)V" | "([BIILjava/lang/String;)V" | "([BIILjava/nio/charset/Charset;)V" => {
+                if let Some(r) = args.first().and_then(|a| a.as_ref()) {
+                    let offset = args.get(1).map(|a| a.as_int().max(0) as usize).unwrap_or(0);
+                    let count = args.get(2).map(|a| a.as_int().max(0) as usize).unwrap_or(0);
+                    if let NativePayload::Array(bytes) = &r.borrow().native {
+                        let end = offset.saturating_add(count).min(bytes.len());
+                        bytes[offset.min(bytes.len())..end]
+                            .iter()
+                            .map(|v| v.as_int() as u8 as char)
+                            .collect()
+                    } else { String::new() }
+                } else { String::new() }
+            }
+            "([BLjava/lang/String;)V" | "([BLjava/nio/charset/Charset;)V" => {
+                if let Some(r) = args.first().and_then(|a| a.as_ref()) {
+                    if let NativePayload::Array(bytes) = &r.borrow().native {
+                        bytes.iter().map(|v| v.as_int() as u8 as char).collect()
+                    } else { String::new() }
+                } else { String::new() }
+            }
+            "([BIII)V" => {
+                if let Some(r) = args.first().and_then(|a| a.as_ref()) {
+                    let _hibyte = args.get(1).map(|a| a.as_int()).unwrap_or(0);
+                    let offset = args.get(2).map(|a| a.as_int().max(0) as usize).unwrap_or(0);
+                    let count = args.get(3).map(|a| a.as_int().max(0) as usize).unwrap_or(0);
+                    if let NativePayload::Array(bytes) = &r.borrow().native {
+                        let end = offset.saturating_add(count).min(bytes.len());
+                        bytes[offset.min(bytes.len())..end]
+                            .iter()
+                            .map(|v| v.as_int() as u8 as char)
+                            .collect()
+                    } else { String::new() }
+                } else { String::new() }
+            }
             "(Ljava/lang/String;)V" => {
                 // String(String) — copy constructor
                 if let Some(r) = args.first().and_then(|a| a.as_ref()) {
@@ -1830,6 +2203,738 @@ impl Vm {
         }
     }
 
+    fn printstream_text_for(&mut self, value: &JValue) -> String {
+        match value {
+            JValue::Void => "void".to_owned(),
+            JValue::Int(i) => i.to_string(),
+            JValue::Long(l) => l.to_string(),
+            JValue::Float(f) => f.to_string(),
+            JValue::Double(d) => d.to_string(),
+            JValue::Ref(None) => "null".to_owned(),
+            JValue::Ref(Some(r)) => {
+                if let Some(s) = r.borrow().as_java_string() {
+                    return s.to_owned();
+                }
+                let class_name = r.borrow().class_name.clone();
+                match self.invoke_virtual(r.clone(), &class_name, "toString", "()Ljava/lang/String;", vec![]) {
+                    Ok(JValue::Ref(Some(sref))) => sref.borrow().as_java_string().unwrap_or("").to_owned(),
+                    _ => format!("{class_name}@obj"),
+                }
+            }
+            JValue::ReturnAddress(a) => format!("ret:{a}"),
+        }
+    }
+
+    fn emit_host_line(is_err: bool, line: &str) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if is_err {
+                console_error(line);
+            } else {
+                console_log(line);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if is_err {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+        }
+    }
+
+    fn write_printstream(&mut self, is_err: bool, text: &str, newline: bool) {
+        let buf = if is_err {
+            &mut self.stderr_buffer
+        } else {
+            &mut self.stdout_buffer
+        };
+        buf.push_str(text);
+        while let Some(pos) = buf.find('\n') {
+            let line = buf[..pos].to_owned();
+            Self::emit_host_line(is_err, &line);
+            buf.drain(..=pos);
+        }
+        if newline {
+            Self::emit_host_line(is_err, buf);
+            buf.clear();
+        }
+    }
+
+    fn class_internal_name_from_obj(&self, class_obj: &JRef) -> Option<String> {
+        class_obj
+            .borrow()
+            .fields
+            .get("__name_internal")
+            .and_then(|v| v.as_ref())
+            .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+    }
+
+    fn class_display_name(internal_name: &str) -> String {
+        if internal_name.starts_with('[') {
+            internal_name.replace('/', ".")
+        } else {
+            internal_name.replace('/', ".")
+        }
+    }
+
+    fn class_internal_name_from_runtime_name(name: &str) -> String {
+        if name.starts_with('[') {
+            name.replace('.', "/")
+        } else {
+            name.replace('.', "/")
+        }
+    }
+
+    fn descriptor_to_runtime_class_name(desc: &str) -> String {
+        match desc.as_bytes().first().copied() {
+            Some(b'B') => "byte".to_owned(),
+            Some(b'C') => "char".to_owned(),
+            Some(b'D') => "double".to_owned(),
+            Some(b'F') => "float".to_owned(),
+            Some(b'I') => "int".to_owned(),
+            Some(b'J') => "long".to_owned(),
+            Some(b'S') => "short".to_owned(),
+            Some(b'Z') => "boolean".to_owned(),
+            Some(b'V') => "void".to_owned(),
+            Some(b'L') => desc
+                .strip_prefix('L')
+                .and_then(|s| s.strip_suffix(';'))
+                .unwrap_or("java/lang/Object")
+                .to_owned(),
+            Some(b'[') => desc.to_owned(),
+            _ => "java/lang/Object".to_owned(),
+        }
+    }
+
+    fn parse_method_descriptor(desc: &str) -> (Vec<String>, String) {
+        let mut params = Vec::new();
+        let bytes = desc.as_bytes();
+        let mut i = 0usize;
+        if bytes.get(i) != Some(&b'(') {
+            return (params, "void".to_owned());
+        }
+        i += 1;
+        while let Some(&b) = bytes.get(i) {
+            if b == b')' {
+                i += 1;
+                break;
+            }
+            let start = i;
+            while bytes.get(i) == Some(&b'[') {
+                i += 1;
+            }
+            match bytes.get(i).copied() {
+                Some(b'L') => {
+                    i += 1;
+                    while bytes.get(i) != Some(&b';') && i < bytes.len() {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1;
+                    }
+                }
+                Some(_) => i += 1,
+                None => break,
+            }
+            let token = &desc[start..i];
+            params.push(Self::descriptor_to_runtime_class_name(token));
+        }
+        let ret = if i <= desc.len() {
+            Self::descriptor_to_runtime_class_name(&desc[i..])
+        } else {
+            "void".to_owned()
+        };
+        (params, ret)
+    }
+
+    fn parse_method_descriptor_tokens(desc: &str) -> (Vec<String>, String) {
+        let mut params = Vec::new();
+        let bytes = desc.as_bytes();
+        let mut i = 0usize;
+        if bytes.get(i) != Some(&b'(') {
+            return (params, "V".to_owned());
+        }
+        i += 1;
+        while let Some(&b) = bytes.get(i) {
+            if b == b')' {
+                i += 1;
+                break;
+            }
+            let start = i;
+            while bytes.get(i) == Some(&b'[') {
+                i += 1;
+            }
+            match bytes.get(i).copied() {
+                Some(b'L') => {
+                    i += 1;
+                    while bytes.get(i) != Some(&b';') && i < bytes.len() {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1;
+                    }
+                }
+                Some(_) => i += 1,
+                None => break,
+            }
+            params.push(desc[start..i].to_owned());
+        }
+        let ret = if i <= desc.len() { desc[i..].to_owned() } else { "V".to_owned() };
+        (params, ret)
+    }
+
+    fn wrap_primitive_value(&self, value: JValue) -> JValue {
+        match value {
+            JValue::Int(i) => {
+                let obj = JObject::new("java/lang/Integer");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Int(i));
+                JValue::Ref(Some(obj))
+            }
+            JValue::Long(l) => {
+                let obj = JObject::new("java/lang/Long");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Long(l));
+                JValue::Ref(Some(obj))
+            }
+            JValue::Float(f) => {
+                let obj = JObject::new("java/lang/Float");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Float(f));
+                JValue::Ref(Some(obj))
+            }
+            JValue::Double(d) => {
+                let obj = JObject::new("java/lang/Double");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Double(d));
+                JValue::Ref(Some(obj))
+            }
+            other => other,
+        }
+    }
+
+    fn unwrap_boxed_primitive(&self, value: &JValue) -> Option<JValue> {
+        let r = value.as_ref()?;
+        let obj = r.borrow();
+        match obj.class_name.as_str() {
+            "java/lang/Integer" | "java/lang/Byte" | "java/lang/Short" | "java/lang/Character" => {
+                obj.fields.get("value").cloned().map(|v| match v {
+                    JValue::Int(i) => JValue::Int(i),
+                    _ => JValue::Int(0),
+                })
+            }
+            "java/lang/Boolean" => {
+                obj.fields.get("value").cloned().map(|v| match v {
+                    JValue::Int(i) => JValue::Int(if i == 0 { 0 } else { 1 }),
+                    _ => JValue::Int(0),
+                })
+            }
+            "java/lang/Long" => obj.fields.get("value").cloned().map(|v| match v {
+                JValue::Long(l) => JValue::Long(l),
+                JValue::Int(i) => JValue::Long(i as i64),
+                _ => JValue::Long(0),
+            }),
+            "java/lang/Float" => obj.fields.get("value").cloned().map(|v| match v {
+                JValue::Float(f) => JValue::Float(f),
+                JValue::Double(d) => JValue::Float(d as f32),
+                JValue::Int(i) => JValue::Float(i as f32),
+                _ => JValue::Float(0.0),
+            }),
+            "java/lang/Double" => obj.fields.get("value").cloned().map(|v| match v {
+                JValue::Double(d) => JValue::Double(d),
+                JValue::Float(f) => JValue::Double(f as f64),
+                JValue::Int(i) => JValue::Double(i as f64),
+                _ => JValue::Double(0.0),
+            }),
+            _ => None,
+        }
+    }
+
+    fn adapt_value_for_descriptor(&self, desc: &str, value: JValue) -> JValue {
+        match desc.as_bytes().first().copied() {
+            Some(b'Z') | Some(b'B') | Some(b'C') | Some(b'S') | Some(b'I') => {
+                match value {
+                    JValue::Int(i) => JValue::Int(i),
+                    JValue::Long(l) => JValue::Int(l as i32),
+                    JValue::Float(f) => JValue::Int(f as i32),
+                    JValue::Double(d) => JValue::Int(d as i32),
+                    JValue::Ref(_) => self.unwrap_boxed_primitive(&value).map(|v| self.adapt_value_for_descriptor("I", v)).unwrap_or(JValue::Int(0)),
+                    _ => JValue::Int(0),
+                }
+            }
+            Some(b'J') => match value {
+                JValue::Long(l) => JValue::Long(l),
+                JValue::Int(i) => JValue::Long(i as i64),
+                JValue::Ref(_) => self.unwrap_boxed_primitive(&value).map(|v| self.adapt_value_for_descriptor("J", v)).unwrap_or(JValue::Long(0)),
+                _ => JValue::Long(0),
+            },
+            Some(b'F') => match value {
+                JValue::Float(f) => JValue::Float(f),
+                JValue::Double(d) => JValue::Float(d as f32),
+                JValue::Int(i) => JValue::Float(i as f32),
+                JValue::Long(l) => JValue::Float(l as f32),
+                JValue::Ref(_) => self.unwrap_boxed_primitive(&value).map(|v| self.adapt_value_for_descriptor("F", v)).unwrap_or(JValue::Float(0.0)),
+                _ => JValue::Float(0.0),
+            },
+            Some(b'D') => match value {
+                JValue::Double(d) => JValue::Double(d),
+                JValue::Float(f) => JValue::Double(f as f64),
+                JValue::Int(i) => JValue::Double(i as f64),
+                JValue::Long(l) => JValue::Double(l as f64),
+                JValue::Ref(_) => self.unwrap_boxed_primitive(&value).map(|v| self.adapt_value_for_descriptor("D", v)).unwrap_or(JValue::Double(0.0)),
+                _ => JValue::Double(0.0),
+            },
+            Some(b'L') | Some(b'[') => match value {
+                JValue::Ref(_) => value,
+                primitive => self.wrap_primitive_value(primitive),
+            },
+            _ => value,
+        }
+    }
+
+    fn collect_reflection_args(&self, args_array: Option<&JRef>) -> Vec<JValue> {
+        if let Some(arr) = args_array {
+            if let NativePayload::Array(v) = &arr.borrow().native {
+                return v.clone();
+            }
+        }
+        Vec::new()
+    }
+
+    fn raise_invocation_target_exception(&mut self, message: &str) {
+        let cause = self.pending_exception.take().unwrap_or_else(|| {
+            let exc = JObject::new("java/lang/RuntimeException");
+            exc.borrow_mut().fields.insert(
+                "detailMessage".to_owned(),
+                JValue::Ref(Some(JObject::new_string(message.to_owned()))),
+            );
+            exc
+        });
+        let ite = JObject::new("java/lang/reflect/InvocationTargetException");
+        ite.borrow_mut().fields.insert("target".to_owned(), JValue::Ref(Some(cause)));
+        self.pending_exception = Some(ite);
+    }
+
+    fn make_class_array(&mut self, class_names: Vec<String>) -> JRef {
+        let values = class_names
+            .into_iter()
+            .map(|n| JValue::Ref(Some(self.class_object(n))))
+            .collect();
+        JObject::new_array("[Ljava/lang/Class;", values)
+    }
+
+    fn build_reflect_field(&mut self, owner: &str, name: &str, desc: &str, access_flags: u16) -> JRef {
+        let obj = JObject::new("java/lang/reflect/Field");
+        {
+            let mut o = obj.borrow_mut();
+            o.fields.insert("clazz".to_owned(), JValue::Ref(Some(self.class_object(owner.to_owned()))));
+            o.fields.insert("name".to_owned(), JValue::Ref(Some(self.intern_string(name.to_owned()))));
+            o.fields.insert("__descriptor".to_owned(), JValue::Ref(Some(self.intern_string(desc.to_owned()))));
+            o.fields.insert(
+                "type".to_owned(),
+                JValue::Ref(Some(self.class_object(Self::descriptor_to_runtime_class_name(desc)))),
+            );
+            o.fields.insert("modifiers".to_owned(), JValue::Int(i32::from(access_flags)));
+        }
+        obj
+    }
+
+    fn build_reflect_method(
+        &mut self,
+        owner: &str,
+        name: &str,
+        method_desc: &str,
+        access_flags: u16,
+        exceptions: Vec<String>,
+    ) -> JRef {
+        let (param_names, return_name) = Self::parse_method_descriptor(method_desc);
+        let param_array = self.make_class_array(param_names);
+        let ex_array = self.make_class_array(exceptions);
+        let obj = JObject::new("java/lang/reflect/Method");
+        {
+            let mut o = obj.borrow_mut();
+            o.fields.insert("clazz".to_owned(), JValue::Ref(Some(self.class_object(owner.to_owned()))));
+            o.fields.insert("name".to_owned(), JValue::Ref(Some(self.intern_string(name.to_owned()))));
+            o.fields.insert("__descriptor".to_owned(), JValue::Ref(Some(self.intern_string(method_desc.to_owned()))));
+            o.fields.insert(
+                "returnType".to_owned(),
+                JValue::Ref(Some(self.class_object(return_name))),
+            );
+            o.fields
+                .insert("parameterTypes".to_owned(), JValue::Ref(Some(param_array)));
+            o.fields
+                .insert("exceptionTypes".to_owned(), JValue::Ref(Some(ex_array)));
+            o.fields.insert("modifiers".to_owned(), JValue::Int(i32::from(access_flags)));
+        }
+        obj
+    }
+
+    fn build_reflect_constructor(
+        &mut self,
+        owner: &str,
+        method_desc: &str,
+        access_flags: u16,
+        exceptions: Vec<String>,
+    ) -> JRef {
+        let (param_names, _) = Self::parse_method_descriptor(method_desc);
+        let param_array = self.make_class_array(param_names);
+        let ex_array = self.make_class_array(exceptions);
+        let obj = JObject::new("java/lang/reflect/Constructor");
+        {
+            let mut o = obj.borrow_mut();
+            o.fields.insert("clazz".to_owned(), JValue::Ref(Some(self.class_object(owner.to_owned()))));
+            o.fields.insert("__descriptor".to_owned(), JValue::Ref(Some(self.intern_string(method_desc.to_owned()))));
+            o.fields
+                .insert("parameterTypes".to_owned(), JValue::Ref(Some(param_array)));
+            o.fields
+                .insert("exceptionTypes".to_owned(), JValue::Ref(Some(ex_array)));
+            o.fields.insert("modifiers".to_owned(), JValue::Int(i32::from(access_flags)));
+        }
+        obj
+    }
+
+    fn build_reflect_record_component(&mut self, owner: &str, name: &str, desc: &str) -> JRef {
+        let obj = JObject::new("java/lang/reflect/RecordComponent");
+        {
+            let mut o = obj.borrow_mut();
+            o.fields.insert("clazz".to_owned(), JValue::Ref(Some(self.class_object(owner.to_owned()))));
+            o.fields.insert("name".to_owned(), JValue::Ref(Some(self.intern_string(name.to_owned()))));
+            o.fields.insert("__descriptor".to_owned(), JValue::Ref(Some(self.intern_string(desc.to_owned()))));
+            o.fields.insert(
+                "type".to_owned(),
+                JValue::Ref(Some(self.class_object(Self::descriptor_to_runtime_class_name(desc)))),
+            );
+        }
+        obj
+    }
+
+    fn read_u8(data: &[u8], p: &mut usize) -> Option<u8> {
+        let b = *data.get(*p)?;
+        *p += 1;
+        Some(b)
+    }
+
+    fn read_u16(data: &[u8], p: &mut usize) -> Option<u16> {
+        let hi = *data.get(*p)? as u16;
+        let lo = *data.get(*p + 1)? as u16;
+        *p += 2;
+        Some((hi << 8) | lo)
+    }
+
+    fn skip_annotation_element_value(data: &[u8], p: &mut usize) -> Option<()> {
+        let tag = Self::read_u8(data, p)?;
+        match tag as char {
+            'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 's' => {
+                let _ = Self::read_u16(data, p)?;
+            }
+            'e' => {
+                let _ = Self::read_u16(data, p)?;
+                let _ = Self::read_u16(data, p)?;
+            }
+            'c' => {
+                let _ = Self::read_u16(data, p)?;
+            }
+            '@' => {
+                Self::skip_annotation(data, p)?;
+            }
+            '[' => {
+                let n = Self::read_u16(data, p)? as usize;
+                for _ in 0..n {
+                    Self::skip_annotation_element_value(data, p)?;
+                }
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    fn skip_annotation(data: &[u8], p: &mut usize) -> Option<()> {
+        let _type_index = Self::read_u16(data, p)?;
+        let pairs = Self::read_u16(data, p)? as usize;
+        for _ in 0..pairs {
+            let _name_index = Self::read_u16(data, p)?;
+            Self::skip_annotation_element_value(data, p)?;
+        }
+        Some(())
+    }
+
+    fn parse_runtime_visible_annotation_types(
+        attrs: &[Attribute],
+        cp: &crate::class_file::ConstantPool,
+    ) -> Vec<String> {
+        let mut types = Vec::new();
+        for attr in attrs {
+            let (name, data) = match attr {
+                Attribute::Unknown { name, data } => (name, data),
+                _ => continue,
+            };
+            if name != "RuntimeVisibleAnnotations" {
+                continue;
+            }
+            let mut p = 0usize;
+            let n = match Self::read_u16(data, &mut p) {
+                Some(v) => v as usize,
+                None => continue,
+            };
+            for _ in 0..n {
+                let type_index = match Self::read_u16(data, &mut p) {
+                    Some(v) => v,
+                    None => break,
+                };
+                let desc = cp.utf8(type_index).to_owned();
+                if let Some(inner) = desc.strip_prefix('L').and_then(|s| s.strip_suffix(';')) {
+                    types.push(inner.to_owned());
+                }
+                let pairs = match Self::read_u16(data, &mut p) {
+                    Some(v) => v as usize,
+                    None => break,
+                };
+                for _ in 0..pairs {
+                    if Self::read_u16(data, &mut p).is_none() {
+                        break;
+                    }
+                    if Self::skip_annotation_element_value(data, &mut p).is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+        types
+    }
+
+    fn cp_const_to_jvalue(&mut self, cp: &crate::class_file::ConstantPool, idx: u16) -> Option<JValue> {
+        match cp.get(idx) {
+            ConstantPoolEntry::Integer(v) => Some(JValue::Int(*v)),
+            ConstantPoolEntry::Long(v) => Some(JValue::Long(*v)),
+            ConstantPoolEntry::Float(v) => Some(JValue::Float(*v)),
+            ConstantPoolEntry::Double(v) => Some(JValue::Double(*v)),
+            ConstantPoolEntry::String { string_index } => {
+                let s = cp.utf8(*string_index).to_owned();
+                Some(JValue::Ref(Some(self.intern_string(s))))
+            }
+            ConstantPoolEntry::Utf8(s) => Some(JValue::Ref(Some(self.intern_string(s.clone())))),
+            _ => None,
+        }
+    }
+
+    fn parse_annotation_element_value(
+        &mut self,
+        data: &[u8],
+        p: &mut usize,
+        cp: &crate::class_file::ConstantPool,
+    ) -> Option<JValue> {
+        let tag = Self::read_u8(data, p)? as char;
+        match tag {
+            'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 's' => {
+                let const_idx = Self::read_u16(data, p)?;
+                self.cp_const_to_jvalue(cp, const_idx)
+            }
+            'e' => {
+                let type_name_index = Self::read_u16(data, p)?;
+                let const_name_index = Self::read_u16(data, p)?;
+                let t = cp.utf8(type_name_index);
+                let c = cp.utf8(const_name_index);
+                Some(JValue::Ref(Some(self.intern_string(format!("{t}.{c}")))))
+            }
+            'c' => {
+                let class_info_index = Self::read_u16(data, p)?;
+                let desc = cp.utf8(class_info_index);
+                Some(JValue::Ref(Some(self.class_object(Self::descriptor_to_runtime_class_name(desc)))))
+            }
+            '@' => {
+                let ann = self.parse_one_runtime_visible_annotation(data, p, cp)?;
+                Some(JValue::Ref(Some(ann)))
+            }
+            '[' => {
+                let n = Self::read_u16(data, p)? as usize;
+                let mut vals = Vec::with_capacity(n);
+                for _ in 0..n {
+                    vals.push(self.parse_annotation_element_value(data, p, cp).unwrap_or(JValue::Ref(None)));
+                }
+                Some(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vals))))
+            }
+            _ => None,
+        }
+    }
+
+    fn parse_one_runtime_visible_annotation(
+        &mut self,
+        data: &[u8],
+        p: &mut usize,
+        cp: &crate::class_file::ConstantPool,
+    ) -> Option<JRef> {
+        let type_index = Self::read_u16(data, p)?;
+        let desc = cp.utf8(type_index).to_owned();
+        let ann_class = desc.strip_prefix('L')?.strip_suffix(';')?.to_owned();
+        let pairs = Self::read_u16(data, p)? as usize;
+        let ann_obj = JObject::new(ann_class.clone());
+        {
+            let mut o = ann_obj.borrow_mut();
+            o.fields.insert(
+                "__ann_type".to_owned(),
+                JValue::Ref(Some(self.class_object(ann_class))),
+            );
+        }
+        for _ in 0..pairs {
+            let name_index = Self::read_u16(data, p)?;
+            let name = cp.utf8(name_index).to_owned();
+            let value = self
+                .parse_annotation_element_value(data, p, cp)
+                .unwrap_or(JValue::Ref(None));
+            ann_obj
+                .borrow_mut()
+                .fields
+                .insert(format!("__ann_{name}"), value);
+        }
+        Some(ann_obj)
+    }
+
+    fn parse_runtime_visible_annotations(
+        &mut self,
+        attrs: &[Attribute],
+        cp: &crate::class_file::ConstantPool,
+    ) -> Vec<JRef> {
+        let mut anns = Vec::new();
+        for attr in attrs {
+            let (name, data) = match attr {
+                Attribute::Unknown { name, data } => (name, data),
+                _ => continue,
+            };
+            if name != "RuntimeVisibleAnnotations" {
+                continue;
+            }
+            let mut p = 0usize;
+            let n = match Self::read_u16(data, &mut p) {
+                Some(v) => v as usize,
+                None => continue,
+            };
+            for _ in 0..n {
+                if let Some(ann) = self.parse_one_runtime_visible_annotation(data, &mut p, cp) {
+                    anns.push(ann);
+                } else {
+                    break;
+                }
+            }
+        }
+        anns
+    }
+
+    fn parse_runtime_visible_parameter_annotation_types(
+        attrs: &[Attribute],
+        cp: &crate::class_file::ConstantPool,
+        param_count: usize,
+    ) -> Vec<Vec<String>> {
+        let mut out = vec![Vec::new(); param_count];
+        for attr in attrs {
+            let (name, data) = match attr {
+                Attribute::Unknown { name, data } => (name, data),
+                _ => continue,
+            };
+            if name != "RuntimeVisibleParameterAnnotations" {
+                continue;
+            }
+            let mut p = 0usize;
+            let declared = match Self::read_u8(data, &mut p) {
+                Some(v) => v as usize,
+                None => continue,
+            };
+            for i in 0..declared {
+                let n = match Self::read_u16(data, &mut p) {
+                    Some(v) => v as usize,
+                    None => break,
+                };
+                let mut ann_types = Vec::new();
+                for _ in 0..n {
+                    let type_index = match Self::read_u16(data, &mut p) {
+                        Some(v) => v,
+                        None => break,
+                    };
+                    let desc = cp.utf8(type_index).to_owned();
+                    if let Some(inner) = desc.strip_prefix('L').and_then(|s| s.strip_suffix(';')) {
+                        ann_types.push(inner.to_owned());
+                    }
+                    let pairs = match Self::read_u16(data, &mut p) {
+                        Some(v) => v as usize,
+                        None => break,
+                    };
+                    for _ in 0..pairs {
+                        if Self::read_u16(data, &mut p).is_none() {
+                            break;
+                        }
+                        if Self::skip_annotation_element_value(data, &mut p).is_none() {
+                            break;
+                        }
+                    }
+                }
+                if i < out.len() {
+                    out[i] = ann_types;
+                }
+            }
+        }
+        out
+    }
+
+    fn parse_runtime_visible_parameter_annotations(
+        &mut self,
+        attrs: &[Attribute],
+        cp: &crate::class_file::ConstantPool,
+        param_count: usize,
+    ) -> Vec<Vec<JRef>> {
+        let mut out = vec![Vec::new(); param_count];
+        for attr in attrs {
+            let (name, data) = match attr {
+                Attribute::Unknown { name, data } => (name, data),
+                _ => continue,
+            };
+            if name != "RuntimeVisibleParameterAnnotations" {
+                continue;
+            }
+            let mut p = 0usize;
+            let declared = match Self::read_u8(data, &mut p) {
+                Some(v) => v as usize,
+                None => continue,
+            };
+            for i in 0..declared {
+                let n = match Self::read_u16(data, &mut p) {
+                    Some(v) => v as usize,
+                    None => break,
+                };
+                let mut anns = Vec::new();
+                for _ in 0..n {
+                    if let Some(ann) = self.parse_one_runtime_visible_annotation(data, &mut p, cp) {
+                        anns.push(ann);
+                    } else {
+                        break;
+                    }
+                }
+                if i < out.len() {
+                    out[i] = anns;
+                }
+            }
+        }
+        out
+    }
+
+    fn build_annotation_array(&self, annotation_types: Vec<String>) -> JValue {
+        let vals = annotation_types
+            .into_iter()
+            .map(|ann| JValue::Ref(Some(JObject::new(ann))))
+            .collect();
+        JValue::Ref(Some(JObject::new_array(
+            "[Ljava/lang/annotation/Annotation;",
+            vals,
+        )))
+    }
+
+    fn build_annotation_ref_array(&self, annotation_refs: Vec<JRef>) -> JValue {
+        let vals = annotation_refs
+            .into_iter()
+            .map(|ann| JValue::Ref(Some(ann)))
+            .collect();
+        JValue::Ref(Some(JObject::new_array(
+            "[Ljava/lang/annotation/Annotation;",
+            vals,
+        )))
+    }
+
     fn native_virtual(
         &mut self,
         this: &JRef,
@@ -1838,8 +2943,739 @@ impl Vm {
         _descriptor: &str,
         _args: &[JValue],
     ) -> Option<JValue> {
+        if _class_name == "java/lang/Object" {
+            match method_name {
+                "hashCode" => {
+                    let ptr = Rc::as_ptr(this) as usize;
+                    return Some(JValue::Int((ptr as u64 as u32) as i32));
+                }
+                "getClass" => {
+                    let runtime_class = this.borrow().class_name.clone();
+                    return Some(JValue::Ref(Some(self.class_object(runtime_class))));
+                }
+                _ => {}
+            }
+        }
         let cn = this.borrow().class_name.clone();
         match (cn.as_str(), method_name) {
+            ("java/lang/Class", "getName") => {
+                let internal = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                Some(JValue::Ref(Some(self.intern_string(Self::class_display_name(&internal)))))
+            }
+            ("java/lang/Class", "getModifiers") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let mods = self
+                    .classes
+                    .get(&target)
+                    .map(|cf| i32::from(cf.access_flags))
+                    .unwrap_or(0);
+                Some(JValue::Int(mods))
+            }
+            ("java/lang/Class", "isInstance") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let obj_class = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .map(|r| r.borrow().class_name.clone());
+                let result = match obj_class {
+                    Some(rc) => self.is_instance_of(&rc, &target),
+                    None => false,
+                };
+                Some(JValue::Int(if result { 1 } else { 0 }))
+            }
+            ("java/lang/Class", "isAssignableFrom") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let other = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|c| self.class_internal_name_from_obj(c));
+                let result = other
+                    .as_ref()
+                    .map(|o| self.is_instance_of(o, &target))
+                    .unwrap_or(false);
+                Some(JValue::Int(if result { 1 } else { 0 }))
+            }
+            ("java/lang/Class", "isInterface") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let is_iface = self
+                    .classes
+                    .get(&target)
+                    .map(|cf| (cf.access_flags & 0x0200) != 0)
+                    .unwrap_or(false);
+                Some(JValue::Int(if is_iface { 1 } else { 0 }))
+            }
+            ("java/lang/Class", "getComponentType") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                if !target.starts_with('[') {
+                    return Some(JValue::Ref(None));
+                }
+                let elem = &target[1..];
+                let comp = match elem.as_bytes().first().copied() {
+                    Some(b'B') => "byte".to_owned(),
+                    Some(b'C') => "char".to_owned(),
+                    Some(b'D') => "double".to_owned(),
+                    Some(b'F') => "float".to_owned(),
+                    Some(b'I') => "int".to_owned(),
+                    Some(b'J') => "long".to_owned(),
+                    Some(b'S') => "short".to_owned(),
+                    Some(b'Z') => "boolean".to_owned(),
+                    Some(b'[') => elem.to_owned(),
+                    Some(b'L') if elem.ends_with(';') => {
+                        elem[1..elem.len() - 1].to_owned()
+                    }
+                    _ => "java/lang/Object".to_owned(),
+                };
+                Some(JValue::Ref(Some(self.class_object(comp))))
+            }
+            ("java/lang/Class", "getSuperclass") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let super_name = self.classes.get(&target).and_then(|cf| {
+                    if cf.super_class == 0 {
+                        None
+                    } else {
+                        Some(cf.constant_pool.class_name(cf.super_class).to_owned())
+                    }
+                });
+                Some(JValue::Ref(super_name.map(|s| self.class_object(s))))
+            }
+            ("java/lang/Class", "getInterfaces") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let iface_names: Vec<String> = if target.starts_with('[') {
+                    vec!["java/lang/Cloneable".to_owned(), "java/io/Serializable".to_owned()]
+                } else if let Some(cf) = self.classes.get(&target) {
+                    cf.interfaces
+                        .iter()
+                        .map(|idx| cf.constant_pool.class_name(*idx).to_owned())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let vals = iface_names
+                    .into_iter()
+                    .map(|n| JValue::Ref(Some(self.class_object(n))))
+                    .collect();
+                Some(JValue::Ref(Some(JObject::new_array(
+                    "[Ljava/lang/Class;",
+                    vals,
+                ))))
+            }
+            ("java/lang/Class", "getEnumConstants") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let _ = self.ensure_class_init(&target);
+                let key = format!("{target}.$VALUES");
+                if let Some(JValue::Ref(Some(arr))) = self.static_fields.get(&key).cloned() {
+                    let cloned = match self.invoke_virtual(
+                        arr.clone(),
+                        "java/lang/Object",
+                        "clone",
+                        "()Ljava/lang/Object;",
+                        vec![],
+                    ) {
+                        Ok(v) => v,
+                        Err(_) => JValue::Ref(Some(arr)),
+                    };
+                    Some(cloned)
+                } else {
+                    Some(JValue::Ref(None))
+                }
+            }
+            ("java/lang/Class", "isRecord") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let is_record = self
+                    .classes
+                    .get(&target)
+                    .map(|cf| cf.attributes.iter().any(|a| matches!(a, Attribute::Record { .. })))
+                    .unwrap_or(false);
+                Some(JValue::Int(if is_record { 1 } else { 0 }))
+            }
+            ("java/lang/Class", "getRecordComponents") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let mut comps_meta: Vec<(String, String)> = Vec::new();
+                if let Some(cf) = self.classes.get(&target) {
+                    for attr in &cf.attributes {
+                        if let Attribute::Record { components } = attr {
+                            for c in components {
+                                let name = cf.constant_pool.utf8(c.name_index).to_owned();
+                                let desc = cf.constant_pool.utf8(c.descriptor_index).to_owned();
+                                comps_meta.push((name, desc));
+                            }
+                        }
+                    }
+                }
+                if comps_meta.is_empty() {
+                    return Some(JValue::Ref(None));
+                }
+                let comps = comps_meta
+                    .into_iter()
+                    .map(|(n, d)| JValue::Ref(Some(self.build_reflect_record_component(&target, &n, &d))))
+                    .collect();
+                Some(JValue::Ref(Some(JObject::new_array(
+                    "[Ljava/lang/reflect/RecordComponent;",
+                    comps,
+                ))))
+            }
+            ("java/lang/Class", "getDeclaredAnnotations") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let anns = if let Some(cf) = self.classes.get(&target) {
+                    let attrs = cf.attributes.clone();
+                    let cp_entries = cf.constant_pool.entries.clone();
+                    let cp = crate::class_file::ConstantPool { entries: cp_entries };
+                    self.parse_runtime_visible_annotations(&attrs, &cp)
+                } else {
+                    Vec::new()
+                };
+                Some(self.build_annotation_ref_array(anns))
+            }
+            ("java/lang/Class", "getDeclaredFields0") | ("java/lang/Class", "getDeclaredFields") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let mut out = Vec::new();
+                let mut members: Vec<(String, String, u16)> = Vec::new();
+                if let Some(cf) = self.classes.get(&target) {
+                    for f in &cf.fields {
+                        if public_only && (f.access_flags & 0x0001) == 0 {
+                            continue;
+                        }
+                        let name = cf.constant_pool.utf8(f.name_index).to_owned();
+                        let desc = cf.constant_pool.utf8(f.descriptor_index).to_owned();
+                        members.push((name, desc, f.access_flags));
+                    }
+                }
+                for (name, desc, flags) in members {
+                    out.push(JValue::Ref(Some(self.build_reflect_field(&target, &name, &desc, flags))));
+                }
+                Some(JValue::Ref(Some(JObject::new_array(
+                    "[Ljava/lang/reflect/Field;",
+                    out,
+                ))))
+            }
+            ("java/lang/Class", "getDeclaredMethods0") | ("java/lang/Class", "getDeclaredMethods") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let mut out = Vec::new();
+                let mut members: Vec<(String, String, u16, Vec<String>)> = Vec::new();
+                if let Some(cf) = self.classes.get(&target) {
+                    for m in &cf.methods {
+                        if public_only && (m.access_flags & 0x0001) == 0 {
+                            continue;
+                        }
+                        let name = cf.constant_pool.utf8(m.name_index).to_owned();
+                        if name == "<init>" || name == "<clinit>" {
+                            continue;
+                        }
+                        let desc = cf.constant_pool.utf8(m.descriptor_index).to_owned();
+                        let mut ex = Vec::new();
+                        for attr in &m.attributes {
+                            if let Attribute::Exceptions { exception_index_table } = attr {
+                                ex = exception_index_table
+                                    .iter()
+                                    .map(|idx| cf.constant_pool.class_name(*idx).to_owned())
+                                    .collect();
+                            }
+                        }
+                        members.push((name, desc, m.access_flags, ex));
+                    }
+                }
+                for (name, desc, flags, ex) in members {
+                    out.push(JValue::Ref(Some(self.build_reflect_method(
+                        &target, &name, &desc, flags, ex,
+                    ))));
+                }
+                Some(JValue::Ref(Some(JObject::new_array(
+                    "[Ljava/lang/reflect/Method;",
+                    out,
+                ))))
+            }
+            ("java/lang/Class", "getDeclaredConstructors0")
+            | ("java/lang/Class", "getDeclaredConstructors") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let mut out = Vec::new();
+                let mut members: Vec<(String, u16, Vec<String>)> = Vec::new();
+                if let Some(cf) = self.classes.get(&target) {
+                    for m in &cf.methods {
+                        if public_only && (m.access_flags & 0x0001) == 0 {
+                            continue;
+                        }
+                        let name = cf.constant_pool.utf8(m.name_index).to_owned();
+                        if name != "<init>" {
+                            continue;
+                        }
+                        let desc = cf.constant_pool.utf8(m.descriptor_index).to_owned();
+                        let mut ex = Vec::new();
+                        for attr in &m.attributes {
+                            if let Attribute::Exceptions { exception_index_table } = attr {
+                                ex = exception_index_table
+                                    .iter()
+                                    .map(|idx| cf.constant_pool.class_name(*idx).to_owned())
+                                    .collect();
+                            }
+                        }
+                        members.push((desc, m.access_flags, ex));
+                    }
+                }
+                for (desc, flags, ex) in members {
+                    out.push(JValue::Ref(Some(self.build_reflect_constructor(
+                        &target, &desc, flags, ex,
+                    ))));
+                }
+                Some(JValue::Ref(Some(JObject::new_array(
+                    "[Ljava/lang/reflect/Constructor;",
+                    out,
+                ))))
+            }
+            ("java/lang/reflect/Executable", "getParameterAnnotations")
+            | ("java/lang/reflect/Method", "getParameterAnnotations")
+            | ("java/lang/reflect/Constructor", "getParameterAnnotations") => {
+                let runtime_cn = this.borrow().class_name.clone();
+                let (owner, method_name, desc, param_count) = if runtime_cn == "java/lang/reflect/Method" {
+                    let m = this.borrow();
+                    let owner = m.fields.get("clazz")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|c| self.class_internal_name_from_obj(c))
+                        .unwrap_or_else(|| "java/lang/Object".to_owned());
+                    let method_name = m.fields.get("name")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let desc = m.fields.get("__descriptor")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let param_count = m.fields.get("parameterTypes")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|arr| match &arr.borrow().native {
+                            NativePayload::Array(v) => Some(v.len()),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    (owner, method_name, desc, param_count)
+                } else {
+                    let c = this.borrow();
+                    let owner = c.fields.get("clazz")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|k| self.class_internal_name_from_obj(k))
+                        .unwrap_or_else(|| "java/lang/Object".to_owned());
+                    let desc = c.fields.get("__descriptor")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let param_count = c.fields.get("parameterTypes")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|arr| match &arr.borrow().native {
+                            NativePayload::Array(v) => Some(v.len()),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    (owner, "<init>".to_owned(), desc, param_count)
+                };
+
+                let per_param = if let Some(cf) = self.classes.get(&owner) {
+                    if let Some(mi) = cf.methods.iter().find(|m| {
+                        cf.constant_pool.utf8(m.name_index) == method_name
+                            && cf.constant_pool.utf8(m.descriptor_index) == desc
+                    }) {
+                        let attrs = mi.attributes.clone();
+                        let cp_entries = cf.constant_pool.entries.clone();
+                        let cp = crate::class_file::ConstantPool { entries: cp_entries };
+                        self.parse_runtime_visible_parameter_annotations(&attrs, &cp, param_count)
+                    } else {
+                        vec![Vec::new(); param_count]
+                    }
+                } else {
+                    vec![Vec::new(); param_count]
+                };
+                let outer = per_param
+                    .into_iter()
+                    .map(|ann_refs| self.build_annotation_ref_array(ann_refs))
+                    .collect();
+                Some(JValue::Ref(Some(JObject::new_array(
+                    "[[Ljava/lang/annotation/Annotation;",
+                    outer,
+                ))))
+            }
+            ("java/lang/reflect/Method", "invoke") => {
+                let (owner, name, desc, modifiers) = {
+                    let m = this.borrow();
+                    let owner = m.fields.get("clazz")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|c| self.class_internal_name_from_obj(c))
+                        .unwrap_or_else(|| "java/lang/Object".to_owned());
+                    let name = m.fields.get("name")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let desc = m.fields.get("__descriptor")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_else(|| "()Ljava/lang/Object;".to_owned());
+                    let modifiers = m.fields.get("modifiers").map(|v| v.as_int()).unwrap_or(0);
+                    (owner, name, desc, modifiers)
+                };
+
+                let recv = _args.first().cloned().unwrap_or(JValue::Ref(None));
+                let arg_array = _args.get(1).and_then(|v| v.as_ref());
+                let raw_args = self.collect_reflection_args(arg_array);
+                let (param_tokens, ret_token) = Self::parse_method_descriptor_tokens(&desc);
+                let mut call_args = Vec::with_capacity(param_tokens.len());
+                for (i, p) in param_tokens.iter().enumerate() {
+                    let src = raw_args.get(i).cloned().unwrap_or_else(|| default_value_for_descriptor(p));
+                    call_args.push(self.adapt_value_for_descriptor(p, src));
+                }
+
+                let result = if (modifiers & 0x0008) != 0 {
+                    self.invoke_static(&owner, &name, &desc, call_args)
+                } else {
+                    match recv {
+                        JValue::Ref(Some(r)) => self.invoke_virtual(r, &owner, &name, &desc, call_args),
+                        _ => Ok(JValue::Ref(None)),
+                    }
+                };
+
+                let out = match result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.raise_invocation_target_exception(&e);
+                        return Some(JValue::Ref(None));
+                    }
+                };
+                if ret_token == "V" {
+                    Some(JValue::Ref(None))
+                } else if !matches!(ret_token.as_bytes().first(), Some(b'L' | b'[')) {
+                    Some(self.wrap_primitive_value(out))
+                } else {
+                    Some(out)
+                }
+            }
+            ("java/lang/reflect/Method", "getDeclaredAnnotations") => {
+                let (owner, name, desc) = {
+                    let m = this.borrow();
+                    let owner = m.fields.get("clazz")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|c| self.class_internal_name_from_obj(c))
+                        .unwrap_or_else(|| "java/lang/Object".to_owned());
+                    let name = m.fields.get("name")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let desc = m.fields.get("__descriptor")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    (owner, name, desc)
+                };
+                let anns = if let Some(cf) = self.classes.get(&owner) {
+                    if let Some(mi) = cf.methods.iter().find(|m| {
+                        cf.constant_pool.utf8(m.name_index) == name && cf.constant_pool.utf8(m.descriptor_index) == desc
+                    }) {
+                        let attrs = mi.attributes.clone();
+                        let cp_entries = cf.constant_pool.entries.clone();
+                        let cp = crate::class_file::ConstantPool { entries: cp_entries };
+                        self.parse_runtime_visible_annotations(&attrs, &cp)
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                Some(self.build_annotation_ref_array(anns))
+            }
+            ("java/lang/reflect/Constructor", "newInstance") => {
+                let (owner, desc) = {
+                    let c = this.borrow();
+                    let owner = c.fields.get("clazz")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|k| self.class_internal_name_from_obj(k))
+                        .unwrap_or_else(|| "java/lang/Object".to_owned());
+                    let desc = c.fields.get("__descriptor")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_else(|| "()V".to_owned());
+                    (owner, desc)
+                };
+                let arg_array = _args.first().and_then(|v| v.as_ref());
+                let raw_args = self.collect_reflection_args(arg_array);
+                let (param_tokens, _) = Self::parse_method_descriptor_tokens(&desc);
+                let mut call_args = Vec::with_capacity(param_tokens.len());
+                for (i, p) in param_tokens.iter().enumerate() {
+                    let src = raw_args.get(i).cloned().unwrap_or_else(|| default_value_for_descriptor(p));
+                    call_args.push(self.adapt_value_for_descriptor(p, src));
+                }
+                let obj = JObject::new(owner.clone());
+                if let Err(e) = self.invoke_virtual(obj.clone(), &owner, "<init>", &desc, call_args) {
+                    self.raise_invocation_target_exception(&e);
+                    return Some(JValue::Ref(None));
+                }
+                Some(JValue::Ref(Some(obj)))
+            }
+            ("java/lang/reflect/Constructor", "getDeclaredAnnotations") => {
+                let (owner, desc) = {
+                    let c = this.borrow();
+                    let owner = c.fields.get("clazz")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|k| self.class_internal_name_from_obj(k))
+                        .unwrap_or_else(|| "java/lang/Object".to_owned());
+                    let desc = c.fields.get("__descriptor")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    (owner, desc)
+                };
+                let anns = if let Some(cf) = self.classes.get(&owner) {
+                    if let Some(mi) = cf.methods.iter().find(|m| {
+                        cf.constant_pool.utf8(m.name_index) == "<init>" && cf.constant_pool.utf8(m.descriptor_index) == desc
+                    }) {
+                        let attrs = mi.attributes.clone();
+                        let cp_entries = cf.constant_pool.entries.clone();
+                        let cp = crate::class_file::ConstantPool { entries: cp_entries };
+                        self.parse_runtime_visible_annotations(&attrs, &cp)
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                Some(self.build_annotation_ref_array(anns))
+            }
+            ("java/lang/reflect/Field", "get") => {
+                let (owner, name, desc, modifiers) = {
+                    let f = this.borrow();
+                    let owner = f.fields.get("clazz")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|k| self.class_internal_name_from_obj(k))
+                        .unwrap_or_else(|| "java/lang/Object".to_owned());
+                    let name = f.fields.get("name")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let desc = f.fields.get("__descriptor")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_else(|| "Ljava/lang/Object;".to_owned());
+                    let modifiers = f.fields.get("modifiers").map(|v| v.as_int()).unwrap_or(0);
+                    (owner, name, desc, modifiers)
+                };
+
+                let raw = if (modifiers & 0x0008) != 0 {
+                    self.static_fields
+                        .get(&format!("{owner}.{name}"))
+                        .cloned()
+                        .unwrap_or_else(|| default_value_for_descriptor(&desc))
+                } else {
+                    match _args.first().and_then(|v| v.as_ref()) {
+                        Some(target) => target.borrow().fields.get(&name).cloned().unwrap_or_else(|| default_value_for_descriptor(&desc)),
+                        None => JValue::Ref(None),
+                    }
+                };
+                if matches!(desc.as_bytes().first(), Some(b'L' | b'[')) {
+                    Some(raw)
+                } else {
+                    Some(self.wrap_primitive_value(raw))
+                }
+            }
+            ("java/lang/reflect/Field", "set") => {
+                let (owner, name, desc, modifiers) = {
+                    let f = this.borrow();
+                    let owner = f.fields.get("clazz")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|k| self.class_internal_name_from_obj(k))
+                        .unwrap_or_else(|| "java/lang/Object".to_owned());
+                    let name = f.fields.get("name")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let desc = f.fields.get("__descriptor")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_else(|| "Ljava/lang/Object;".to_owned());
+                    let modifiers = f.fields.get("modifiers").map(|v| v.as_int()).unwrap_or(0);
+                    (owner, name, desc, modifiers)
+                };
+                let val = _args.get(1).cloned().unwrap_or(JValue::Ref(None));
+                let adapted = self.adapt_value_for_descriptor(&desc, val);
+                if (modifiers & 0x0008) != 0 {
+                    self.static_fields.insert(format!("{owner}.{name}"), adapted);
+                } else if let Some(target) = _args.first().and_then(|v| v.as_ref()) {
+                    target.borrow_mut().fields.insert(name, adapted);
+                }
+                Some(JValue::Void)
+            }
+            ("java/lang/reflect/Field", "getDeclaredAnnotations") => {
+                let (owner, name, desc) = {
+                    let f = this.borrow();
+                    let owner = f.fields.get("clazz")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|k| self.class_internal_name_from_obj(k))
+                        .unwrap_or_else(|| "java/lang/Object".to_owned());
+                    let name = f.fields.get("name")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let desc = f.fields.get("__descriptor")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    (owner, name, desc)
+                };
+                let anns = if let Some(cf) = self.classes.get(&owner) {
+                    if let Some(fi) = cf.fields.iter().find(|f| {
+                        cf.constant_pool.utf8(f.name_index) == name && cf.constant_pool.utf8(f.descriptor_index) == desc
+                    }) {
+                        let attrs = fi.attributes.clone();
+                        let cp_entries = cf.constant_pool.entries.clone();
+                        let cp = crate::class_file::ConstantPool { entries: cp_entries };
+                        self.parse_runtime_visible_annotations(&attrs, &cp)
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+                Some(self.build_annotation_ref_array(anns))
+            }
+            ("java/lang/reflect/RecordComponent", "getDeclaredAnnotations") => {
+                let (owner, name, desc) = {
+                    let rc = this.borrow();
+                    let owner = rc.fields.get("clazz")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|k| self.class_internal_name_from_obj(k))
+                        .unwrap_or_else(|| "java/lang/Object".to_owned());
+                    let name = rc.fields.get("name")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let desc = rc.fields.get("__descriptor")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    (owner, name, desc)
+                };
+                let ann_src = self.classes.get(&owner).and_then(|cf| {
+                    for attr in &cf.attributes {
+                        if let Attribute::Record { components } = attr {
+                            if let Some(c) = components.iter().find(|c| {
+                                cf.constant_pool.utf8(c.name_index) == name
+                                    && cf.constant_pool.utf8(c.descriptor_index) == desc
+                            }) {
+                                let attrs = c.attributes.clone();
+                                let cp_entries = cf.constant_pool.entries.clone();
+                                let cp = crate::class_file::ConstantPool { entries: cp_entries };
+                                return Some((attrs, cp));
+                            }
+                        }
+                    }
+                    None
+                });
+                let anns = if let Some((attrs, cp)) = ann_src {
+                    self.parse_runtime_visible_annotations(&attrs, &cp)
+                } else {
+                    Vec::new()
+                };
+                Some(self.build_annotation_ref_array(anns))
+            }
+            ("java/lang/reflect/Field", "getBoolean") => {
+                let v = self.native_virtual(this, _class_name, "get", _descriptor, _args)?;
+                let i = self.adapt_value_for_descriptor("Z", v).as_int();
+                Some(JValue::Int(if i == 0 { 0 } else { 1 }))
+            }
+            ("java/lang/reflect/Field", "getByte") => {
+                let v = self.native_virtual(this, _class_name, "get", _descriptor, _args)?;
+                Some(self.adapt_value_for_descriptor("B", v))
+            }
+            ("java/lang/reflect/Field", "getChar") => {
+                let v = self.native_virtual(this, _class_name, "get", _descriptor, _args)?;
+                Some(self.adapt_value_for_descriptor("C", v))
+            }
+            ("java/lang/reflect/Field", "getShort") => {
+                let v = self.native_virtual(this, _class_name, "get", _descriptor, _args)?;
+                Some(self.adapt_value_for_descriptor("S", v))
+            }
+            ("java/lang/reflect/Field", "getInt") => {
+                let v = self.native_virtual(this, _class_name, "get", _descriptor, _args)?;
+                Some(self.adapt_value_for_descriptor("I", v))
+            }
+            ("java/lang/reflect/Field", "getLong") => {
+                let v = self.native_virtual(this, _class_name, "get", _descriptor, _args)?;
+                Some(self.adapt_value_for_descriptor("J", v))
+            }
+            ("java/lang/reflect/Field", "getFloat") => {
+                let v = self.native_virtual(this, _class_name, "get", _descriptor, _args)?;
+                Some(self.adapt_value_for_descriptor("F", v))
+            }
+            ("java/lang/reflect/Field", "getDouble") => {
+                let v = self.native_virtual(this, _class_name, "get", _descriptor, _args)?;
+                Some(self.adapt_value_for_descriptor("D", v))
+            }
+            ("java/lang/reflect/Field", "setBoolean") => {
+                let mut a = vec![_args.first().cloned().unwrap_or(JValue::Ref(None))];
+                a.push(self.adapt_value_for_descriptor("Z", _args.get(1).cloned().unwrap_or(JValue::Int(0))));
+                self.native_virtual(this, _class_name, "set", _descriptor, &a)
+            }
+            ("java/lang/reflect/Field", "setByte") => {
+                let mut a = vec![_args.first().cloned().unwrap_or(JValue::Ref(None))];
+                a.push(self.adapt_value_for_descriptor("B", _args.get(1).cloned().unwrap_or(JValue::Int(0))));
+                self.native_virtual(this, _class_name, "set", _descriptor, &a)
+            }
+            ("java/lang/reflect/Field", "setChar") => {
+                let mut a = vec![_args.first().cloned().unwrap_or(JValue::Ref(None))];
+                a.push(self.adapt_value_for_descriptor("C", _args.get(1).cloned().unwrap_or(JValue::Int(0))));
+                self.native_virtual(this, _class_name, "set", _descriptor, &a)
+            }
+            ("java/lang/reflect/Field", "setShort") => {
+                let mut a = vec![_args.first().cloned().unwrap_or(JValue::Ref(None))];
+                a.push(self.adapt_value_for_descriptor("S", _args.get(1).cloned().unwrap_or(JValue::Int(0))));
+                self.native_virtual(this, _class_name, "set", _descriptor, &a)
+            }
+            ("java/lang/reflect/Field", "setInt") => {
+                let mut a = vec![_args.first().cloned().unwrap_or(JValue::Ref(None))];
+                a.push(self.adapt_value_for_descriptor("I", _args.get(1).cloned().unwrap_or(JValue::Int(0))));
+                self.native_virtual(this, _class_name, "set", _descriptor, &a)
+            }
+            ("java/lang/reflect/Field", "setLong") => {
+                let mut a = vec![_args.first().cloned().unwrap_or(JValue::Ref(None))];
+                a.push(self.adapt_value_for_descriptor("J", _args.get(1).cloned().unwrap_or(JValue::Long(0))));
+                self.native_virtual(this, _class_name, "set", _descriptor, &a)
+            }
+            ("java/lang/reflect/Field", "setFloat") => {
+                let mut a = vec![_args.first().cloned().unwrap_or(JValue::Ref(None))];
+                a.push(self.adapt_value_for_descriptor("F", _args.get(1).cloned().unwrap_or(JValue::Float(0.0))));
+                self.native_virtual(this, _class_name, "set", _descriptor, &a)
+            }
+            ("java/lang/reflect/Field", "setDouble") => {
+                let mut a = vec![_args.first().cloned().unwrap_or(JValue::Ref(None))];
+                a.push(self.adapt_value_for_descriptor("D", _args.get(1).cloned().unwrap_or(JValue::Double(0.0))));
+                self.native_virtual(this, _class_name, "set", _descriptor, &a)
+            }
             // String native methods — backed by NativePayload::JavaString in Rust.
             ("java/lang/String", "toString") => {
                 let s = this.borrow().as_java_string().unwrap_or("").to_owned();
@@ -1960,8 +3796,42 @@ impl Vm {
                 let bytes: Vec<JValue> = s.bytes().map(|b| JValue::Int(b as i32)).collect();
                 Some(JValue::Ref(Some(JObject::new_array("[B", bytes))))
             }
-            // PrintStream — discard output (playground captures differently).
+            (c, "clone") if c == "java/lang/Object" || c.starts_with('[') => {
+                let src = this.borrow();
+                let mut fields = HashMap::new();
+                for (k, v) in &src.fields {
+                    fields.insert(k.clone(), v.clone());
+                }
+                let native = match &src.native {
+                    NativePayload::None => NativePayload::None,
+                    NativePayload::JavaString(s) => NativePayload::JavaString(s.clone()),
+                    NativePayload::Array(v) => NativePayload::Array(v.clone()),
+                    NativePayload::ByteArray(v) => NativePayload::ByteArray(v.clone()),
+                    NativePayload::IntArray(v) => NativePayload::IntArray(v.clone()),
+                    NativePayload::LongArray(v) => NativePayload::LongArray(v.clone()),
+                    NativePayload::PrintStream(is_err) => NativePayload::PrintStream(*is_err),
+                    NativePayload::Lambda(f) => NativePayload::Lambda(f.clone()),
+                    NativePayload::BytecodeLambda { impl_class, impl_method, impl_desc, ref_kind, captured } =>
+                        NativePayload::BytecodeLambda {
+                            impl_class: impl_class.clone(),
+                            impl_method: impl_method.clone(),
+                            impl_desc: impl_desc.clone(),
+                            ref_kind: *ref_kind,
+                            captured: captured.clone(),
+                        },
+                };
+                let cloned = Rc::new(RefCell::new(crate::heap::JObject {
+                    class_name: src.class_name.clone(),
+                    fields,
+                    native,
+                }));
+                Some(JValue::Ref(Some(cloned)))
+            }
+            // PrintStream native bridge.
             ("java/io/PrintStream", "println") | ("java/io/PrintStream", "print") => {
+                let is_err = matches!(this.borrow().native, NativePayload::PrintStream(true));
+                let text = _args.first().map(|v| self.printstream_text_for(v)).unwrap_or_default();
+                self.write_printstream(is_err, &text, method_name == "println");
                 Some(JValue::Void)
             }
             // System.arraycopy — native

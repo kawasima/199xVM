@@ -400,6 +400,7 @@ export interface ClassDecl {
   recordComponents?: ParamDecl[];
   fields: FieldDecl[];
   methods: MethodDecl[];
+  nestedClasses: ClassDecl[];
   importMap: Map<string, string>; // simpleName -> internal JVM name
   packageImports: string[]; // package names for import-on-demand (e.g. "java/util")
   staticWildcardImports: string[]; // owner class internal names for import static T.*
@@ -601,9 +602,10 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       expect(TokenKind.LBrace);
       const recordFields: FieldDecl[] = [];
       const recordMethods: MethodDecl[] = [];
+      const recordNestedClasses: ClassDecl[] = [];
       // Parse any explicitly declared methods inside the record body
       while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
-        parseMember(recordFields, recordMethods, recordName, true);
+        parseMember(recordFields, recordMethods, recordNestedClasses, recordName, true);
       }
       expect(TokenKind.RBrace);
 
@@ -687,6 +689,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         recordComponents: components,
         fields: recordFields,
         methods: recordMethods,
+        nestedClasses: recordNestedClasses,
         importMap,
         packageImports,
         staticWildcardImports,
@@ -710,9 +713,10 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
     const fields: FieldDecl[] = [];
     const methods: MethodDecl[] = [];
+    const nestedClasses: ClassDecl[] = [];
 
     while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
-      parseMember(fields, methods, className, false);
+      parseMember(fields, methods, nestedClasses, className, false);
     }
     expect(TokenKind.RBrace);
 
@@ -723,13 +727,14 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       recordComponents: [],
       fields,
       methods,
+      nestedClasses,
       importMap,
       packageImports,
       staticWildcardImports,
     };
   }
 
-  function parseMember(fields: FieldDecl[], methods: MethodDecl[], ownerName: string, inRecord: boolean) {
+  function parseMember(fields: FieldDecl[], methods: MethodDecl[], nestedClasses: ClassDecl[], ownerName: string, inRecord: boolean) {
     let isStatic = false;
 
     // Consume modifiers
@@ -740,9 +745,49 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       break;
     }
 
+    // Static nested class: static class Inner { ... }
+    if (at(TokenKind.KwClass) && isStatic) {
+      advance(); // consume 'class'
+      const nestedName = expect(TokenKind.Ident).value;
+      const mangledName = ownerName + "$" + nestedName;
+      let nestedSuper = "java/lang/Object";
+      if (match(TokenKind.KwExtends)) {
+        nestedSuper = parseQualifiedName().replace(/\./g, "/");
+      }
+      if (match(TokenKind.KwImplements)) {
+        parseQualifiedName();
+        while (match(TokenKind.Comma)) parseQualifiedName();
+      }
+      expect(TokenKind.LBrace);
+      const nf: FieldDecl[] = [];
+      const nm: MethodDecl[] = [];
+      const nnc: ClassDecl[] = [];
+      while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
+        parseMember(nf, nm, nnc, mangledName, false);
+      }
+      expect(TokenKind.RBrace);
+      // Register simple name so outer class can refer to "Inner" as "Outer$Inner"
+      importMap.set(nestedName, mangledName);
+      nestedClasses.push({
+        name: mangledName,
+        superClass: nestedSuper,
+        isRecord: false,
+        recordComponents: [],
+        fields: nf,
+        methods: nm,
+        nestedClasses: nnc,
+        importMap,
+        packageImports,
+        staticWildcardImports,
+      });
+      return;
+    }
+
     // Constructor: modifiers followed by ClassName(...)
     // Detected by lookahead: current token is Ident and next is '('
-    if (at(TokenKind.Ident) && tokens[pos + 1]?.kind === TokenKind.LParen && peek().value === ownerName) {
+    // For nested classes, match either the mangled name (Outer$Inner) or the simple name (Inner).
+    const simpleOwnerName = ownerName.includes("$") ? ownerName.slice(ownerName.lastIndexOf("$") + 1) : ownerName;
+    if (at(TokenKind.Ident) && tokens[pos + 1]?.kind === TokenKind.LParen && (peek().value === ownerName || peek().value === simpleOwnerName)) {
       advance(); // constructor name
       expect(TokenKind.LParen);
       const params: ParamDecl[] = [];
@@ -2144,6 +2189,11 @@ let knownMethods: Record<string, MethodSig> = {
   "java/lang/String.toString()": { owner: "java/lang/String", returnType: "String", paramTypes: [] },
   // Object
   "java/lang/Object.toString()": { owner: "java/lang/Object", returnType: "String", paramTypes: [] },
+  "java/lang/Object.getClass()": {
+    owner: "java/lang/Object",
+    returnType: { className: "java/lang/Class" },
+    paramTypes: [],
+  },
   // StringBuilder
   "java/lang/StringBuilder.<init>()": { owner: "java/lang/StringBuilder", returnType: "void", paramTypes: [] },
   "java/lang/StringBuilder.append(Ljava/lang/String;)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["String"] },
@@ -2210,6 +2260,67 @@ let knownMethods: Record<string, MethodSig> = {
   "java/io/PrintStream.println(Ljava/lang/Object;)": { owner: "java/io/PrintStream", returnType: "void", paramTypes: [{ className: "java/lang/Object" }] },
   "java/io/PrintStream.print(Ljava/lang/String;)": { owner: "java/io/PrintStream", returnType: "void", paramTypes: ["String"] },
   "java/io/PrintStream.print(I)": { owner: "java/io/PrintStream", returnType: "void", paramTypes: ["int"] },
+  // Class / reflection
+  "java/lang/Class.getName()": {
+    owner: "java/lang/Class",
+    returnType: "String",
+    paramTypes: [],
+  },
+  "java/lang/Class.isInstance(Ljava/lang/Object;)": {
+    owner: "java/lang/Class",
+    returnType: "boolean",
+    paramTypes: [{ className: "java/lang/Object" }],
+  },
+  "java/lang/Class.getDeclaredFields()": {
+    owner: "java/lang/Class",
+    returnType: { array: { className: "java/lang/reflect/Field" } },
+    paramTypes: [],
+  },
+  "java/lang/Class.getDeclaredMethods()": {
+    owner: "java/lang/Class",
+    returnType: { array: { className: "java/lang/reflect/Method" } },
+    paramTypes: [],
+  },
+  "java/lang/Class.getDeclaredConstructors()": {
+    owner: "java/lang/Class",
+    returnType: { array: { className: "java/lang/reflect/Constructor" } },
+    paramTypes: [],
+  },
+  "java/lang/Class.getInterfaces()": {
+    owner: "java/lang/Class",
+    returnType: { array: { className: "java/lang/Class" } },
+    paramTypes: [],
+  },
+  "java/lang/Class.getSuperclass()": {
+    owner: "java/lang/Class",
+    returnType: { className: "java/lang/Class" },
+    paramTypes: [],
+  },
+  "java/lang/Class.isInterface()": {
+    owner: "java/lang/Class",
+    returnType: "boolean",
+    paramTypes: [],
+  },
+  "java/lang/Class.isAssignableFrom(Ljava/lang/Class;)": {
+    owner: "java/lang/Class",
+    returnType: "boolean",
+    paramTypes: [{ className: "java/lang/Class" }],
+  },
+  "java/lang/Class.getModifiers()": {
+    owner: "java/lang/Class",
+    returnType: "int",
+    paramTypes: [],
+  },
+  "java/lang/Class.isRecord()": {
+    owner: "java/lang/Class",
+    returnType: "boolean",
+    paramTypes: [],
+  },
+  "java/lang/Class.getRecordComponents()": {
+    owner: "java/lang/Class",
+    returnType: { array: { className: "java/lang/reflect/RecordComponent" } },
+    paramTypes: [],
+  },
 };
 
 /** Merge an externally-built method registry into the known methods table. */
@@ -4209,9 +4320,21 @@ function validateConstructorBody(method: MethodDecl): void {
 // Produce bundle bytes for all classes in source.
 // Bundle format: for each class, 4-byte big-endian length followed by .class bytes.
 // For a single class, returns just the raw .class bytes (backward compat with index.html).
+// Recursively collect all nested classes into a flat list.
+function flattenClasses(decls: ClassDecl[]): ClassDecl[] {
+  const result: ClassDecl[] = [];
+  for (const cd of decls) {
+    result.push(cd);
+    if (cd.nestedClasses.length > 0) {
+      result.push(...flattenClasses(cd.nestedClasses));
+    }
+  }
+  return result;
+}
+
 export function compile(source: string): Uint8Array {
   const tokens = lex(source);
-  const classDecls = parseAll(tokens);
+  const classDecls = flattenClasses(parseAll(tokens));
   if (classDecls.length === 1) {
     return generateClassFile(classDecls[0], classDecls);
   }

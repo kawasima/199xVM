@@ -26,6 +26,16 @@ public class Collections {
     }
 
     @SuppressWarnings("unchecked")
+    public static <T extends Comparable<? super T>> Comparator<T> reverseOrder() {
+        return (a, b) -> b.compareTo(a);
+    }
+
+    public static <T> Comparator<T> reverseOrder(Comparator<T> cmp) {
+        if (cmp == null) throw new NullPointerException();
+        return (a, b) -> cmp.compare(b, a);
+    }
+
+    @SuppressWarnings("unchecked")
     private static void swap(List<?> list, int i, int j) {
         List rawList = list;
         Object tmp = rawList.get(i);
@@ -95,6 +105,18 @@ public class Collections {
         }
         @Override public void clear() {
             throw new UnsupportedOperationException();
+        }
+        @Override @SuppressWarnings("unchecked")
+        public ListIterator<E> listIterator() {
+            return (ListIterator<E>) list.listIterator();
+        }
+        @Override @SuppressWarnings("unchecked")
+        public ListIterator<E> listIterator(int index) {
+            return (ListIterator<E>) list.listIterator(index);
+        }
+        @Override
+        public List<E> subList(int fromIndex, int toIndex) {
+            return new UnmodifiableList<>(list.subList(fromIndex, toIndex));
         }
 
         @Override

@@ -325,6 +325,27 @@ public class ArrayList<E> implements List<E> {
         return new Itr();
     }
 
+    @Override
+    public ListIterator<E> listIterator() {
+        return new ListItr(0);
+    }
+
+    @Override
+    public ListIterator<E> listIterator(int index) {
+        return new ListItr(index);
+    }
+
+    @Override
+    public List<E> subList(int fromIndex, int toIndex) {
+        if (fromIndex < 0 || toIndex > size || fromIndex > toIndex) throw new IndexOutOfBoundsException();
+        ArrayList<E> sub = new ArrayList<>(toIndex - fromIndex);
+        for (int i = fromIndex; i < toIndex; i++) {
+            @SuppressWarnings("unchecked") E e = (E) elementData[i];
+            sub.add(e);
+        }
+        return sub;
+    }
+
     private class Itr implements Iterator<E> {
         int cursor = 0;
 
@@ -334,6 +355,19 @@ public class ArrayList<E> implements List<E> {
         @Override
         @SuppressWarnings("unchecked")
         public E next() { return (E) elementData[cursor++]; }
+    }
+
+    private class ListItr extends Itr implements ListIterator<E> {
+        ListItr(int index) { this.cursor = index; }
+        @Override public boolean hasPrevious() { return cursor > 0; }
+        @Override @SuppressWarnings("unchecked") public E previous() { return (E) elementData[--cursor]; }
+        @Override public int nextIndex() { return cursor; }
+        @Override public int previousIndex() { return cursor - 1; }
+        @Override public void set(E e) {
+            if (cursor <= 0 || cursor > size) throw new IndexOutOfBoundsException();
+            elementData[cursor - 1] = e;
+        }
+        @Override public void add(E e) { ArrayList.this.add(cursor++, e); }
     }
 
     @Override

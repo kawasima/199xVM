@@ -269,6 +269,15 @@ public final class StringBuilder implements CharSequence {
         return endIndex - beginIndex;
     }
 
+    public StringBuilder repeat(char c, int count) {
+        if (count < 0) throw new IllegalArgumentException("count < 0");
+        ensureCapacity(this.count + count);
+        for (int i = 0; i < count; i++) {
+            value[this.count++] = c;
+        }
+        return this;
+    }
+
     @Override
     public int length() {
         return count;

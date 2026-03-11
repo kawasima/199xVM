@@ -67,23 +67,29 @@ pub fn run_static_native(
 ) -> String {
     let mut vm = Vm::new();
     load_bundle(&mut vm, class_bundle);
-    match vm.invoke_static(main_class, method_name, descriptor, vec![]) {
+    let out = match vm.invoke_static(main_class, method_name, descriptor, vec![]) {
         Ok(result) => {
             // If the result is a non-String object, call toString() on it.
             if let JValue::Ref(Some(ref r)) = result {
                 let is_java_string = matches!(r.borrow().native, heap::NativePayload::JavaString(_));
                 if !is_java_string {
                     let class_name = r.borrow().class_name.clone();
-                    match vm.invoke_virtual(r.clone(), &class_name, "toString", "()Ljava/lang/String;", vec![]) {
-                        Ok(s) => return jvalue_to_string(&s),
-                        Err(_) => {}
+                    if let Ok(s) = vm.invoke_virtual(r.clone(), &class_name, "toString", "()Ljava/lang/String;", vec![]) {
+                        jvalue_to_string(&s)
+                    } else {
+                        jvalue_to_string(&result)
                     }
+                } else {
+                    jvalue_to_string(&result)
                 }
+            } else {
+                jvalue_to_string(&result)
             }
-            jvalue_to_string(&result)
         }
         Err(e) => format!("ERROR: {e}"),
-    }
+    };
+    vm.flush_printstreams();
+    out
 }
 
 /// Load classes from bundle bytes into a VM.

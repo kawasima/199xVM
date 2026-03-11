@@ -377,6 +377,22 @@ describe("Parser", () => {
     assert.equal(classes[1].name, "B");
   });
 
+  test("static nested class parses with mangled name", () => {
+    const src = `public class Outer {
+      static class Inner {
+        int x;
+        int getX() { return x; }
+      }
+    }`;
+    const classes = parseAll(lex(src));
+    assert.equal(classes.length, 1);
+    assert.equal(classes[0].name, "Outer");
+    assert.equal(classes[0].nestedClasses.length, 1);
+    assert.equal(classes[0].nestedClasses[0].name, "Outer$Inner");
+    assert.equal(classes[0].nestedClasses[0].fields.length, 1);
+    assert.equal(classes[0].nestedClasses[0].methods.length, 1);
+  });
+
   test("array type in parameters", () => {
     const src = `public class ArrParam {
       public static void sort(int[] arr) {}
@@ -831,6 +847,27 @@ describe("Code generator", () => {
     assert.ok(
       !(bytes[0] === 0xCA && bytes[1] === 0xFE && bytes[2] === 0xBA && bytes[3] === 0xBE),
       "multi-class bundle is not a raw .class"
+    );
+    assert.ok(bytes.length > 100, "bundle has content");
+  });
+
+  test("compiles static nested class into bundle", () => {
+    const src = `public class Outer {
+      static class Inner {
+        int value;
+        public Inner(int v) { value = v; }
+        public int getValue() { return value; }
+      }
+      public static String run() {
+        Inner i = new Inner(42);
+        return "" + i.getValue();
+      }
+    }`;
+    const bytes = compile(src);
+    // Should produce a multi-class bundle (Outer + Outer$Inner)
+    assert.ok(
+      !(bytes[0] === 0xCA && bytes[1] === 0xFE && bytes[2] === 0xBA && bytes[3] === 0xBE),
+      "nested class produces a bundle, not a single .class"
     );
     assert.ok(bytes.length > 100, "bundle has content");
   });
@@ -1385,6 +1422,7 @@ describe("Runtime (WASM)", () => {
     }`, "RuntimeSwitchExpr");
     assert.equal(result, "kind=release score=3");
   });
+
 });
 
 // ============================================================================

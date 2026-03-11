@@ -1,6 +1,15 @@
 package java.lang;
 
 public final class Double extends Number implements Comparable<Double> {
+    public static final double POSITIVE_INFINITY = 1.0d / 0.0d;
+    public static final double NEGATIVE_INFINITY = -1.0d / 0.0d;
+    public static final double NaN = 0.0d / 0.0d;
+    public static final int MAX_EXPONENT = 1023;
+    public static final int MIN_EXPONENT = -1022;
+    public static final int SIZE = 64;
+    public static final int BYTES = 8;
+    public static final int PRECISION = 53;
+    public static final Class<Double> TYPE = null;
     private final double value;
 
     public Double(double value) { this.value = value; }
@@ -34,5 +43,18 @@ public final class Double extends Number implements Comparable<Double> {
         return 0;
     }
 
+    public static boolean isInfinite(double v) {
+        return v == POSITIVE_INFINITY || v == NEGATIVE_INFINITY;
+    }
+
+    public static boolean isNaN(double v) {
+        return v != v;
+    }
+
+    public static boolean isFinite(double v) {
+        return !isInfinite(v) && !isNaN(v);
+    }
+
     public static native long doubleToLongBits(double value);
+    public static native double longBitsToDouble(long bits);
 }

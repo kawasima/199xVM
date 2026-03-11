@@ -1,5 +1,11 @@
 package java.util;
 
+import java.util.function.Consumer;
+import java.util.function.IntFunction;
+import java.util.function.Predicate;
+import java.util.stream.Stream;
+import java.util.stream.StreamImpl;
+
 public interface Collection<E> extends Iterable<E> {
     int size();
     boolean isEmpty();
@@ -69,5 +75,41 @@ public interface Collection<E> extends Iterable<E> {
         }
         if (a.length > s) a[s] = null;
         return a;
+    }
+
+    default <T> T[] toArray(IntFunction<T[]> generator) {
+        return toArray(generator.apply(size()));
+    }
+
+    default void forEach(Consumer<? super E> action) {
+        Iterator<E> it = iterator();
+        while (it.hasNext()) action.accept(it.next());
+    }
+
+    default boolean removeIf(Predicate<? super E> filter) {
+        boolean removed = false;
+        Iterator<E> it = iterator();
+        while (it.hasNext()) {
+            if (filter.test(it.next())) {
+                it.remove();
+                removed = true;
+            }
+        }
+        return removed;
+    }
+
+    default Spliterator<E> spliterator() {
+        return null;
+    }
+
+    default Stream<E> stream() {
+        ArrayList<E> copy = new ArrayList<>();
+        Iterator<E> it = iterator();
+        while (it.hasNext()) copy.add(it.next());
+        return new StreamImpl<>(copy);
+    }
+
+    default Stream<E> parallelStream() {
+        return stream();
     }
 }

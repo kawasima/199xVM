@@ -7,4 +7,8 @@ public interface Stream<T> {
     <R> Stream<R> map(Function<? super T, ? extends R> mapper);
     Stream<T> filter(Predicate<? super T> predicate);
     <R> R collect(Collector<? super T, ?, R> collector);
+
+    default java.util.List<T> toList() {
+        return collect(Collectors.toList());
+    }
 }

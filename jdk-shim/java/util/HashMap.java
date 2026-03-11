@@ -412,6 +412,14 @@ public class HashMap<K, V> implements Map<K, V> {
         public V2 getValue() { return (V2) values[index]; }
 
         @Override
+        @SuppressWarnings("unchecked")
+        public V2 setValue(V2 value) {
+            V2 old = (V2) values[index];
+            values[index] = value;
+            return old;
+        }
+
+        @Override
         public String toString() {
             return getKey() + "=" + getValue();
         }
