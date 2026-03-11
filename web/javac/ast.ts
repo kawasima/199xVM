@@ -2,7 +2,9 @@ export type Type = "int" | "long" | "short" | "byte" | "char" | "float" | "doubl
 
 export interface ClassDecl {
   name: string;
+  kind?: "class" | "interface" | "enum" | "annotation";
   superClass: string;
+  interfaces?: string[];
   isRecord?: boolean;
   recordComponents?: ParamDecl[];
   fields: FieldDecl[];
@@ -28,6 +30,7 @@ export interface MethodDecl {
   params: ParamDecl[];
   body: Stmt[];
   isStatic: boolean;
+  isAbstract?: boolean;
 }
 
 export interface ParamDecl {
