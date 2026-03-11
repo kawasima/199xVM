@@ -37,19 +37,18 @@ impl Vm {
         };
         let descriptor = resolved_descriptor.as_str();
 
-        // If the resolved method is varargs (ACC_VARARGS = 0x0080), pad args with an
-        // empty array when the call site passes fewer arguments than the method expects.
+        // If the resolved method is varargs (ACC_VARARGS = 0x0080), synthesize a single
+        // empty array argument when the call site omits the trailing varargs parameter.
         let mut args = args;
         let expected_arg_count = count_args(descriptor);
         if args.len() < expected_arg_count {
             let is_varargs = self.find_method(class_name, method_name, descriptor)
                 .map(|(_, m)| m.access_flags & 0x0080 != 0)
                 .unwrap_or(false);
-            if is_varargs {
-                // Push empty Object[] for the missing varargs parameter
-                while args.len() < expected_arg_count {
-                    args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
-                }
+            if is_varargs && expected_arg_count - args.len() == 1 {
+                // The JVM only synthesizes the final varargs array; do not silently pad
+                // multiple missing fixed parameters.
+                args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
             }
         }
 

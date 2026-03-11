@@ -11,8 +11,8 @@ use super::descriptors::*;
 use super::{console_error, console_log};
 
 impl super::Vm {
-    /// Handle instance native methods. Returns `None` if not a known native.
-    /// Extract a Rust String from String constructor arguments.
+    /// Extract a Rust `String` from `java/lang/String` constructor arguments based on the method descriptor.
+    /// Returns an empty string if the descriptor is not recognized or arguments are invalid.
     pub(super) fn string_from_init_args(&self, descriptor: &str, args: &[JValue], _this: &JRef) -> String {
         match descriptor {
             "()V" => String::new(),
@@ -20,17 +20,21 @@ impl super::Vm {
                 // String(char[])
                 if let Some(r) = args.first().and_then(|a| a.as_ref()) {
                     if let NativePayload::Array(chars) = &r.borrow().native {
-                        chars.iter().map(|v| char::from(v.as_int() as u8 as u32 as u8)).collect()
+                        chars.iter().map(|v| {
+                            let code = v.as_int() as u32;
+                            char::from_u32(code).unwrap_or('?')
+                        }).collect()
                     } else { String::new() }
                 } else { String::new() }
             }
             "([CII)V" => {
                 // String(char[], offset, count)
                 if let Some(r) = args.first().and_then(|a| a.as_ref()) {
-                    let offset = args.get(1).map(|a| a.as_int() as usize).unwrap_or(0);
-                    let count = args.get(2).map(|a| a.as_int() as usize).unwrap_or(0);
+                    let offset = args.get(1).map(|a| a.as_int().max(0) as usize).unwrap_or(0);
+                    let count = args.get(2).map(|a| a.as_int().max(0) as usize).unwrap_or(0);
                     if let NativePayload::Array(chars) = &r.borrow().native {
-                        chars[offset..offset + count].iter()
+                        let end = offset.saturating_add(count).min(chars.len());
+                        chars[offset.min(chars.len())..end].iter()
                             .map(|v| {
                                 let code = v.as_int() as u32;
                                 char::from_u32(code).unwrap_or('?')
@@ -966,9 +970,10 @@ impl super::Vm {
                 Some(JValue::Int(hash))
             }
             ("java/lang/String", "substring") => {
-                let begin = _args.first().map(|v| v.as_int() as usize).unwrap_or(0);
                 let s = this.borrow().as_java_string().unwrap_or("").to_owned();
-                let end = _args.get(1).map(|v| v.as_int() as usize).unwrap_or(s.len());
+                let char_len = s.chars().count();
+                let begin = (_args.first().map(|v| v.as_int() as usize).unwrap_or(0)).min(char_len);
+                let end = (_args.get(1).map(|v| v.as_int() as usize).unwrap_or(char_len)).min(char_len).max(begin);
                 let sub: String = s.chars().skip(begin).take(end - begin).collect();
                 Some(JValue::Ref(Some(JObject::new_string(sub))))
             }

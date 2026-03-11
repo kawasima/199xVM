@@ -470,8 +470,22 @@ impl Vm {
                 0x60 => { let b = frame.stack.pop().unwrap().as_int(); let a = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Int(a.wrapping_add(b))); } // iadd
                 0x64 => { let b = frame.stack.pop().unwrap().as_int(); let a = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Int(a.wrapping_sub(b))); } // isub
                 0x68 => { let b = frame.stack.pop().unwrap().as_int(); let a = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Int(a.wrapping_mul(b))); } // imul
-                0x6c => { let b = frame.stack.pop().unwrap().as_int(); let a = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Int(a.wrapping_div(b))); } // idiv
-                0x70 => { let b = frame.stack.pop().unwrap().as_int(); let a = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Int(a.wrapping_rem(b))); } // irem
+                0x6c => { // idiv
+                    let b = frame.stack.pop().unwrap().as_int();
+                    if b == 0 {
+                        return Err("java/lang/ArithmeticException: / by zero".to_string());
+                    }
+                    let a = frame.stack.pop().unwrap().as_int();
+                    frame.stack.push(JValue::Int(a.wrapping_div(b)));
+                }
+                0x70 => { // irem
+                    let b = frame.stack.pop().unwrap().as_int();
+                    if b == 0 {
+                        return Err("java/lang/ArithmeticException: / by zero".to_string());
+                    }
+                    let a = frame.stack.pop().unwrap().as_int();
+                    frame.stack.push(JValue::Int(a.wrapping_rem(b)));
+                }
                 0x74 => { let a = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Int(a.wrapping_neg())); } // ineg
                 0x7e => { let b = frame.stack.pop().unwrap().as_int(); let a = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Int(a & b)); } // iand
                 0x80 => { let b = frame.stack.pop().unwrap().as_int(); let a = frame.stack.pop().unwrap().as_int(); frame.stack.push(JValue::Int(a | b)); } // ior
@@ -484,8 +498,22 @@ impl Vm {
                 0x61 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_add(b))); } // ladd
                 0x65 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_sub(b))); } // lsub
                 0x69 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_mul(b))); } // lmul
-                0x6d => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_div(b))); } // ldiv
-                0x71 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_rem(b))); } // lrem
+                0x6d => { // ldiv
+                    let b = frame.stack.pop().unwrap().as_long();
+                    if b == 0 {
+                        return Err("java/lang/ArithmeticException: / by zero".to_string());
+                    }
+                    let a = frame.stack.pop().unwrap().as_long();
+                    frame.stack.push(JValue::Long(a.wrapping_div(b)));
+                }
+                0x71 => { // lrem
+                    let b = frame.stack.pop().unwrap().as_long();
+                    if b == 0 {
+                        return Err("java/lang/ArithmeticException: / by zero".to_string());
+                    }
+                    let a = frame.stack.pop().unwrap().as_long();
+                    frame.stack.push(JValue::Long(a.wrapping_rem(b)));
+                }
                 0x75 => { let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a.wrapping_neg())); } // lneg
                 0x7f => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a & b)); } // land
                 0x81 => { let b = frame.stack.pop().unwrap().as_long(); let a = frame.stack.pop().unwrap().as_long(); frame.stack.push(JValue::Long(a | b)); } // lor
