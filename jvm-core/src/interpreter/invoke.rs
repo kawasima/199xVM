@@ -205,6 +205,9 @@ impl Vm {
                 .cloned()
                 .collect();
             if let Some(v) = self.native_virtual(&this, &class_name_owned, method_name, &descriptor_owned, &virt_args) {
+                if let Some(err) = self.pending_exception_err() {
+                    return Err(err);
+                }
                 return Ok(v);
             }
             return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));

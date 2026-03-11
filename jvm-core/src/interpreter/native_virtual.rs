@@ -938,7 +938,7 @@ impl super::Vm {
                 Some(JValue::Ref(Some(JObject::new_string(s))))
             }
             ("java/lang/String", "length") => {
-                let len = this.borrow().as_java_string().map(|s| s.len() as i32).unwrap_or(0);
+                let len = this.borrow().as_java_string().map(|s| s.chars().count() as i32).unwrap_or(0);
                 Some(JValue::Int(len))
             }
             ("java/lang/String", "charAt") => {
@@ -1014,11 +1014,16 @@ impl super::Vm {
                 let idx = match _args.first() {
                     Some(JValue::Ref(Some(r))) => {
                         let needle = r.borrow().as_java_string().unwrap_or("").to_owned();
-                        s.find(&needle).map(|i| i as i32).unwrap_or(-1)
+                        // Return char-index, not byte-index
+                        s.find(needle.as_str()).map(|byte_pos| {
+                            s[..byte_pos].chars().count() as i32
+                        }).unwrap_or(-1)
                     }
                     Some(JValue::Int(ch)) => {
                         let c = char::from_u32(*ch as u32).unwrap_or('\0');
-                        s.find(c).map(|i| i as i32).unwrap_or(-1)
+                        s.find(c).map(|byte_pos| {
+                            s[..byte_pos].chars().count() as i32
+                        }).unwrap_or(-1)
                     }
                     _ => -1,
                 };
@@ -1026,9 +1031,21 @@ impl super::Vm {
             }
             ("java/lang/String", "lastIndexOf") => {
                 let s = this.borrow().as_java_string().unwrap_or("").to_owned();
-                let ch = _args.first().map(|v| v.as_int()).unwrap_or(0);
-                let c = char::from_u32(ch as u32).unwrap_or('\0');
-                let idx = s.rfind(c).map(|i| i as i32).unwrap_or(-1);
+                let idx = match _args.first() {
+                    Some(JValue::Ref(Some(r))) => {
+                        let needle = r.borrow().as_java_string().unwrap_or("").to_owned();
+                        s.rfind(needle.as_str()).map(|byte_pos| {
+                            s[..byte_pos].chars().count() as i32
+                        }).unwrap_or(-1)
+                    }
+                    Some(JValue::Int(ch)) => {
+                        let c = char::from_u32(*ch as u32).unwrap_or('\0');
+                        s.rfind(c).map(|byte_pos| {
+                            s[..byte_pos].chars().count() as i32
+                        }).unwrap_or(-1)
+                    }
+                    _ => -1,
+                };
                 Some(JValue::Int(idx))
             }
             ("java/lang/String", "trim") => {
@@ -1103,8 +1120,29 @@ impl super::Vm {
             }
             // System.arraycopy — native
             ("java/lang/System", "arraycopy") => {
-                // Handled separately if needed.
-                None
+                // arraycopy(src, srcPos, dest, destPos, length)
+                let src_ref = _args.first().and_then(|v| v.as_ref());
+                let src_pos = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let dest_ref = _args.get(2).and_then(|v| v.as_ref());
+                let dest_pos = _args.get(3).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let length = _args.get(4).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                if let (Some(src), Some(dest)) = (src_ref, dest_ref) {
+                    let src_elems: Vec<JValue> = if let NativePayload::Array(v) = &src.borrow().native {
+                        let end = (src_pos + length).min(v.len());
+                        v[src_pos.min(v.len())..end].to_vec()
+                    } else {
+                        vec![]
+                    };
+                    if let NativePayload::Array(v) = &mut dest.borrow_mut().native {
+                        for (i, elem) in src_elems.into_iter().enumerate() {
+                            let di = dest_pos + i;
+                            if di < v.len() {
+                                v[di] = elem;
+                            }
+                        }
+                    }
+                }
+                Some(JValue::Void)
             }
             _ => None,
         }
