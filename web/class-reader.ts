@@ -160,10 +160,13 @@ export function parseBundleMeta(bundle: Uint8Array): ClassMeta[] {
 /** Convert a single JVM field descriptor to a compiler Type. */
 export function descriptorToType(desc: string): Type {
   switch (desc[0]) {
-    case "B": case "C": case "S": case "I": return "int";
+    case "B": return "byte";
+    case "C": return "char";
+    case "S": return "short";
+    case "I": return "int";
     case "J": return "long";
-    case "F": return "int"; // float — fallback
-    case "D": return "int"; // double — fallback
+    case "F": return "float";
+    case "D": return "double";
     case "Z": return "boolean";
     case "V": return "void";
     case "L": {
@@ -195,10 +198,13 @@ export function parseMethodDescriptor(desc: string): { params: Type[]; ret: Type
 
 function parseOneDescriptor(desc: string, start: number): [Type, number] {
   switch (desc[start]) {
-    case "B": case "C": case "S": case "I": return ["int", 1];
-    case "J": return ["int", 1];
-    case "F": return ["int", 1];
-    case "D": return ["int", 1];
+    case "B": return ["byte", 1];
+    case "C": return ["char", 1];
+    case "S": return ["short", 1];
+    case "I": return ["int", 1];
+    case "J": return ["long", 1];
+    case "F": return ["float", 1];
+    case "D": return ["double", 1];
     case "Z": return ["boolean", 1];
     case "V": return ["void", 1];
     case "L": {

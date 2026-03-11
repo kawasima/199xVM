@@ -390,20 +390,19 @@ impl Vm {
                 full_args.extend(args);
                 // ref_kind 5 = invokeVirtual, 7 = invokeSpecial, 9 = invokeInterface
                 // ref_kind 6 = invokeStatic
-                if ref_kind == 5 || ref_kind == 7 || ref_kind == 9 {
+                let invoked = if ref_kind == 5 || ref_kind == 7 || ref_kind == 9 {
                     // First captured arg is `this` for instance methods.
                     let recv = full_args.remove(0);
                     match recv {
-                        JValue::Ref(Some(r)) => {
-                            return self.invoke_virtual(r, &impl_class, &impl_method, &impl_desc, full_args);
-                        }
-                        _ => return Err(format!(
+                        JValue::Ref(Some(r)) => self.invoke_virtual(r, &impl_class, &impl_method, &impl_desc, full_args),
+                        _ => Err(format!(
                             "Lambda invoke_virtual: expected Ref for this, got {recv:?}"
                         )),
                     }
                 } else {
-                    return self.invoke_static(&impl_class, &impl_method, &impl_desc, full_args);
-                }
+                    self.invoke_static(&impl_class, &impl_method, &impl_desc, full_args)
+                }?;
+                return self.adapt_lambda_return(descriptor, &impl_desc, invoked);
             }
         }
 
@@ -504,6 +503,38 @@ impl Vm {
         self.run_frame(&mut frame, &code, &cp_entries, &class_name_owned, &bootstrap_methods, &exception_table)
     }
 
+    fn adapt_lambda_return(
+        &mut self,
+        sam_descriptor: &str,
+        impl_descriptor: &str,
+        value: JValue,
+    ) -> Result<JValue, String> {
+        let Some(sam_ret) = method_return_descriptor(sam_descriptor) else {
+            return Ok(value);
+        };
+        if !is_reference_descriptor(sam_ret) || matches!(value, JValue::Ref(_) | JValue::Void) {
+            return Ok(value);
+        }
+        let Some(impl_ret) = method_return_descriptor(impl_descriptor) else {
+            return Ok(value);
+        };
+        self.box_primitive_for_lambda(impl_ret, value)
+    }
+
+    fn box_primitive_for_lambda(&mut self, impl_return_desc: &str, value: JValue) -> Result<JValue, String> {
+        match impl_return_desc {
+            "Z" => self.invoke_static("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", vec![value]),
+            "B" => self.invoke_static("java/lang/Byte", "valueOf", "(B)Ljava/lang/Byte;", vec![value]),
+            "S" => self.invoke_static("java/lang/Short", "valueOf", "(S)Ljava/lang/Short;", vec![value]),
+            "C" => self.invoke_static("java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", vec![value]),
+            "I" => self.invoke_static("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", vec![value]),
+            "J" => self.invoke_static("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", vec![value]),
+            "F" => self.invoke_static("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;", vec![value]),
+            "D" => self.invoke_static("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", vec![value]),
+            _ => Ok(value),
+        }
+    }
+
     // ------------------------------------------------------------------
     // Core interpreter loop
     // ------------------------------------------------------------------
@@ -518,6 +549,9 @@ impl Vm {
         exception_table: &[ExceptionTableEntry],
     ) -> Result<JValue, String> {
         loop {
+            if frame.pc >= code.len() {
+                return Err(format!("Execution fell off end of method in {class_name}"));
+            }
             let opcode_pc = frame.pc; // PC of the current instruction (for exception table lookup)
             let opcode = code[frame.pc];
             frame.pc += 1;
@@ -2234,6 +2268,14 @@ fn count_args(descriptor: &str) -> usize {
         }
     }
     count
+}
+
+fn method_return_descriptor(descriptor: &str) -> Option<&str> {
+    descriptor.split_once(')').map(|(_, ret)| ret)
+}
+
+fn is_reference_descriptor(desc: &str) -> bool {
+    matches!(desc.as_bytes().first(), Some(b'L' | b'['))
 }
 
 /// Pop `n` arguments from the operand stack, returned in call order.

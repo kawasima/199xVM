@@ -274,6 +274,12 @@
         <option value="arraylist">ArrayList</option>
         <option value="list_ops">List operations</option>
       </optgroup>
+      <optgroup label="Modern Java">
+        <option value="lambda_method_ref">Lambda &amp; method reference</option>
+        <option value="switch_expr">Switch expression</option>
+        <option value="pattern_matching">Pattern matching</option>
+        <option value="record_modern">Record</option>
+      </optgroup>
     </select>
     <span class="status" id="status">Loading WASM…</span>
   </div>
@@ -613,6 +619,61 @@ public class ListOps {
             sb.append(list.get(i));
         }
         return second + " | " + sb.toString();
+    }
+}
+`,
+      lambda_method_ref: `import java.util.function.Function;
+import java.util.function.Supplier;
+
+public class LambdaMethodRef {
+    public static String run() {
+        Function upper = x -> ((String) x).toUpperCase();
+        Function len = String::length;
+        Supplier bound = "method-ref"::toString;
+        return upper.apply("lambda") + " len=" + len.apply("abcde") + " bound=" + bound.get();
+    }
+}
+`,
+      switch_expr: `public class SwitchExprDemo {
+    public static String run() {
+        String kind = "release";
+        int score = switch (kind) {
+            case "alpha" -> 1;
+            case "beta" -> 2;
+            case "release" -> 3;
+            default -> 0;
+        };
+        return "kind=" + kind + " score=" + score;
+    }
+}
+`,
+      pattern_matching: `record Point(int x, int y) {}
+
+public class PatternMatchingDemo {
+    public static String describe(Object v) {
+        if (v instanceof Point(int a, int b)) {
+            return "point:" + (a + b);
+        }
+        return switch (v) {
+            case String s when s.length() > 3 -> "long:" + s;
+            case String s -> "short:" + s;
+            case null -> "null";
+            default -> "other";
+        };
+    }
+
+    public static String run() {
+        return describe(new Point(2, 5)) + " | " + describe("ok") + " | " + describe("hello");
+    }
+}
+`,
+      record_modern: `record User(String name, int age) {}
+
+public class RecordModernDemo {
+    public static String run() {
+        User u = new User("Mika", 20);
+        User v = new User("Ren", 28);
+        return u.name() + ":" + u.age() + " | " + v.name() + ":" + v.age();
     }
 }
 `,

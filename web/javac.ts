@@ -30,6 +30,9 @@ export enum TokenKind {
   // Literals
   IntLiteral = "IntLiteral",
   LongLiteral = "LongLiteral",
+  FloatLiteral = "FloatLiteral",
+  DoubleLiteral = "DoubleLiteral",
+  CharLiteral = "CharLiteral",
   StringLiteral = "StringLiteral",
   BoolLiteral = "BoolLiteral",
   NullLiteral = "NullLiteral",
@@ -42,6 +45,11 @@ export enum TokenKind {
   KwVoid = "void",
   KwInt = "int",
   KwLong = "long",
+  KwShort = "short",
+  KwByte = "byte",
+  KwChar = "char",
+  KwFloat = "float",
+  KwDouble = "double",
   KwBoolean = "boolean",
   KwString = "String",
   KwReturn = "return",
@@ -146,6 +154,11 @@ const KEYWORDS: Record<string, TokenKind> = {
   void: TokenKind.KwVoid,
   int: TokenKind.KwInt,
   long: TokenKind.KwLong,
+  short: TokenKind.KwShort,
+  byte: TokenKind.KwByte,
+  char: TokenKind.KwChar,
+  float: TokenKind.KwFloat,
+  double: TokenKind.KwDouble,
   boolean: TokenKind.KwBoolean,
   String: TokenKind.KwString,
   return: TokenKind.KwReturn,
@@ -250,6 +263,32 @@ export function lex(source: string): Token[] {
       continue;
     }
 
+    // Char literal
+    if (ch === "'") {
+      advance(); // opening '
+      let charVal: number;
+      if (peek() === "\\") {
+        advance(); // backslash
+        const esc = advance();
+        switch (esc) {
+          case "n": charVal = 10; break;
+          case "t": charVal = 9; break;
+          case "r": charVal = 13; break;
+          case "\\": charVal = 92; break;
+          case "'": charVal = 39; break;
+          case "\"": charVal = 34; break;
+          case "0": charVal = 0; break;
+          default: charVal = esc.charCodeAt(0);
+        }
+      } else {
+        charVal = advance().charCodeAt(0);
+      }
+      if (peek() !== "'") throw new Error(`Unterminated char literal at line ${startLine}:${startCol}`);
+      advance(); // closing '
+      tokens.push({ kind: TokenKind.CharLiteral, value: String(charVal), line: startLine, col: startCol });
+      continue;
+    }
+
     // Number literal
     if (/[0-9]/.test(ch)) {
       let raw = "";
@@ -267,9 +306,34 @@ export function lex(source: string): Token[] {
       } else {
         while (/[0-9_]/.test(peek())) raw += advance();
       }
-      const isLong = peek() === "L" || peek() === "l";
-      if (isLong) raw += advance();
-      tokens.push({ kind: isLong ? TokenKind.LongLiteral : TokenKind.IntLiteral, value: raw, line: startLine, col: startCol });
+      // Decimal point (float/double)
+      let hasDecimal = false;
+      if (peek() === "." && /[0-9]/.test(source[pos + 1] ?? "")) {
+        hasDecimal = true;
+        raw += advance(); // '.'
+        while (/[0-9_]/.test(peek())) raw += advance();
+      }
+      // Exponent
+      if (peek() === "e" || peek() === "E") {
+        hasDecimal = true; // exponent implies floating point
+        raw += advance();
+        if (peek() === "+" || peek() === "-") raw += advance();
+        while (/[0-9_]/.test(peek())) raw += advance();
+      }
+      // Suffix
+      const isFloat = peek() === "f" || peek() === "F";
+      const isDouble = peek() === "d" || peek() === "D";
+      const isLong = !isFloat && !isDouble && (peek() === "L" || peek() === "l");
+      if (isFloat || isDouble || isLong) raw += advance();
+      if (isFloat) {
+        tokens.push({ kind: TokenKind.FloatLiteral, value: raw, line: startLine, col: startCol });
+      } else if (isDouble || hasDecimal) {
+        tokens.push({ kind: TokenKind.DoubleLiteral, value: raw, line: startLine, col: startCol });
+      } else if (isLong) {
+        tokens.push({ kind: TokenKind.LongLiteral, value: raw, line: startLine, col: startCol });
+      } else {
+        tokens.push({ kind: TokenKind.IntLiteral, value: raw, line: startLine, col: startCol });
+      }
       continue;
     }
 
@@ -327,7 +391,7 @@ export function lex(source: string): Token[] {
 // AST
 // ============================================================================
 
-export type Type = "int" | "long" | "boolean" | "void" | "String" | { className: string } | { array: Type };
+export type Type = "int" | "long" | "short" | "byte" | "char" | "float" | "double" | "boolean" | "void" | "String" | { className: string } | { array: Type };
 
 export interface ClassDecl {
   name: string;
@@ -394,6 +458,9 @@ export type Stmt =
 export type Expr =
   | { kind: "intLit"; value: number }
   | { kind: "longLit"; value: number }
+  | { kind: "floatLit"; value: number }
+  | { kind: "doubleLit"; value: number }
+  | { kind: "charLit"; value: number }
   | { kind: "stringLit"; value: string }
   | { kind: "boolLit"; value: boolean }
   | { kind: "nullLit" }
@@ -728,6 +795,11 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     let base: Type;
     if (match(TokenKind.KwInt)) base = "int";
     else if (match(TokenKind.KwLong)) base = "long";
+    else if (match(TokenKind.KwShort)) base = "short";
+    else if (match(TokenKind.KwByte)) base = "byte";
+    else if (match(TokenKind.KwChar)) base = "char";
+    else if (match(TokenKind.KwFloat)) base = "float";
+    else if (match(TokenKind.KwDouble)) base = "double";
     else if (match(TokenKind.KwBoolean)) base = "boolean";
     else if (match(TokenKind.KwVoid)) base = "void";
     else if (match(TokenKind.KwString)) base = "String";
@@ -765,7 +837,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
   function parseSwitchLabel(): SwitchLabel {
     function parsePatternBindVar(): string {
       if (match(TokenKind.KwVar)) return expect(TokenKind.Ident).value;
-      if ((at(TokenKind.KwInt) || at(TokenKind.KwBoolean) || at(TokenKind.KwString) || at(TokenKind.Ident))
+      if ((at(TokenKind.KwInt) || at(TokenKind.KwLong) || at(TokenKind.KwBoolean) || at(TokenKind.KwString) || at(TokenKind.Ident))
           && tokens[pos + 1]?.kind === TokenKind.Ident) {
         advance(); // explicit component type
       }
@@ -1095,7 +1167,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
   function isTypeStart(): boolean {
     const k = peek().kind;
-    return k === TokenKind.KwInt || k === TokenKind.KwBoolean || k === TokenKind.KwVoid
+    return k === TokenKind.KwInt || k === TokenKind.KwLong || k === TokenKind.KwShort || k === TokenKind.KwByte
+      || k === TokenKind.KwChar || k === TokenKind.KwFloat || k === TokenKind.KwDouble
+      || k === TokenKind.KwBoolean || k === TokenKind.KwVoid
       || k === TokenKind.KwString || k === TokenKind.Ident;
   }
 
@@ -1104,7 +1178,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     const saved = pos;
     try {
       // Skip type (including generic params)
-      if (at(TokenKind.KwInt) || at(TokenKind.KwBoolean) || at(TokenKind.KwVoid) || at(TokenKind.KwString)) {
+      if (at(TokenKind.KwInt) || at(TokenKind.KwLong) || at(TokenKind.KwShort) || at(TokenKind.KwByte)
+          || at(TokenKind.KwChar) || at(TokenKind.KwFloat) || at(TokenKind.KwDouble)
+          || at(TokenKind.KwBoolean) || at(TokenKind.KwVoid) || at(TokenKind.KwString)) {
         advance();
         // Skip array suffix []
         if (at(TokenKind.LBracket) && tokens[pos + 1]?.kind === TokenKind.RBracket) { advance(); advance(); }
@@ -1202,6 +1278,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     switch (init.kind) {
       case "intLit": return "int";
       case "longLit": return "long";
+      case "floatLit": return "float";
+      case "doubleLit": return "double";
+      case "charLit": return "char";
       case "boolLit": return "boolean";
       case "stringLit": return "String";
       case "newArray": return { array: init.elemType };
@@ -1239,7 +1318,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         advance();
         function parsePatternBindVar(): string {
           if (match(TokenKind.KwVar)) return expect(TokenKind.Ident).value;
-          if ((at(TokenKind.KwInt) || at(TokenKind.KwBoolean) || at(TokenKind.KwString) || at(TokenKind.Ident))
+          if ((at(TokenKind.KwInt) || at(TokenKind.KwLong) || at(TokenKind.KwBoolean) || at(TokenKind.KwString) || at(TokenKind.Ident))
               && tokens[pos + 1]?.kind === TokenKind.Ident) {
             advance(); // explicit component type
           }
@@ -1391,6 +1470,22 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     if (at(TokenKind.LongLiteral)) {
       return { kind: "longLit", value: parseIntLiteral(advance().value) };
     }
+    // Float literal
+    if (at(TokenKind.FloatLiteral)) {
+      let raw = advance().value.replace(/_/g, "");
+      if (raw.endsWith("f") || raw.endsWith("F")) raw = raw.slice(0, -1);
+      return { kind: "floatLit", value: parseFloat(raw) };
+    }
+    // Double literal
+    if (at(TokenKind.DoubleLiteral)) {
+      let raw = advance().value.replace(/_/g, "");
+      if (raw.endsWith("d") || raw.endsWith("D")) raw = raw.slice(0, -1);
+      return { kind: "doubleLit", value: parseFloat(raw) };
+    }
+    // Char literal
+    if (at(TokenKind.CharLiteral)) {
+      return { kind: "charLit", value: parseInt(advance().value, 10) };
+    }
     // String literal
     if (at(TokenKind.StringLiteral)) {
       return { kind: "stringLit", value: advance().value };
@@ -1487,7 +1582,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       // Heuristic: (Ident) ident | (Ident) this | (Ident) new
       const savedPos = pos;
       advance(); // consume '('
-      if (at(TokenKind.Ident) || at(TokenKind.KwString) || at(TokenKind.KwInt) || at(TokenKind.KwBoolean)) {
+      if (at(TokenKind.Ident) || at(TokenKind.KwString) || at(TokenKind.KwInt) || at(TokenKind.KwLong)
+          || at(TokenKind.KwShort) || at(TokenKind.KwByte) || at(TokenKind.KwChar)
+          || at(TokenKind.KwFloat) || at(TokenKind.KwDouble) || at(TokenKind.KwBoolean)) {
         // Try to read type name (with optional generics)
         let typeName = advance().value;
         // Skip generic params
@@ -1504,10 +1601,17 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           // Check if this looks like a cast (next token starts an expression but not an operator)
           if (at(TokenKind.Ident) || at(TokenKind.KwThis) || at(TokenKind.KwNew) ||
               at(TokenKind.LParen) || at(TokenKind.IntLiteral) || at(TokenKind.StringLiteral) ||
-              at(TokenKind.BoolLiteral) || at(TokenKind.NullLiteral)) {
+              at(TokenKind.LongLiteral) || at(TokenKind.FloatLiteral) || at(TokenKind.DoubleLiteral) ||
+              at(TokenKind.CharLiteral) || at(TokenKind.BoolLiteral) || at(TokenKind.NullLiteral)) {
             const castExpr = parseUnary();
             const castType: Type = typeName === "String" ? "String"
               : typeName === "int" ? "int"
+              : typeName === "long" ? "long"
+              : typeName === "short" ? "short"
+              : typeName === "byte" ? "byte"
+              : typeName === "char" ? "char"
+              : typeName === "float" ? "float"
+              : typeName === "double" ? "double"
               : typeName === "boolean" ? "boolean"
               : { className: typeName };
             return { kind: "cast", type: castType, expr: castExpr };
@@ -1572,6 +1676,27 @@ class ConstantPoolBuilder {
     const data = [(v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
     const idx = this.entries.length;
     this.entries.push({ tag: 3, data });
+    return idx;
+  }
+
+  addFloat(v: number): number {
+    const buf = new ArrayBuffer(4);
+    new DataView(buf).setFloat32(0, v);
+    const bytes = new Uint8Array(buf);
+    const data = [bytes[0], bytes[1], bytes[2], bytes[3]];
+    const idx = this.entries.length;
+    this.entries.push({ tag: 4, data });
+    return idx;
+  }
+
+  addDouble(v: number): number {
+    const buf = new ArrayBuffer(8);
+    new DataView(buf).setFloat64(0, v);
+    const bytes = new Uint8Array(buf);
+    const data = [...bytes];
+    const idx = this.entries.length;
+    this.entries.push({ tag: 6, data });
+    this.entries.push({ tag: 0, data: [] }); // occupies 2 CP entries
     return idx;
   }
 
@@ -1724,6 +1849,47 @@ class BytecodeEmitter {
     return true;
   }
 
+  emitFload(idx: number) {
+    if (idx <= 3) this.emit(0x22 + idx); // fload_0..3
+    else { this.emit(0x17); this.emit(idx); }
+    this.adjustStack(1);
+  }
+
+  emitFstore(idx: number) {
+    if (idx <= 3) this.emit(0x43 + idx); // fstore_0..3
+    else { this.emit(0x38); this.emit(idx); }
+    this.adjustStack(-1);
+  }
+
+  emitDload(idx: number) {
+    if (idx <= 3) this.emit(0x26 + idx); // dload_0..3
+    else { this.emit(0x18); this.emit(idx); }
+    this.adjustStack(1);
+  }
+
+  emitDstore(idx: number) {
+    if (idx <= 3) this.emit(0x47 + idx); // dstore_0..3
+    else { this.emit(0x39); this.emit(idx); }
+    this.adjustStack(-1);
+  }
+
+  emitFconst(v: number, cp: ConstantPoolBuilder): void {
+    if (v === 0.0) { this.emit(0x0b); this.adjustStack(1); } // fconst_0
+    else if (v === 1.0) { this.emit(0x0c); this.adjustStack(1); } // fconst_1
+    else if (v === 2.0) { this.emit(0x0d); this.adjustStack(1); } // fconst_2
+    else { this.emitLdc(cp.addFloat(v)); } // ldc adjusts stack
+  }
+
+  emitDconst(v: number, cp: ConstantPoolBuilder): void {
+    if (v === 0.0) { this.emit(0x0e); } // dconst_0
+    else if (v === 1.0) { this.emit(0x0f); } // dconst_1
+    else {
+      const cpIdx = cp.addDouble(v);
+      this.emit(0x14); this.emitU16(cpIdx); // ldc2_w
+    }
+    this.adjustStack(1);
+  }
+
   emitLconst(v: number, cp: ConstantPoolBuilder): void {
     if (v === 0) { this.emit(0x09); } // lconst_0
     else if (v === 1) { this.emit(0x0a); } // lconst_1
@@ -1833,7 +1999,9 @@ class BytecodeEmitter {
   emitReturn(type: Type) {
     if (type === "void") this.emit(0xb1);
     else if (type === "long") { this.emit(0xad); this.adjustStack(-1); } // lreturn
-    else if (type === "int" || type === "boolean") { this.emit(0xac); this.adjustStack(-1); }
+    else if (type === "float") { this.emit(0xae); this.adjustStack(-1); } // freturn
+    else if (type === "double") { this.emit(0xaf); this.adjustStack(-1); } // dreturn
+    else if (type === "int" || type === "boolean" || type === "short" || type === "byte" || type === "char") { this.emit(0xac); this.adjustStack(-1); }
     else { this.emit(0xb0); this.adjustStack(-1); } // areturn
   }
 }
@@ -1842,6 +2010,11 @@ class BytecodeEmitter {
 function typeToDescriptor(t: Type): string {
   if (t === "int") return "I";
   if (t === "long") return "J";
+  if (t === "short") return "S";
+  if (t === "byte") return "B";
+  if (t === "char") return "C";
+  if (t === "float") return "F";
+  if (t === "double") return "D";
   if (t === "boolean") return "Z";
   if (t === "void") return "V";
   if (t === "String") return "Ljava/lang/String;";
@@ -1855,11 +2028,13 @@ function methodDescriptor(params: ParamDecl[], returnType: Type): string {
 }
 
 function isRefType(t: Type): boolean {
-  return t !== "int" && t !== "long" && t !== "boolean" && t !== "void";
+  return t !== "int" && t !== "long" && t !== "short" && t !== "byte" && t !== "char"
+    && t !== "float" && t !== "double" && t !== "boolean" && t !== "void";
 }
 
 function isPrimitiveType(t: Type): boolean {
-  return t === "int" || t === "long" || t === "boolean";
+  return t === "int" || t === "long" || t === "short" || t === "byte" || t === "char"
+    || t === "float" || t === "double" || t === "boolean";
 }
 
 function sameType(a: Type, b: Type): boolean {
@@ -1871,12 +2046,18 @@ function sameType(a: Type, b: Type): boolean {
   return false;
 }
 
+const WIDENING_RANK: Record<string, number> = {
+  byte: 0, short: 1, int: 2, long: 3, float: 4, double: 5, char: 2 /* char → int level */
+};
+
 function isAssignable(to: Type, from: Type): boolean {
   if (sameType(to, from)) return true;
   if (isRefType(to) && isRefType(from)) return true;
-  if (to === "long" && from === "int") return true; // widening int→long
-  if (to === "int" && from === "boolean") return false;
-  if (to === "boolean" && from === "int") return false;
+  // byte/short/char are all ints on JVM — allow narrowing assignments between them and int
+  if (isIntLike(to) && isIntLike(from)) return true;
+  const toR = typeof to === "string" ? WIDENING_RANK[to] : undefined;
+  const fromR = typeof from === "string" ? WIDENING_RANK[from] : undefined;
+  if (toR !== undefined && fromR !== undefined) return toR >= fromR;
   return false;
 }
 
@@ -1887,9 +2068,8 @@ function isKnownClass(ctx: CompileContext, cls: string): boolean {
 function isAssignableInContext(ctx: CompileContext, to: Type, from: Type): boolean {
   if (sameType(to, from)) return true;
 
-  // Widening: int → long
-  if (to === "long" && from === "int") return true;
-  // Primitive assignments: exact type only in this subset.
+  // Widening primitive conversions
+  if (isPrimitiveType(to) && isPrimitiveType(from)) return isAssignable(to, from);
   if (isPrimitiveType(to) || isPrimitiveType(from)) return false;
 
   // Array assignments: exact array type or to Object.
@@ -1918,17 +2098,22 @@ function isCastConvertible(to: Type, from: Type): boolean {
   if (sameType(to, from)) return true;
   const toPrim = isPrimitiveType(to);
   const fromPrim = isPrimitiveType(from);
-  if (toPrim || fromPrim) {
-    // In this subset, only identity primitive casts are supported.
-    return false;
+  if (toPrim && fromPrim) {
+    // All numeric primitives can cast between each other
+    const numerics: string[] = ["byte", "short", "char", "int", "long", "float", "double"];
+    return numerics.includes(to as string) && numerics.includes(from as string);
   }
+  if (toPrim || fromPrim) return false;
   return true;
 }
 
 function mergeTernaryType(a: Type, b: Type): Type {
   if (sameType(a, b)) return a;
+  const numOrder = ["byte", "short", "char", "int", "long", "float", "double"] as const;
+  const ai = numOrder.indexOf(a as typeof numOrder[number]);
+  const bi = numOrder.indexOf(b as typeof numOrder[number]);
+  if (ai >= 0 && bi >= 0) return numOrder[Math.max(ai, bi)];
   if ((a === "int" && b === "boolean") || (a === "boolean" && b === "int")) return "int";
-  if ((a === "long" && b === "int") || (a === "int" && b === "long")) return "long";
   if (isRefType(a) && isRefType(b)) return { className: "java/lang/Object" };
   return a;
 }
@@ -1964,6 +2149,9 @@ let knownMethods: Record<string, MethodSig> = {
   "java/lang/StringBuilder.append(Ljava/lang/String;)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["String"] },
   "java/lang/StringBuilder.append(I)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["int"] },
   "java/lang/StringBuilder.append(J)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["long"] },
+  "java/lang/StringBuilder.append(F)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["float"] },
+  "java/lang/StringBuilder.append(D)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["double"] },
+  "java/lang/StringBuilder.append(C)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["char"] },
   "java/lang/StringBuilder.append(Z)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["boolean"] },
   "java/lang/StringBuilder.append(Ljava/lang/Object;)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: [{ className: "java/lang/Object" }] },
   "java/lang/StringBuilder.toString()": { owner: "java/lang/StringBuilder", returnType: "String", paramTypes: [] },
@@ -2189,6 +2377,9 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
   switch (expr.kind) {
     case "intLit": return "int";
     case "longLit": return "long";
+    case "floatLit": return "float";
+    case "doubleLit": return "double";
+    case "charLit": return "char";
     case "stringLit": return "String";
     case "boolLit": return "boolean";
     case "nullLit": return { className: "java/lang/Object" };
@@ -2208,13 +2399,22 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
         const rt = inferType(ctx, expr.right);
         // String concatenation
         if (expr.op === "+" && (lt === "String" || rt === "String")) return "String";
-        // Long promotion
+        // Numeric promotion
+        if (lt === "double" || rt === "double") return "double";
+        if (lt === "float" || rt === "float") return "float";
         if (lt === "long" || rt === "long") return "long";
-        return "int";
+        return "int"; // byte/short/char promote to int
       }
       return "boolean"; // comparison operators
     }
-    case "unary": return expr.op === "!" ? "boolean" : inferType(ctx, expr.operand) === "long" ? "long" : "int";
+    case "unary": {
+      if (expr.op === "!") return "boolean";
+      const t = inferType(ctx, expr.operand);
+      if (t === "double") return "double";
+      if (t === "float") return "float";
+      if (t === "long") return "long";
+      return "int";
+    }
     case "newExpr": return { className: resolveClassName(ctx, expr.className) };
     case "call": {
       if (expr.object) {
@@ -2293,11 +2493,6 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
 function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, expectedType?: Type): void {
   switch (expr.kind) {
     case "intLit": {
-      // If expected type is long, emit as long constant
-      if (expectedType === "long") {
-        emitter.emitLconst(expr.value, ctx.cp);
-        break;
-      }
       if (!emitter.emitIconst(expr.value)) {
         const cpIdx = ctx.cp.addInteger(expr.value);
         emitter.emitLdc(cpIdx);
@@ -2306,6 +2501,22 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
     }
     case "longLit": {
       emitter.emitLconst(expr.value, ctx.cp);
+      break;
+    }
+    case "floatLit": {
+      emitter.emitFconst(expr.value, ctx.cp);
+      break;
+    }
+    case "doubleLit": {
+      emitter.emitDconst(expr.value, ctx.cp);
+      break;
+    }
+    case "charLit": {
+      // char is stored as int on JVM
+      if (!emitter.emitIconst(expr.value)) {
+        const cpIdx = ctx.cp.addInteger(expr.value);
+        emitter.emitLdc(cpIdx);
+      }
       break;
     }
     case "stringLit": {
@@ -2328,8 +2539,7 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
     case "ident": {
       const loc = findLocal(ctx, expr.name);
       if (loc) {
-        if (loc.type === "int" || loc.type === "boolean") emitter.emitIload(loc.slot);
-        else emitter.emitAload(loc.slot);
+        emitLoadLocalByType(emitter, loc.slot, loc.type);
         break;
       }
       // Check own fields
@@ -2398,22 +2608,23 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         break;
       }
 
-      // Determine if long arithmetic is needed
-      const isLongOp = leftType === "long" || rightType === "long";
+      // Numeric promotion: determine the promoted type
+      function promoteNumeric(a: Type, b: Type): Type {
+        if (a === "double" || b === "double") return "double";
+        if (a === "float" || b === "float") return "float";
+        if (a === "long" || b === "long") return "long";
+        return "int";
+      }
 
-      // Arithmetic/comparison type checks
+      // Type check for arithmetic operators
       if (["+", "-", "*", "/", "%"].includes(expr.op)) {
-        const validInt = leftType === "int" && rightType === "int";
-        const validLong = isLongOp && (leftType === "int" || leftType === "long") && (rightType === "int" || rightType === "long");
-        if (!validInt && !validLong) {
-          throw new Error(`Operator '${expr.op}' requires int or long operands`);
+        if (!isPrimitiveType(leftType) || !isPrimitiveType(rightType) || leftType === "boolean" || rightType === "boolean") {
+          throw new Error(`Operator '${expr.op}' requires numeric operands`);
         }
       }
       if (["<", ">", "<=", ">="].includes(expr.op)) {
-        const validInt = leftType === "int" && rightType === "int";
-        const validLong = isLongOp && (leftType === "int" || leftType === "long") && (rightType === "int" || rightType === "long");
-        if (!validInt && !validLong) {
-          throw new Error(`Operator '${expr.op}' requires int or long operands`);
+        if (!isPrimitiveType(leftType) || !isPrimitiveType(rightType) || leftType === "boolean" || rightType === "boolean") {
+          throw new Error(`Operator '${expr.op}' requires numeric operands`);
         }
       }
       if (expr.op === "==" || expr.op === "!=") {
@@ -2422,18 +2633,67 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         if (leftRef !== rightRef) {
           throw new Error(`Operator '${expr.op}' requires operands of compatible categories`);
         }
-        if (!leftRef && !rightRef && !sameType(leftType, rightType) && !isLongOp) {
-          throw new Error(`Operator '${expr.op}' requires operands of the same primitive type`);
+        if (!leftRef && !rightRef && !sameType(leftType, rightType)) {
+          // Allow numeric comparison with promotion
+          if (leftType === "boolean" || rightType === "boolean") {
+            throw new Error(`Operator '${expr.op}' requires operands of the same primitive type`);
+          }
         }
       }
 
-      // Emit operands with widening i2l if needed
-      compileExpr(ctx, emitter, expr.left);
-      if (isLongOp && leftType === "int") emitter.emit(0x85); // i2l
-      compileExpr(ctx, emitter, expr.right);
-      if (isLongOp && rightType === "int") emitter.emit(0x85); // i2l
+      const promoted = (expr.op === "==" || expr.op === "!=")
+        && (isRefType(leftType) || isRefType(rightType))
+        ? leftType // ref compare, no promotion
+        : promoteNumeric(leftType, rightType);
 
-      if (isLongOp) {
+      // Emit operands with widening
+      compileExpr(ctx, emitter, expr.left);
+      if (!isRefType(leftType)) emitWideningConversion(emitter, leftType, promoted);
+      compileExpr(ctx, emitter, expr.right);
+      if (!isRefType(rightType)) emitWideningConversion(emitter, rightType, promoted);
+
+      // Emit operation based on promoted type
+      if (promoted === "double") {
+        switch (expr.op) {
+          case "+": emitter.emit(0x63); break; // dadd
+          case "-": emitter.emit(0x67); break; // dsub
+          case "*": emitter.emit(0x6b); break; // dmul
+          case "/": emitter.emit(0x6f); break; // ddiv
+          case "%": emitter.emit(0x73); break; // drem
+          case "==": case "!=": case "<": case ">": case "<=": case ">=": {
+            emitter.emitPush(0x97); // dcmpl → int
+            const jumpOp = { "==": 0x9a, "!=": 0x99, "<": 0x9c, ">": 0x9e, "<=": 0x9d, ">=": 0x9b }[expr.op]!;
+            const patchFalse = emitter.emitBranch(jumpOp);
+            emitter.emitIconst(1);
+            const patchEnd = emitter.emitBranch(0xa7);
+            emitter.patchBranch(patchFalse, emitter.pc);
+            emitter.emitIconst(0);
+            emitter.patchBranch(patchEnd, emitter.pc);
+            break;
+          }
+          default: throw new Error(`Unsupported binary operator: ${expr.op}`);
+        }
+      } else if (promoted === "float") {
+        switch (expr.op) {
+          case "+": emitter.emit(0x62); break; // fadd
+          case "-": emitter.emit(0x66); break; // fsub
+          case "*": emitter.emit(0x6a); break; // fmul
+          case "/": emitter.emit(0x6e); break; // fdiv
+          case "%": emitter.emit(0x72); break; // frem
+          case "==": case "!=": case "<": case ">": case "<=": case ">=": {
+            emitter.emitPush(0x95); // fcmpl → int
+            const jumpOp = { "==": 0x9a, "!=": 0x99, "<": 0x9c, ">": 0x9e, "<=": 0x9d, ">=": 0x9b }[expr.op]!;
+            const patchFalse = emitter.emitBranch(jumpOp);
+            emitter.emitIconst(1);
+            const patchEnd = emitter.emitBranch(0xa7);
+            emitter.patchBranch(patchFalse, emitter.pc);
+            emitter.emitIconst(0);
+            emitter.patchBranch(patchEnd, emitter.pc);
+            break;
+          }
+          default: throw new Error(`Unsupported binary operator: ${expr.op}`);
+        }
+      } else if (promoted === "long") {
         switch (expr.op) {
           case "+": emitter.emit(0x61); break; // ladd
           case "-": emitter.emit(0x65); break; // lsub
@@ -2441,59 +2701,41 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
           case "/": emitter.emit(0x6d); break; // ldiv
           case "%": emitter.emit(0x71); break; // lrem
           case "==": case "!=": case "<": case ">": case "<=": case ">=": {
-            emitter.emitPush(0x94); // lcmp: pops 2 longs, pushes 1 int; net with adjustStack(+1) from emit+push gives correct -1 after the two operands
-            const jumpOp = {
-              "==": 0x9a, // ifne
-              "!=": 0x99, // ifeq
-              "<": 0x9c,  // ifge
-              ">": 0x9e,  // ifle
-              "<=": 0x9d, // ifgt
-              ">=": 0x9b, // iflt
-            }[expr.op]!;
+            emitter.emitPush(0x94); // lcmp → int
+            const jumpOp = { "==": 0x9a, "!=": 0x99, "<": 0x9c, ">": 0x9e, "<=": 0x9d, ">=": 0x9b }[expr.op]!;
             const patchFalse = emitter.emitBranch(jumpOp);
             emitter.emitIconst(1);
-            const patchEnd = emitter.emitBranch(0xa7); // goto
+            const patchEnd = emitter.emitBranch(0xa7);
             emitter.patchBranch(patchFalse, emitter.pc);
             emitter.emitIconst(0);
             emitter.patchBranch(patchEnd, emitter.pc);
             break;
           }
-          default:
-            throw new Error(`Unsupported binary operator for long: ${expr.op}`);
+          default: throw new Error(`Unsupported binary operator: ${expr.op}`);
         }
       } else {
+        // int (includes byte/short/char promoted to int)
         switch (expr.op) {
           case "+": emitter.emit(0x60); break; // iadd
           case "-": emitter.emit(0x64); break; // isub
           case "*": emitter.emit(0x68); break; // imul
           case "/": emitter.emit(0x6c); break; // idiv
           case "%": emitter.emit(0x70); break; // irem
-
-          // Comparisons — produce 0 or 1
           case "==": case "!=": case "<": case ">": case "<=": case ">=": {
-            const refCompare = expr.op === "==" || expr.op === "!="
-              ? (isRefType(leftType) || isRefType(rightType))
-              : false;
+            const refCompare = (expr.op === "==" || expr.op === "!=")
+              && (isRefType(leftType) || isRefType(rightType));
             const jumpOp = refCompare
               ? (expr.op === "==" ? 0xa6 : 0xa5) // if_acmpne / if_acmpeq
-              : {
-                  "==": 0xa0, // if_icmpne
-                  "!=": 0x9f, // if_icmpeq
-                  "<": 0xa2,  // if_icmpge
-                  ">": 0xa4,  // if_icmple
-                  "<=": 0xa3, // if_icmpgt
-                  ">=": 0xa1, // if_icmplt
-                }[expr.op]!;
+              : { "==": 0xa0, "!=": 0x9f, "<": 0xa2, ">": 0xa4, "<=": 0xa3, ">=": 0xa1 }[expr.op]!;
             const patchFalse = emitter.emitBranch(jumpOp);
             emitter.emitIconst(1);
-            const patchEnd = emitter.emitBranch(0xa7); // goto
+            const patchEnd = emitter.emitBranch(0xa7);
             emitter.patchBranch(patchFalse, emitter.pc);
             emitter.emitIconst(0);
             emitter.patchBranch(patchEnd, emitter.pc);
             break;
           }
-          default:
-            throw new Error(`Unsupported binary operator: ${expr.op}`);
+          default: throw new Error(`Unsupported binary operator: ${expr.op}`);
         }
       }
       break;
@@ -2502,13 +2744,11 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       const operandType = inferType(ctx, expr.operand);
       compileExpr(ctx, emitter, expr.operand);
       if (expr.op === "-") {
-        if (operandType === "long") {
-          emitter.emit(0x75); // lneg
-        } else if (operandType === "int") {
-          emitter.emit(0x74); // ineg
-        } else {
-          throw new Error("Unary '-' requires int or long operand");
-        }
+        if (operandType === "double") emitter.emit(0x77); // dneg
+        else if (operandType === "float") emitter.emit(0x76); // fneg
+        else if (operandType === "long") emitter.emit(0x75); // lneg
+        else if (isPrimitiveType(operandType) && operandType !== "boolean") emitter.emit(0x74); // ineg
+        else throw new Error("Unary '-' requires numeric operand");
       }
       if (expr.op === "!") {
         if (operandType !== "boolean") throw new Error("Unary '!' requires boolean operand");
@@ -2579,8 +2819,11 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         const classIdx = ctx.cp.addClass(castClass);
         emitter.emit(0xc0); // checkcast
         emitter.emitU16(classIdx);
+      } else if (isPrimitiveType(expr.type) && isPrimitiveType(srcType)) {
+        // Numeric cast: try widening first, then narrowing
+        emitWideningConversion(emitter, srcType, expr.type);
+        emitNarrowingConversion(emitter, srcType, expr.type);
       }
-      // For primitive casts (int, boolean) — no bytecode needed for same-size types
       break;
     }
     case "instanceof": {
@@ -2909,10 +3152,16 @@ function compileStringConcat(ctx: CompileContext, emitter: BytecodeEmitter, expr
     const partType = inferType(ctx, part);
     compileExpr(ctx, emitter, part);
     let appendDesc: string;
-    if (partType === "int") {
+    if (partType === "int" || partType === "short" || partType === "byte") {
       appendDesc = "(I)Ljava/lang/StringBuilder;";
     } else if (partType === "long") {
       appendDesc = "(J)Ljava/lang/StringBuilder;";
+    } else if (partType === "float") {
+      appendDesc = "(F)Ljava/lang/StringBuilder;";
+    } else if (partType === "double") {
+      appendDesc = "(D)Ljava/lang/StringBuilder;";
+    } else if (partType === "char") {
+      appendDesc = "(C)Ljava/lang/StringBuilder;";
     } else if (partType === "boolean") {
       appendDesc = "(Z)Ljava/lang/StringBuilder;";
     } else if (partType === "String") {
@@ -2943,7 +3192,12 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     for (const arg of expr.args) compileExpr(ctx, emitter, arg);
 
     let desc: string;
-    if (argType === "int") desc = "(I)V";
+    if (argType === "int" || argType === "short" || argType === "byte") desc = "(I)V";
+    else if (argType === "long") desc = "(J)V";
+    else if (argType === "float") desc = "(F)V";
+    else if (argType === "double") desc = "(D)V";
+    else if (argType === "char") desc = "(C)V";
+    else if (argType === "boolean") desc = "(Z)V";
     else if (argType === "String") desc = "(Ljava/lang/String;)V";
     else desc = "(Ljava/lang/Object;)V";
     const mRef = ctx.cp.addMethodref("java/io/PrintStream", expr.method, desc);
@@ -3211,6 +3465,11 @@ function collectStmtIdentifiers(stmt: Stmt, out: Set<string>): void {
 function descriptorToType(desc: string): Type {
   if (desc === "I") return "int";
   if (desc === "J") return "long";
+  if (desc === "S") return "short";
+  if (desc === "B") return "byte";
+  if (desc === "C") return "char";
+  if (desc === "F") return "float";
+  if (desc === "D") return "double";
   if (desc === "Z") return "boolean";
   if (desc === "V") return "void";
   if (desc.startsWith("L") && desc.endsWith(";")) {
@@ -3338,15 +3597,53 @@ function resolveClassDecl(ctx: CompileContext, typeName: string): ClassDecl | un
   return ctx.classDecls.get(internal) ?? ctx.classDecls.get(typeName);
 }
 
+function isIntLike(t: Type): boolean {
+  return t === "int" || t === "short" || t === "byte" || t === "char" || t === "boolean";
+}
+
+function emitWideningConversion(emitter: BytecodeEmitter, from: Type, to: Type): void {
+  if (sameType(from, to)) return;
+  if (isIntLike(from) && isIntLike(to)) return; // all stored as int on JVM
+  if (isIntLike(from) && to === "long") { emitter.emit(0x85); return; } // i2l
+  if (isIntLike(from) && to === "float") { emitter.emit(0x86); return; } // i2f
+  if (isIntLike(from) && to === "double") { emitter.emit(0x87); return; } // i2d
+  if (from === "long" && to === "float") { emitter.emit(0x89); return; } // l2f
+  if (from === "long" && to === "double") { emitter.emit(0x8a); return; } // l2d
+  if (from === "float" && to === "double") { emitter.emit(0x8d); return; } // f2d
+}
+
+function emitNarrowingConversion(emitter: BytecodeEmitter, from: Type, to: Type): void {
+  if (sameType(from, to)) return;
+  // Narrowing from int-like to sub-int types
+  if (isIntLike(from) && to === "byte") { emitter.emit(0x91); return; } // i2b
+  if (isIntLike(from) && to === "char") { emitter.emit(0x92); return; } // i2c
+  if (isIntLike(from) && to === "short") { emitter.emit(0x93); return; } // i2s
+  // Long narrowing
+  if (from === "long" && isIntLike(to)) { emitter.emit(0x88); return; } // l2i
+  if (from === "long" && to === "float") { emitter.emit(0x89); return; } // l2f (widening, but used in cast)
+  if (from === "long" && to === "double") { emitter.emit(0x8a); return; } // l2d
+  // Float narrowing
+  if (from === "float" && isIntLike(to)) { emitter.emit(0x8b); return; } // f2i
+  if (from === "float" && to === "long") { emitter.emit(0x8c); return; } // f2l
+  // Double narrowing
+  if (from === "double" && isIntLike(to)) { emitter.emit(0x8e); return; } // d2i
+  if (from === "double" && to === "long") { emitter.emit(0x8f); return; } // d2l
+  if (from === "double" && to === "float") { emitter.emit(0x90); return; } // d2f
+}
+
 function emitStoreLocalByType(emitter: BytecodeEmitter, slot: number, t: Type): void {
   if (t === "long") emitter.emitLstore(slot);
-  else if (t === "int" || t === "boolean") emitter.emitIstore(slot);
+  else if (t === "float") emitter.emitFstore(slot);
+  else if (t === "double") emitter.emitDstore(slot);
+  else if (t === "int" || t === "boolean" || t === "short" || t === "byte" || t === "char") emitter.emitIstore(slot);
   else emitter.emitAstore(slot);
 }
 
 function emitLoadLocalByType(emitter: BytecodeEmitter, slot: number, t: Type): void {
   if (t === "long") emitter.emitLload(slot);
-  else if (t === "int" || t === "boolean") emitter.emitIload(slot);
+  else if (t === "float") emitter.emitFload(slot);
+  else if (t === "double") emitter.emitDload(slot);
+  else if (t === "int" || t === "boolean" || t === "short" || t === "byte" || t === "char") emitter.emitIload(slot);
   else emitter.emitAload(slot);
 }
 
@@ -3463,6 +3760,7 @@ function compileSwitchStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: 
     const selectorType = inferType(ctx, stmt.selector);
     validateSwitchSemanticsCompile(ctx, selectorType, stmt.cases, false);
     const selectorSlot = addLocal(ctx, "$switch_sel", selectorType);
+    if (emitter.maxLocals <= selectorSlot) emitter.maxLocals = selectorSlot + 1;
     if (selectorType === "int" || selectorType === "boolean") {
       compileExpr(ctx, emitter, stmt.selector, selectorType);
       emitter.emitIstore(selectorSlot);
@@ -3508,6 +3806,7 @@ function compileSwitchExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: 
     const selectorType = inferType(ctx, expr.selector);
     validateSwitchSemanticsCompile(ctx, selectorType, expr.cases, true);
     const selectorSlot = addLocal(ctx, "$switch_expr_sel", selectorType);
+    if (emitter.maxLocals <= selectorSlot) emitter.maxLocals = selectorSlot + 1;
     if (selectorType === "int" || selectorType === "boolean") {
       compileExpr(ctx, emitter, expr.selector, selectorType);
       emitter.emitIstore(selectorSlot);
@@ -3588,7 +3887,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         const initType = inferType(ctx, init);
         ensureAssignable(ctx, stmt.type, initType, `local '${stmt.name}'`);
         compileExpr(ctx, emitter, init, stmt.type);
-        if (stmt.type === "long" && initType === "int") emitter.emit(0x85); // i2l
+        emitWideningConversion(emitter, initType, stmt.type);
         emitStoreLocalByType(emitter, slot, stmt.type);
       }
       break;
@@ -3600,7 +3899,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
           const valType = inferType(ctx, stmt.value);
           ensureAssignable(ctx, loc.type, valType, `local '${stmt.target.name}'`);
           compileExpr(ctx, emitter, stmt.value, loc.type);
-          if (loc.type === "long" && valType === "int") emitter.emit(0x85); // i2l
+          emitWideningConversion(emitter, valType, loc.type);
           emitStoreLocalByType(emitter, loc.slot, loc.type);
         } else {
           // Field assignment
@@ -3657,8 +3956,10 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
     }
     case "return": {
       if (stmt.value) {
-        ensureAssignable(ctx, ctx.method.returnType, inferType(ctx, stmt.value), `return in ${ctx.method.name}`);
+        const retValType = inferType(ctx, stmt.value);
+        ensureAssignable(ctx, ctx.method.returnType, retValType, `return in ${ctx.method.name}`);
         compileExpr(ctx, emitter, stmt.value, ctx.method.returnType);
+        emitWideningConversion(emitter, retValType, ctx.method.returnType);
       }
       emitter.emitReturn(ctx.method.returnType);
       break;

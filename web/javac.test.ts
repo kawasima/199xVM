@@ -9,6 +9,8 @@
 
 import { test, describe } from "node:test";
 import * as assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import initJvm, { run_static } from "../jvm-core/pkg/jvm_core.js";
 import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry } from "./javac.js";
 
 // Helper: parse single class (convenience wrapper)
@@ -82,6 +84,46 @@ function readClassName(bytes: Uint8Array): string {
   const nameIdx = classEntries.get(thisClassIdx);
   if (nameIdx !== undefined) return utf8Strings.get(nameIdx) ?? "";
   return "";
+}
+
+let runtimeReady: Promise<void> | null = null;
+let shimBundle: Uint8Array | null = null;
+
+async function ensureRuntimeReady(): Promise<void> {
+  if (!runtimeReady) {
+    runtimeReady = (async () => {
+      const wasmBytes = await readFile(new URL("../jvm-core/pkg/jvm_core_bg.wasm", import.meta.url));
+      await initJvm({ module_or_path: wasmBytes });
+      shimBundle = new Uint8Array(await readFile(new URL("../jdk-shim/bundle.bin", import.meta.url)));
+    })();
+  }
+  await runtimeReady;
+}
+
+function toBundle(classBytes: Uint8Array): Uint8Array {
+  if (classBytes.length >= 4 &&
+      classBytes[0] === 0xca && classBytes[1] === 0xfe &&
+      classBytes[2] === 0xba && classBytes[3] === 0xbe) {
+    const out = new Uint8Array(4 + classBytes.length);
+    const n = classBytes.length;
+    out[0] = (n >> 24) & 0xff;
+    out[1] = (n >> 16) & 0xff;
+    out[2] = (n >> 8) & 0xff;
+    out[3] = n & 0xff;
+    out.set(classBytes, 4);
+    return out;
+  }
+  return classBytes;
+}
+
+async function runSnippet(source: string, className: string): Promise<string> {
+  await ensureRuntimeReady();
+  const user = toBundle(compile(source));
+  const shim = shimBundle!;
+  const all = new Uint8Array(shim.length + user.length);
+  all.set(shim, 0);
+  all.set(user, shim.length);
+  return run_static(all, className, "run", "()Ljava/lang/String;");
 }
 
 // ---------------------------------------------------------------------------
@@ -879,6 +921,19 @@ describe("Code generator", () => {
     assertValidClassFile(bytes);
   });
 
+  test("compiles long local declaration and return", () => {
+    const bytes = compile(`public class LongLocal {
+      public static String run() {
+        long result = 1L;
+        for (int i = 2; i <= 5; i++) {
+          result = result * i;
+        }
+        return "" + result;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
   test("compiles non-capturing lambda via invokedynamic", () => {
     const bytes = compile(`import java.util.function.Function;
       public class LambdaRun {
@@ -1182,7 +1237,7 @@ describe("Code generator", () => {
         boolean b = false;
         return a + b;
       }
-    }`), /requires int or long operands/);
+    }`), /requires numeric operands/);
   });
 
   test("operator '==' rejects int/boolean comparison", () => {
@@ -1296,6 +1351,39 @@ describe("Code generator", () => {
         }
       }
     `), /dominated/);
+  });
+});
+
+// ============================================================================
+// Runtime (WASM)
+// ============================================================================
+
+describe("Runtime (WASM)", () => {
+  test("lambda method reference boxes primitive return for Function.apply", async () => {
+    const result = await runSnippet(`import java.util.function.Function;
+      public class RuntimeLambdaBoxing {
+        public static String run() {
+          Function f = String::length;
+          return "" + f.apply("abcde");
+        }
+      }`, "RuntimeLambdaBoxing");
+    assert.equal(result, "5");
+  });
+
+  test("switch expression with String selector executes", async () => {
+    const result = await runSnippet(`public class RuntimeSwitchExpr {
+      public static String run() {
+        String kind = "release";
+        int score = switch (kind) {
+          case "alpha" -> 1;
+          case "beta" -> 2;
+          case "release" -> 3;
+          default -> 0;
+        };
+        return "kind=" + kind + " score=" + score;
+      }
+    }`, "RuntimeSwitchExpr");
+    assert.equal(result, "kind=release score=3");
   });
 });
 
