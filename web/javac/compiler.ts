@@ -1538,14 +1538,22 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     const userMethod = ctx.allMethods.find(m => m.name === expr.method);
     if (userMethod) {
       const desc = methodDescriptor(userMethod.params, userMethod.returnType);
-      const mRef = ctx.cp.addMethodref(ctx.className, expr.method, desc);
+      const ownerDecl = ctx.classDecls.get(ctx.className);
+      const ownerIsInterface = ownerDecl?.kind === "interface" || ownerDecl?.kind === "annotation";
       if (userMethod.isStatic) {
+        const mRef = ctx.cp.addMethodref(ctx.className, expr.method, desc);
         expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, userMethod.params[i]?.type));
         emitter.emitInvokestatic(mRef, expr.args.length, userMethod.returnType !== "void");
       } else {
         emitter.emitAload(0); // this
         expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, userMethod.params[i]?.type));
-        emitter.emitInvokevirtual(mRef, expr.args.length, userMethod.returnType !== "void");
+        if (ownerIsInterface) {
+          const mRef = ctx.cp.addInterfaceMethodref(ctx.className, expr.method, desc);
+          emitter.emitInvokeinterface(mRef, expr.args.length, userMethod.returnType !== "void");
+        } else {
+          const mRef = ctx.cp.addMethodref(ctx.className, expr.method, desc);
+          emitter.emitInvokevirtual(mRef, expr.args.length, userMethod.returnType !== "void");
+        }
       }
     } else if (ctx.staticWildcardImports.length > 0) {
       // Try static-import-on-demand owners in order
