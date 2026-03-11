@@ -137,7 +137,11 @@ impl Vm {
             other => return Err(format!("Expected NameAndType at cp[{nat_index}], got {other:?}")),
         };
 
-        let bm = &bootstrap_methods[bm_index as usize];
+        let bm = bootstrap_methods.get(bm_index as usize)
+            .ok_or_else(|| format!(
+                "Invalid bootstrap method index {bm_index} ({} bootstrap methods available)",
+                bootstrap_methods.len()
+            ))?;
         let bm_ref_idx = bm.bootstrap_method_ref;
         let bm_class = match &cp[bm_ref_idx as usize] {
             ConstantPoolEntry::MethodHandle { reference_index, .. } => {

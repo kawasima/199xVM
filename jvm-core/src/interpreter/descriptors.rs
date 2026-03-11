@@ -150,23 +150,29 @@ pub(super) fn count_args(descriptor: &str) -> usize {
     let mut chars = descriptor.chars().peekable();
     if chars.next() != Some('(') { return 0; }
     loop {
-        match chars.next() {
+        match chars.peek().copied() {
             Some(')') | None => break,
             Some('L') => {
+                chars.next(); // consume 'L'
                 for c in chars.by_ref() { if c == ';' { break; } }
                 count += 1;
             }
             Some('[') => {
+                // Consume all leading '[' (multi-dimensional arrays)
+                while chars.peek() == Some(&'[') { chars.next(); }
+                // Consume the element type
                 if chars.peek() == Some(&'L') {
-                    chars.next();
+                    chars.next(); // consume 'L'
                     for c in chars.by_ref() { if c == ';' { break; } }
                 } else {
-                    chars.next();
+                    chars.next(); // consume primitive type char
                 }
                 count += 1;
             }
-            Some('J') | Some('D') => count += 1,
-            Some(_) => count += 1,
+            Some(_) => {
+                chars.next();
+                count += 1;
+            }
         }
     }
     count
@@ -178,22 +184,29 @@ pub(super) fn arg_type_chars(descriptor: &str) -> Vec<char> {
     let mut chars = descriptor.chars().peekable();
     if chars.next() != Some('(') { return types; }
     loop {
-        match chars.next() {
+        match chars.peek().copied() {
             Some(')') | None => break,
             Some('L') => {
+                chars.next(); // consume 'L'
                 for c in chars.by_ref() { if c == ';' { break; } }
                 types.push('L');
             }
             Some('[') => {
+                // Consume all leading '[' (multi-dimensional arrays)
+                while chars.peek() == Some(&'[') { chars.next(); }
+                // Consume the element type
                 if chars.peek() == Some(&'L') {
-                    chars.next();
+                    chars.next(); // consume 'L'
                     for c in chars.by_ref() { if c == ';' { break; } }
                 } else {
-                    chars.next();
+                    chars.next(); // consume primitive type char
                 }
                 types.push('[');
             }
-            Some(c) => types.push(c),
+            Some(c) => {
+                chars.next();
+                types.push(c);
+            }
         }
     }
     types
