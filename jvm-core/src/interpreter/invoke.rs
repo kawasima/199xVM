@@ -15,10 +15,12 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        // Resolve descriptor: exact match first, then param-only fallback for generic return types.
+        // Resolve descriptor and collect method flags in one pass.
         // The compiler may emit a generic return type (e.g. Ljava/lang/Object;) for
         // wildcard-imported methods whose real return type is more specific.
-        let resolved_descriptor = if self.find_method(class_name, method_name, descriptor).is_some() {
+        let method_flags = self.find_method(class_name, method_name, descriptor)
+            .map(|(_, m)| m.access_flags);
+        let resolved_descriptor = if method_flags.is_some() {
             descriptor.to_owned()
         } else {
             self.find_method_real_descriptor(class_name, method_name, descriptor)
@@ -26,19 +28,21 @@ impl Vm {
         };
         let descriptor = resolved_descriptor.as_str();
 
-        // Check if a bytecode method exists; also collect varargs flag in one lookup.
-        let method_flags = self.find_method(class_name, method_name, descriptor)
-            .map(|(_, m)| m.access_flags);
-        let found = method_flags.is_some();
-
-        // Try native stubs when no bytecode method is available.
-        if !found {
+        // Re-check with the resolved descriptor if it changed, then try native stubs.
+        let method_flags = if method_flags.is_none() {
+            self.find_method(class_name, method_name, descriptor)
+                .map(|(_, m)| m.access_flags)
+        } else {
+            method_flags
+        };
+        if method_flags.is_none() {
             if let Some(v) = self.native_static(class_name, method_name, descriptor, &args) {
                 if let Some(err) = self.pending_exception_err() {
                     return Err(err);
                 }
                 return Ok(v);
             }
+            return Err(format!("Method not found: {class_name}.{method_name}{descriptor}"));
         }
 
         // If the resolved method is varargs (ACC_VARARGS = 0x0080), synthesize a single

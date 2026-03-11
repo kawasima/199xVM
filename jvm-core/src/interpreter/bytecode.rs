@@ -287,9 +287,12 @@ impl Vm {
                     let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
                     let idx = array_index(idx_i)?;
-                    if let Some(r) = arr_ref.as_ref() {
-                        if let NativePayload::Array(ref mut v) = r.borrow_mut().native {
-                            *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = val;
+                    match arr_ref.as_ref() {
+                        None => return Err("NullPointerException: aastore".to_owned()),
+                        Some(r) => {
+                            if let NativePayload::Array(ref mut v) = r.borrow_mut().native {
+                                *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = val;
+                            }
                         }
                     }
                 }
@@ -299,8 +302,9 @@ impl Vm {
                     let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
                     let idx = array_index(idx_i)?;
-                    if let Some(r) = arr_ref.as_ref() {
-                        match r.borrow_mut().native {
+                    match arr_ref.as_ref() {
+                        None => return Err("NullPointerException: iastore".to_owned()),
+                        Some(r) => match r.borrow_mut().native {
                             NativePayload::Array(ref mut v) => {
                                 *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = val;
                             }
@@ -308,7 +312,7 @@ impl Vm {
                                 *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = val.as_int();
                             }
                             _ => {}
-                        }
+                        },
                     }
                 }
                 0x55 => { // castore (char array store — treated same as iastore)
@@ -316,9 +320,12 @@ impl Vm {
                     let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
                     let idx = array_index(idx_i)?;
-                    if let Some(r) = arr_ref.as_ref() {
-                        if let NativePayload::Array(ref mut v) = r.borrow_mut().native {
-                            *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = val;
+                    match arr_ref.as_ref() {
+                        None => return Err("NullPointerException: castore".to_owned()),
+                        Some(r) => {
+                            if let NativePayload::Array(ref mut v) = r.borrow_mut().native {
+                                *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = val;
+                            }
                         }
                     }
                 }
@@ -327,8 +334,9 @@ impl Vm {
                     let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
                     let idx = array_index(idx_i)?;
-                    if let Some(r) = arr_ref.as_ref() {
-                        match r.borrow_mut().native {
+                    match arr_ref.as_ref() {
+                        None => return Err("NullPointerException: array store".to_owned()),
+                        Some(r) => match r.borrow_mut().native {
                             NativePayload::Array(ref mut v) => {
                                 *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = val;
                             }
@@ -336,7 +344,7 @@ impl Vm {
                                 *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = val.as_long();
                             }
                             _ => {}
-                        }
+                        },
                     }
                 }
                 0x54 => { // bastore
@@ -344,8 +352,9 @@ impl Vm {
                     let idx_i = frame.stack.pop().unwrap().as_int();
                     let arr_ref = frame.stack.pop().unwrap();
                     let idx = array_index(idx_i)?;
-                    if let Some(r) = arr_ref.as_ref() {
-                        match r.borrow_mut().native {
+                    match arr_ref.as_ref() {
+                        None => return Err("NullPointerException: bastore".to_owned()),
+                        Some(r) => match r.borrow_mut().native {
                             NativePayload::ByteArray(ref mut v) => {
                                 *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = val;
                             }
@@ -353,7 +362,7 @@ impl Vm {
                                 *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = JValue::Int(val as i32);
                             }
                             _ => {}
-                        }
+                        },
                     }
                 }
                 0x34 => { // caload (char array load)
