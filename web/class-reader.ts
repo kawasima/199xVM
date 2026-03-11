@@ -70,8 +70,8 @@ export function parseClassMeta(data: Uint8Array): ClassMeta {
       case 18: { cp.push(`#indy:${u16()}:${u16()}`); break; }
       case 3:  { skip(4); cp.push(null); break; } // Integer
       case 4:  { skip(4); cp.push(null); break; } // Float
-      case 5:  { skip(8); cp.push(null); i++; break; } // Long (2 slots)
-      case 6:  { skip(8); cp.push(null); i++; break; } // Double (2 slots)
+      case 5:  { skip(8); cp.push(null); cp.push(null); i++; break; } // Long (2 slots)
+      case 6:  { skip(8); cp.push(null); cp.push(null); i++; break; } // Double (2 slots)
       case 15: { skip(3); cp.push(null); break; } // MethodHandle
       case 16: { skip(2); cp.push(null); break; } // MethodType
       case 17: { skip(4); cp.push(null); break; } // Dynamic

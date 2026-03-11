@@ -76,6 +76,13 @@ export enum TokenKind {
   KwVar = "var",
   KwInstanceof = "instanceof",
   KwRecord = "record",
+  KwDo = "do",
+  KwThrow = "throw",
+  KwTry = "try",
+  KwCatch = "catch",
+  KwFinally = "finally",
+  KwBreak = "break",
+  KwContinue = "continue",
 
   // Delimiters
   LParen = "(",
@@ -188,6 +195,13 @@ const KEYWORDS: Record<string, TokenKind> = {
   var: TokenKind.KwVar,
   instanceof: TokenKind.KwInstanceof,
   record: TokenKind.KwRecord,
+  do: TokenKind.KwDo,
+  throw: TokenKind.KwThrow,
+  try: TokenKind.KwTry,
+  catch: TokenKind.KwCatch,
+  finally: TokenKind.KwFinally,
+  break: TokenKind.KwBreak,
+  continue: TokenKind.KwContinue,
 };
 
 export function lex(source: string): Token[] {
@@ -454,6 +468,13 @@ export type Stmt =
   | { kind: "while"; cond: Expr; body: Stmt[] }
   | { kind: "for"; init?: Stmt; cond?: Expr; update?: Stmt; body: Stmt[] }
   | { kind: "switch"; selector: Expr; cases: SwitchCase[] }
+  | { kind: "doWhile"; cond: Expr; body: Stmt[] }
+  | { kind: "forEach"; varName: string; varType: Type; iterable: Expr; body: Stmt[] }
+  | { kind: "throw"; expr: Expr }
+  | { kind: "tryCatch"; tryBody: Stmt[]; catches: { exType: string; varName: string; body: Stmt[] }[]; finallyBody?: Stmt[] }
+  | { kind: "break"; label?: string }
+  | { kind: "continue"; label?: string }
+  | { kind: "labeled"; label: string; stmt: Stmt }
   | { kind: "block"; stmts: Stmt[] };
 
 export type Expr =
@@ -475,6 +496,7 @@ export type Expr =
   | { kind: "newExpr"; className: string; args: Expr[] }
   | { kind: "cast"; type: Type; expr: Expr }
   | { kind: "postIncrement"; operand: Expr; op: "++" | "--" }
+  | { kind: "preIncrement"; operand: Expr; op: "++" | "--" }
   | { kind: "instanceof"; expr: Expr; checkType: string; bindVar?: string; recordBindVars?: string[] }
   | { kind: "staticField"; className: string; field: string }
   | { kind: "arrayAccess"; array: Expr; index: Expr }
@@ -530,6 +552,20 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     while (at(TokenKind.Dot) && isNameSegmentToken(tokens[pos + 1]?.kind ?? TokenKind.EOF)) {
       advance(); // dot
       name += "." + parseNameSegment();
+    }
+    return name;
+  }
+
+  function resolveDeclaredClassName(name: string): string {
+    if (name.includes("/")) return name;
+    if (name.includes(".")) return name.replace(/\./g, "/");
+    const explicit = importMap.get(name);
+    if (explicit) return explicit;
+    if (/^[A-Z]/.test(name) && packageImports.length > 0) {
+      for (const pkg of packageImports) {
+        const candidate = `${pkg}/${name}`;
+        if (Object.keys(knownMethods).some(k => k.startsWith(`${candidate}.`))) return candidate;
+      }
     }
     return name;
   }
@@ -712,7 +748,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
     let superClass = "java/lang/Object";
     if (match(TokenKind.KwExtends)) {
-      superClass = parseQualifiedName().replace(/\./g, "/");
+      superClass = resolveDeclaredClassName(parseQualifiedName());
     }
     // Skip implements
     if (match(TokenKind.KwImplements)) {
@@ -763,7 +799,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       const mangledName = ownerName + "$" + nestedName;
       let nestedSuper = "java/lang/Object";
       if (match(TokenKind.KwExtends)) {
-        nestedSuper = parseQualifiedName().replace(/\./g, "/");
+        nestedSuper = resolveDeclaredClassName(parseQualifiedName());
       }
       if (match(TokenKind.KwImplements)) {
         parseQualifiedName();
@@ -884,13 +920,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           advance();
         }
       }
-      // Resolve explicitly imported simple names to internal names early.
-      // Keep unresolved simple names as-is so same-compilation-unit user types still work.
-      const resolvedName = name.includes("/")
-        ? name
-        : name.includes(".")
-          ? name.replace(/\./g, "/")
-          : (importMap.get(name) ?? name);
+      // Resolve imports/java.lang-known types eagerly, but keep unresolved simple
+      // names as-is so same-compilation-unit user types still work.
+      const resolvedName = resolveDeclaredClassName(name);
       base = { className: resolvedName };
     }
     // Check for array suffix: Type[]
@@ -904,7 +936,13 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
   function parseBlock(): Stmt[] {
     const stmts: Stmt[] = [];
     while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
-      stmts.push(parseStmt());
+      const s = parseStmt();
+      // Flatten multi-decl blocks into the enclosing block
+      if (s.kind === "block" && s.stmts.every(ss => ss.kind === "varDecl")) {
+        stmts.push(...s.stmts);
+      } else {
+        stmts.push(s);
+      }
     }
     return stmts;
   }
@@ -982,6 +1020,17 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       if (match(TokenKind.KwWhen)) {
         guard = parseExpr();
       }
+      // Colon syntax: "case X:" — collect statements until next case/default/}
+      if (at(TokenKind.Colon)) {
+        advance(); // consume ':'
+        const stmts: Stmt[] = [];
+        while (!at(TokenKind.RBrace) && !at(TokenKind.KwCase) && !at(TokenKind.KwDefault) && !at(TokenKind.EOF)) {
+          stmts.push(parseStmt());
+        }
+        cases.push({ labels, guard, stmts });
+        continue;
+      }
+      // Arrow syntax: "case X ->"
       expect(TokenKind.Arrow);
       if (isExpr) {
         if (at(TokenKind.LBrace)) {
@@ -1143,10 +1192,46 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       return { kind: "while", cond, body };
     }
 
-    // For
+    // Do-While
+    if (at(TokenKind.KwDo)) {
+      advance();
+      let body: Stmt[];
+      if (at(TokenKind.LBrace)) {
+        expect(TokenKind.LBrace);
+        body = parseBlock();
+        expect(TokenKind.RBrace);
+      } else {
+        body = [parseStmt()];
+      }
+      expect(TokenKind.KwWhile);
+      expect(TokenKind.LParen);
+      const cond = parseExpr();
+      expect(TokenKind.RParen);
+      expect(TokenKind.Semi);
+      return { kind: "doWhile", cond, body };
+    }
+
+    // For (enhanced and classic)
     if (at(TokenKind.KwFor)) {
       advance();
       expect(TokenKind.LParen);
+      // Try to detect enhanced for: "Type name : expr"
+      if (isEnhancedFor()) {
+        const varType = parseType();
+        const varName = expect(TokenKind.Ident).value;
+        expect(TokenKind.Colon);
+        const iterable = parseExpr();
+        expect(TokenKind.RParen);
+        let body: Stmt[];
+        if (at(TokenKind.LBrace)) {
+          expect(TokenKind.LBrace);
+          body = parseBlock();
+          expect(TokenKind.RBrace);
+        } else {
+          body = [parseStmt()];
+        }
+        return { kind: "forEach", varName, varType, iterable, body };
+      }
       let init: Stmt | undefined;
       if (!at(TokenKind.Semi)) init = parseStmtNoSemi();
       expect(TokenKind.Semi);
@@ -1167,6 +1252,60 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       return { kind: "for", init, cond, update, body };
     }
 
+    // Throw
+    if (at(TokenKind.KwThrow)) {
+      advance();
+      const expr = parseExpr();
+      expect(TokenKind.Semi);
+      return { kind: "throw", expr };
+    }
+
+    // Try/Catch/Finally
+    if (at(TokenKind.KwTry)) {
+      advance();
+      expect(TokenKind.LBrace);
+      const tryBody = parseBlock();
+      expect(TokenKind.RBrace);
+      const catches: { exType: string; varName: string; body: Stmt[] }[] = [];
+      while (at(TokenKind.KwCatch)) {
+        advance();
+        expect(TokenKind.LParen);
+        const exType = expect(TokenKind.Ident).value;
+        const varName = expect(TokenKind.Ident).value;
+        expect(TokenKind.RParen);
+        expect(TokenKind.LBrace);
+        const body = parseBlock();
+        expect(TokenKind.RBrace);
+        catches.push({ exType, varName, body });
+      }
+      let finallyBody: Stmt[] | undefined;
+      if (at(TokenKind.KwFinally)) {
+        advance();
+        expect(TokenKind.LBrace);
+        finallyBody = parseBlock();
+        expect(TokenKind.RBrace);
+      }
+      return { kind: "tryCatch", tryBody, catches, finallyBody };
+    }
+
+    // Break
+    if (at(TokenKind.KwBreak)) {
+      advance();
+      let label: string | undefined;
+      if (at(TokenKind.Ident)) label = advance().value;
+      expect(TokenKind.Semi);
+      return { kind: "break", label };
+    }
+
+    // Continue
+    if (at(TokenKind.KwContinue)) {
+      advance();
+      let label: string | undefined;
+      if (at(TokenKind.Ident)) label = advance().value;
+      expect(TokenKind.Semi);
+      return { kind: "continue", label };
+    }
+
     if (at(TokenKind.KwSwitch)) {
       advance();
       expect(TokenKind.LParen);
@@ -1183,6 +1322,18 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       const name = expect(TokenKind.Ident).value;
       expect(TokenKind.Assign);
       const init = parseExpr();
+      // Multi-decl: var a = 1, b = 2;
+      if (at(TokenKind.Comma)) {
+        const stmts: Stmt[] = [{ kind: "varDecl", name, type: inferLocalVarType(init), init }];
+        while (match(TokenKind.Comma)) {
+          const n2 = expect(TokenKind.Ident).value;
+          expect(TokenKind.Assign);
+          const i2 = parseExpr();
+          stmts.push({ kind: "varDecl", name: n2, type: inferLocalVarType(i2), init: i2 });
+        }
+        expect(TokenKind.Semi);
+        return { kind: "block", stmts };
+      }
       expect(TokenKind.Semi);
       return { kind: "varDecl", name, type: inferLocalVarType(init), init };
     }
@@ -1191,8 +1342,29 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       const name = expect(TokenKind.Ident).value;
       let init: Expr | undefined;
       if (match(TokenKind.Assign)) init = parseExpr();
+      // Multi-decl: int a = 1, b = 2;
+      if (at(TokenKind.Comma)) {
+        const stmts: Stmt[] = [{ kind: "varDecl", name, type, init }];
+        while (match(TokenKind.Comma)) {
+          const n2 = expect(TokenKind.Ident).value;
+          let i2: Expr | undefined;
+          if (match(TokenKind.Assign)) i2 = parseExpr();
+          stmts.push({ kind: "varDecl", name: n2, type, init: i2 });
+        }
+        expect(TokenKind.Semi);
+        return { kind: "block", stmts };
+      }
       expect(TokenKind.Semi);
       return { kind: "varDecl", name, type, init };
+    }
+
+    // Label statement: "ident : stmt" (but not ident :: which is method ref)
+    if (at(TokenKind.Ident) && tokens[pos + 1]?.kind === TokenKind.Colon
+        && tokens[pos + 2]?.kind !== TokenKind.Colon) {
+      const label = advance().value;
+      advance(); // consume ':'
+      const stmt = parseStmt();
+      return { kind: "labeled", label, stmt };
     }
 
     // Expression statement (may be assignment)
@@ -1301,6 +1473,42 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       // After variable name must be '=', ';', or end of statement — not '('
       if (at(TokenKind.LParen)) return false;
       return true;
+    } finally {
+      pos = saved;
+    }
+  }
+
+  // Lookahead: "Type name :" inside for-loop parens → enhanced for
+  function isEnhancedFor(): boolean {
+    const saved = pos;
+    try {
+      // Skip type (including generic params, array brackets, qualified names)
+      if (at(TokenKind.KwVar)) {
+        advance();
+      } else if (at(TokenKind.KwInt) || at(TokenKind.KwLong) || at(TokenKind.KwShort) || at(TokenKind.KwByte)
+          || at(TokenKind.KwChar) || at(TokenKind.KwFloat) || at(TokenKind.KwDouble)
+          || at(TokenKind.KwBoolean) || at(TokenKind.KwString)) {
+        advance();
+        if (at(TokenKind.LBracket) && tokens[pos + 1]?.kind === TokenKind.RBracket) { advance(); advance(); }
+      } else if (at(TokenKind.Ident)) {
+        advance();
+        while (at(TokenKind.Dot)) { advance(); if (!at(TokenKind.Ident)) return false; advance(); }
+        if (at(TokenKind.Lt)) {
+          let depth = 1; advance();
+          while (depth > 0 && !at(TokenKind.EOF)) {
+            if (at(TokenKind.Lt)) depth++;
+            if (at(TokenKind.Gt)) depth--;
+            advance();
+          }
+        }
+        if (at(TokenKind.LBracket) && tokens[pos + 1]?.kind === TokenKind.RBracket) { advance(); advance(); }
+      } else {
+        return false;
+      }
+      // Must be: Ident ':'
+      if (!at(TokenKind.Ident)) return false;
+      advance();
+      return at(TokenKind.Colon);
     } finally {
       pos = saved;
     }
@@ -1501,6 +1709,16 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       advance();
       const operand = parseUnary();
       return { kind: "unary", op: "!", operand };
+    }
+    if (at(TokenKind.PlusPlus)) {
+      advance();
+      const operand = parseUnary();
+      return { kind: "preIncrement", operand, op: "++" };
+    }
+    if (at(TokenKind.MinusMinus)) {
+      advance();
+      const operand = parseUnary();
+      return { kind: "preIncrement", operand, op: "--" };
     }
     return parsePostfix();
   }
@@ -1922,6 +2140,7 @@ class BytecodeEmitter {
   code: number[] = [];
   maxStack = 0;
   maxLocals = 0;
+  exceptionTable: { startPc: number; endPc: number; handlerPc: number; catchType: number }[] = [];
   private currentStack = 0;
 
   private adjustStack(delta: number) {
@@ -2112,6 +2331,13 @@ class BytecodeEmitter {
     else if (type === "int" || type === "boolean" || type === "short" || type === "byte" || type === "char") { this.emit(0xac); this.adjustStack(-1); }
     else { this.emit(0xb0); this.adjustStack(-1); } // areturn
   }
+
+  // For if_icmpge etc: pops 2, pushes 0
+  adjustStackForCompare() { this.adjustStack(-2); }
+  // For iaload/aaload: pops 2 (arrayref + index), pushes 1 (element)
+  adjustStackForArrayLoad() { this.adjustStack(-1); }
+  // Exception handler entry point: pushes exception object onto empty stack
+  adjustStackForCatch() { this.adjustStack(1); }
 }
 
 // Type descriptor helpers
@@ -2211,9 +2437,35 @@ function isCastConvertible(to: Type, from: Type): boolean {
     const numerics: string[] = ["byte", "short", "char", "int", "long", "float", "double"];
     return numerics.includes(to as string) && numerics.includes(from as string);
   }
-  if (toPrim || fromPrim) return false;
+  // Unboxing cast: reference → primitive (e.g., (int) someObject)
+  if (toPrim && !fromPrim) return true;
+  // Boxing cast: primitive → reference (e.g., (Object) someInt)
+  if (!toPrim && fromPrim) return true;
   return true;
 }
+
+/** Map from primitive type to its wrapper class and unbox method. */
+const UNBOX_INFO: Record<string, { wrapper: string; method: string; desc: string }> = {
+  int:     { wrapper: "java/lang/Integer",   method: "intValue",     desc: "()I" },
+  long:    { wrapper: "java/lang/Long",      method: "longValue",    desc: "()J" },
+  float:   { wrapper: "java/lang/Float",     method: "floatValue",   desc: "()F" },
+  double:  { wrapper: "java/lang/Double",    method: "doubleValue",  desc: "()D" },
+  boolean: { wrapper: "java/lang/Boolean",   method: "booleanValue", desc: "()Z" },
+  byte:    { wrapper: "java/lang/Byte",      method: "byteValue",    desc: "()B" },
+  short:   { wrapper: "java/lang/Short",     method: "shortValue",   desc: "()S" },
+  char:    { wrapper: "java/lang/Character", method: "charValue",    desc: "()C" },
+};
+
+const BOX_INFO: Record<string, { wrapper: string; desc: string }> = {
+  int:     { wrapper: "java/lang/Integer",   desc: "(I)Ljava/lang/Integer;" },
+  long:    { wrapper: "java/lang/Long",      desc: "(J)Ljava/lang/Long;" },
+  float:   { wrapper: "java/lang/Float",     desc: "(F)Ljava/lang/Float;" },
+  double:  { wrapper: "java/lang/Double",    desc: "(D)Ljava/lang/Double;" },
+  boolean: { wrapper: "java/lang/Boolean",   desc: "(Z)Ljava/lang/Boolean;" },
+  byte:    { wrapper: "java/lang/Byte",      desc: "(B)Ljava/lang/Byte;" },
+  short:   { wrapper: "java/lang/Short",     desc: "(S)Ljava/lang/Short;" },
+  char:    { wrapper: "java/lang/Character", desc: "(C)Ljava/lang/Character;" },
+};
 
 function mergeTernaryType(a: Type, b: Type): Type {
   if (sameType(a, b)) return a;
@@ -2476,6 +2728,9 @@ interface CompileContext {
   generatedMethods: MethodDecl[];
   lambdaBootstraps: LambdaBootstrap[];
   ownerIsStatic: boolean;
+  // Loop break/continue support
+  breakPatches: { label?: string; patches: number[] }[];
+  continuePatches: { label?: string; targets: number[] }[];
 }
 
 interface FunctionalSig {
@@ -2485,6 +2740,7 @@ interface FunctionalSig {
 }
 
 interface LambdaBootstrap {
+  samDescriptor: string;
   implOwner: string;
   implMethodName: string;
   implDescriptor: string;
@@ -2707,6 +2963,7 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
     }
     case "cast": return expr.type;
     case "postIncrement": return inferType(ctx, expr.operand);
+    case "preIncrement": return inferType(ctx, expr.operand);
     case "instanceof": return "boolean";
     case "staticField": return { className: "java/lang/Object" };
     case "arrayAccess": {
@@ -3057,13 +3314,47 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       compileExpr(ctx, emitter, expr.operand);
       break;
     }
+    case "preIncrement": {
+      // For simple ident pre-increment: increment first, then push new value
+      if (expr.operand.kind === "ident") {
+        const loc = findLocal(ctx, expr.operand.name);
+        if (loc && (loc.type === "int" || loc.type === "boolean")) {
+          emitter.emit(0x84); // iinc
+          emitter.emit(loc.slot);
+          emitter.emit(expr.op === "++" ? 1 : 0xff); // +1 or -1
+          emitter.emitIload(loc.slot); // push new value
+          break;
+        }
+      }
+      compileExpr(ctx, emitter, expr.operand);
+      break;
+    }
     case "cast": {
       const srcType = inferType(ctx, expr.expr);
       if (!isCastConvertible(expr.type, srcType)) {
         throw new Error(`Invalid cast from ${typeToDescriptor(srcType)} to ${typeToDescriptor(expr.type)}`);
       }
       compileExpr(ctx, emitter, expr.expr);
-      if (isRefType(expr.type)) {
+      if (isPrimitiveType(expr.type) && isRefType(srcType)) {
+        // Unboxing cast: (int) someObject → checkcast Integer; invokevirtual intValue
+        const info = UNBOX_INFO[expr.type as string];
+        if (info) {
+          const classIdx = ctx.cp.addClass(info.wrapper);
+          emitter.emit(0xc0); // checkcast
+          emitter.emitU16(classIdx);
+          const methodRef = ctx.cp.addMethodref(info.wrapper, info.method, info.desc);
+          emitter.emit(0xb6); // invokevirtual
+          emitter.emitU16(methodRef);
+        }
+      } else if (isRefType(expr.type) && isPrimitiveType(srcType)) {
+        // Boxing cast: (Object) someInt → invokestatic Integer.valueOf(int)
+        const info = BOX_INFO[srcType as string];
+        if (info) {
+          const methodRef = ctx.cp.addMethodref(info.wrapper, "valueOf", info.desc);
+          emitter.emit(0xb8); // invokestatic
+          emitter.emitU16(methodRef);
+        }
+      } else if (isRefType(expr.type)) {
         const castClass = typeof expr.type === "object" && "className" in expr.type
           ? resolveClassName(ctx, expr.type.className)
           : "java/lang/Object";
@@ -3231,7 +3522,9 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         compileExpr(ctx, emitter, needsThisCapture && i === 0 ? ({ kind: "this" } as Expr) : ({ kind: "ident", name: captures[needsThisCapture ? i - 1 : i].name } as Expr));
       }
       const invokedDesc = "(" + capturedTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(expectedType);
+      const samDescriptor = "(" + sig.params.map(typeToDescriptor).join("") + ")" + typeToDescriptor(sig.returnType);
       ctx.lambdaBootstraps.push({
+        samDescriptor,
         implOwner: ctx.className,
         implMethodName: implName,
         implDescriptor: implDesc,
@@ -3288,7 +3581,9 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         ctx.generatedMethods.push(ctorMethod);
         const implDescCtor = methodDescriptor(ctorMethod.params, ctorMethod.returnType);
         const invokedDescriptorCtor = "()" + typeToDescriptor(expectedType);
+        const samDescriptorCtor = "(" + sig.params.map(typeToDescriptor).join("") + ")" + typeToDescriptor(sig.returnType);
         ctx.lambdaBootstraps.push({
+          samDescriptor: samDescriptorCtor,
           implOwner: ctx.className,
           implMethodName: ctorImplName,
           implDescriptor: implDescCtor,
@@ -3355,7 +3650,9 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       }
 
       const invokedDescriptor = "(" + captureTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(expectedType);
+      const samDescriptor = "(" + sig.params.map(typeToDescriptor).join("") + ")" + typeToDescriptor(sig.returnType);
       ctx.lambdaBootstraps.push({
+        samDescriptor,
         implOwner,
         implMethodName: implName,
         implDescriptor,
@@ -3673,6 +3970,7 @@ function collectExprIdentifiers(expr: Expr, out: Set<string>): void {
     case "newExpr": for (const a of expr.args) collectExprIdentifiers(a, out); break;
     case "cast": collectExprIdentifiers(expr.expr, out); break;
     case "postIncrement": collectExprIdentifiers(expr.operand, out); break;
+    case "preIncrement": collectExprIdentifiers(expr.operand, out); break;
     case "instanceof": collectExprIdentifiers(expr.expr, out); break;
     case "arrayAccess": collectExprIdentifiers(expr.array, out); collectExprIdentifiers(expr.index, out); break;
     case "arrayLit": for (const e of expr.elements) collectExprIdentifiers(e, out); break;
@@ -3733,6 +4031,28 @@ function collectStmtIdentifiers(stmt: Stmt, out: Set<string>): void {
         if (c.expr) collectExprIdentifiers(c.expr, out);
         if (c.stmts) for (const s of c.stmts) collectStmtIdentifiers(s, out);
       }
+      break;
+    case "doWhile":
+      collectExprIdentifiers(stmt.cond, out);
+      for (const s of stmt.body) collectStmtIdentifiers(s, out);
+      break;
+    case "forEach":
+      collectExprIdentifiers(stmt.iterable, out);
+      for (const s of stmt.body) collectStmtIdentifiers(s, out);
+      break;
+    case "throw":
+      collectExprIdentifiers(stmt.expr, out);
+      break;
+    case "tryCatch":
+      for (const s of stmt.tryBody) collectStmtIdentifiers(s, out);
+      for (const c of stmt.catches) for (const s of c.body) collectStmtIdentifiers(s, out);
+      if (stmt.finallyBody) for (const s of stmt.finallyBody) collectStmtIdentifiers(s, out);
+      break;
+    case "break":
+    case "continue":
+      break;
+    case "labeled":
+      collectStmtIdentifiers(stmt.stmt, out);
       break;
     case "block":
       for (const s of stmt.stmts) collectStmtIdentifiers(s, out);
@@ -4235,8 +4555,20 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
     case "return": {
       if (stmt.value) {
         const retValType = inferType(ctx, stmt.value);
-        ensureAssignable(ctx, ctx.method.returnType, retValType, `return in ${ctx.method.name}`);
+        const returnNeedsBoxing = isRefType(ctx.method.returnType) && isPrimitiveType(retValType);
+        if (!returnNeedsBoxing) {
+          ensureAssignable(ctx, ctx.method.returnType, retValType, `return in ${ctx.method.name}`);
+        }
         compileExpr(ctx, emitter, stmt.value, ctx.method.returnType);
+        if (returnNeedsBoxing) {
+          const info = BOX_INFO[retValType as string];
+          if (!info) {
+            throw new Error(`Type mismatch for return in ${ctx.method.name}: cannot assign ${typeToDescriptor(retValType)} to ${typeToDescriptor(ctx.method.returnType)}`);
+          }
+          const methodRef = ctx.cp.addMethodref(info.wrapper, "valueOf", info.desc);
+          emitter.emit(0xb8); // invokestatic
+          emitter.emitU16(methodRef);
+        }
         emitWideningConversion(emitter, retValType, ctx.method.returnType);
       }
       emitter.emitReturn(ctx.method.returnType);
@@ -4300,21 +4632,34 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
     }
     case "while": {
       if (inferType(ctx, stmt.cond) !== "boolean") throw new Error("while condition must be boolean");
+      const breakInfo = { label: undefined as string | undefined, patches: [] as number[] };
+      const continueInfo = { label: undefined as string | undefined, targets: [] as number[] };
+      ctx.breakPatches.push(breakInfo);
+      ctx.continuePatches.push(continueInfo);
       const loopStart = emitter.pc;
       compileExpr(ctx, emitter, stmt.cond);
       const patchExit = emitter.emitBranch(0x99); // ifeq
       withScopedLocals(ctx, () => {
         for (const s of stmt.body) compileStmt(ctx, emitter, s);
       });
+      const continueTarget = emitter.pc;
       // goto loopStart
       const gotoOp = emitter.emitBranch(0xa7);
       emitter.patchBranch(gotoOp, loopStart);
       emitter.patchBranch(patchExit, emitter.pc);
+      ctx.breakPatches.pop();
+      ctx.continuePatches.pop();
+      for (const p of breakInfo.patches) emitter.patchBranch(p, emitter.pc);
+      for (const p of continueInfo.targets) emitter.patchBranch(p, continueTarget);
       break;
     }
     case "for": {
       withScopedLocals(ctx, () => {
         if (stmt.init) compileStmt(ctx, emitter, stmt.init);
+        const breakInfo = { label: undefined as string | undefined, patches: [] as number[] };
+        const continueInfo = { label: undefined as string | undefined, targets: [] as number[] };
+        ctx.breakPatches.push(breakInfo);
+        ctx.continuePatches.push(continueInfo);
         const loopStart = emitter.pc;
         let patchExit = -1;
         if (stmt.cond) {
@@ -4325,15 +4670,215 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         withScopedLocals(ctx, () => {
           for (const s of stmt.body) compileStmt(ctx, emitter, s);
         });
+        const continueTarget = emitter.pc;
         if (stmt.update) compileStmt(ctx, emitter, stmt.update);
         const gotoOp = emitter.emitBranch(0xa7);
         emitter.patchBranch(gotoOp, loopStart);
         if (patchExit >= 0) emitter.patchBranch(patchExit, emitter.pc);
+        ctx.breakPatches.pop();
+        ctx.continuePatches.pop();
+        for (const p of breakInfo.patches) emitter.patchBranch(p, emitter.pc);
+        for (const p of continueInfo.targets) emitter.patchBranch(p, continueTarget);
       });
       break;
     }
     case "switch": {
       compileSwitchStmt(ctx, emitter, stmt);
+      break;
+    }
+    case "doWhile": {
+      if (inferType(ctx, stmt.cond) !== "boolean") throw new Error("do-while condition must be boolean");
+      const breakInfo = { label: undefined as string | undefined, patches: [] as number[] };
+      const continueInfo = { label: undefined as string | undefined, targets: [] as number[] };
+      ctx.breakPatches.push(breakInfo);
+      ctx.continuePatches.push(continueInfo);
+      const loopStart = emitter.pc;
+      withScopedLocals(ctx, () => {
+        for (const s of stmt.body) compileStmt(ctx, emitter, s);
+      });
+      const continueTarget = emitter.pc;
+      compileExpr(ctx, emitter, stmt.cond);
+      // ifne → loopStart (jump if true)
+      const gotoOp = emitter.emitBranch(0x9a); // ifne
+      emitter.patchBranch(gotoOp, loopStart);
+      ctx.breakPatches.pop();
+      ctx.continuePatches.pop();
+      for (const p of breakInfo.patches) emitter.patchBranch(p, emitter.pc);
+      for (const p of continueInfo.targets) emitter.patchBranch(p, continueTarget);
+      break;
+    }
+    case "forEach": {
+      withScopedLocals(ctx, () => {
+        const iterableType = inferType(ctx, stmt.iterable);
+        const breakInfo = { label: undefined as string | undefined, patches: [] as number[] };
+        const continueInfo = { label: undefined as string | undefined, targets: [] as number[] };
+        ctx.breakPatches.push(breakInfo);
+        ctx.continuePatches.push(continueInfo);
+        if (typeof iterableType === "object" && "array" in iterableType) {
+          // Array iteration: for (T x : arr) → int $i=0; while($i < arr.length) { T x = arr[$i]; ... $i++; }
+          compileExpr(ctx, emitter, stmt.iterable);
+          const arrSlot = addLocal(ctx, "$forEach_arr", iterableType);
+          if (emitter.maxLocals <= arrSlot) emitter.maxLocals = arrSlot + 1;
+          emitter.emitAstore(arrSlot);
+          const idxSlot = addLocal(ctx, "$forEach_idx", "int");
+          if (emitter.maxLocals <= idxSlot) emitter.maxLocals = idxSlot + 1;
+          emitter.emitIconst(0);
+          emitter.emitIstore(idxSlot);
+          const loopStart = emitter.pc;
+          // $i < arr.length
+          emitter.emitIload(idxSlot);
+          emitter.emitAload(arrSlot);
+          emitter.emit(0xbe); // arraylength
+          emitter.adjustStackForCompare();
+          const patchExit = emitter.emitBranch(0xa2); // if_icmpge → exit
+          // T x = arr[$i]
+          const elemSlot = addLocal(ctx, stmt.varName, stmt.varType);
+          if (emitter.maxLocals <= elemSlot) emitter.maxLocals = elemSlot + 1;
+          emitter.emitAload(arrSlot);
+          emitter.emitIload(idxSlot);
+          if (stmt.varType === "int" || stmt.varType === "boolean" || stmt.varType === "byte" || stmt.varType === "short" || stmt.varType === "char") {
+            emitter.emit(0x2e); // iaload
+          } else {
+            emitter.emit(0x32); // aaload
+          }
+          emitter.adjustStackForArrayLoad();
+          emitStoreLocalByType(emitter, elemSlot, stmt.varType);
+          withScopedLocals(ctx, () => {
+            for (const s of stmt.body) compileStmt(ctx, emitter, s);
+          });
+          const continueTarget = emitter.pc;
+          // $i++
+          emitter.emit(0x84); emitter.emit(idxSlot); emitter.emit(1); // iinc
+          const gotoOp = emitter.emitBranch(0xa7);
+          emitter.patchBranch(gotoOp, loopStart);
+          emitter.patchBranch(patchExit, emitter.pc);
+          for (const p of breakInfo.patches) emitter.patchBranch(p, emitter.pc);
+          for (const p of continueInfo.targets) emitter.patchBranch(p, continueTarget);
+        } else {
+          // Iterable iteration: for (T x : iterable) → Iterator $it = iterable.iterator(); while($it.hasNext()) { T x = (T) $it.next(); ... }
+          compileExpr(ctx, emitter, stmt.iterable);
+          const iteratorRef = ctx.cp.addInterfaceMethodref("java/lang/Iterable", "iterator", "()Ljava/util/Iterator;");
+          emitter.emitInvokeinterface(iteratorRef, 0, true);
+          const itSlot = addLocal(ctx, "$forEach_it", { className: "java/util/Iterator" });
+          if (emitter.maxLocals <= itSlot) emitter.maxLocals = itSlot + 1;
+          emitter.emitAstore(itSlot);
+          const loopStart = emitter.pc;
+          emitter.emitAload(itSlot);
+          const hasNextRef = ctx.cp.addInterfaceMethodref("java/util/Iterator", "hasNext", "()Z");
+          emitter.emitInvokeinterface(hasNextRef, 0, true);
+          const patchExit = emitter.emitBranch(0x99); // ifeq → exit
+          const elemSlot = addLocal(ctx, stmt.varName, stmt.varType);
+          if (emitter.maxLocals <= elemSlot) emitter.maxLocals = elemSlot + 1;
+          emitter.emitAload(itSlot);
+          const nextRef = ctx.cp.addInterfaceMethodref("java/util/Iterator", "next", "()Ljava/lang/Object;");
+          emitter.emitInvokeinterface(nextRef, 0, true);
+          // Cast to target type if needed
+          if (typeof stmt.varType === "object" && "className" in stmt.varType) {
+            const classIdx = ctx.cp.addClass(stmt.varType.className);
+            emitter.emit(0xc0); emitter.emitU16(classIdx); // checkcast
+          } else if (stmt.varType === "String") {
+            const classIdx = ctx.cp.addClass("java/lang/String");
+            emitter.emit(0xc0); emitter.emitU16(classIdx); // checkcast
+          }
+          emitStoreLocalByType(emitter, elemSlot, stmt.varType);
+          withScopedLocals(ctx, () => {
+            for (const s of stmt.body) compileStmt(ctx, emitter, s);
+          });
+          const continueTarget = emitter.pc;
+          const gotoOp = emitter.emitBranch(0xa7);
+          emitter.patchBranch(gotoOp, loopStart);
+          emitter.patchBranch(patchExit, emitter.pc);
+          for (const p of breakInfo.patches) emitter.patchBranch(p, emitter.pc);
+          for (const p of continueInfo.targets) emitter.patchBranch(p, continueTarget);
+        }
+        ctx.breakPatches.pop();
+        ctx.continuePatches.pop();
+      });
+      break;
+    }
+    case "throw": {
+      compileExpr(ctx, emitter, stmt.expr);
+      emitter.emit(0xbf); // athrow
+      break;
+    }
+    case "tryCatch": {
+      // Simplified try/catch: emit try body, then goto end; emit each catch handler
+      // Exception table entries are not yet supported in the bytecode emitter,
+      // so we emit the structure and register exception table entries.
+      const tryStart = emitter.pc;
+      withScopedLocals(ctx, () => {
+        for (const s of stmt.tryBody) compileStmt(ctx, emitter, s);
+      });
+      const tryEnd = emitter.pc;
+      const patchEnd = emitter.emitBranch(0xa7); // goto after all catches
+      const catchEndPatches: number[] = [patchEnd];
+      const exceptionTable: { startPc: number; endPc: number; handlerPc: number; catchType: number }[] = [];
+      for (const c of stmt.catches) {
+        const handlerPc = emitter.pc;
+        const catchClass = resolveClassName(ctx, c.exType);
+        const classIdx = ctx.cp.addClass(catchClass);
+        exceptionTable.push({ startPc: tryStart, endPc: tryEnd, handlerPc, catchType: classIdx });
+        withScopedLocals(ctx, () => {
+          // The exception object is on the stack
+          emitter.adjustStackForCatch();
+          const slot = addLocal(ctx, c.varName, { className: catchClass });
+          if (emitter.maxLocals <= slot) emitter.maxLocals = slot + 1;
+          emitter.emitAstore(slot);
+          for (const s of c.body) compileStmt(ctx, emitter, s);
+        });
+        catchEndPatches.push(emitter.emitBranch(0xa7)); // goto end
+      }
+      // Finally block (if present) — simplified: inline after try and each catch
+      if (stmt.finallyBody) {
+        // Patch all catch-end gotos to here, then emit finally
+        for (const p of catchEndPatches) emitter.patchBranch(p, emitter.pc);
+        withScopedLocals(ctx, () => {
+          for (const s of stmt.finallyBody!) compileStmt(ctx, emitter, s);
+        });
+      } else {
+        for (const p of catchEndPatches) emitter.patchBranch(p, emitter.pc);
+      }
+      // Store exception table entries on the emitter
+      for (const entry of exceptionTable) {
+        emitter.exceptionTable.push(entry);
+      }
+      break;
+    }
+    case "break": {
+      if (stmt.label) {
+        // Find the labeled break target
+        const info = [...ctx.breakPatches].reverse().find(b => b.label === stmt.label);
+        if (!info) throw new Error(`break label '${stmt.label}' not found`);
+        info.patches.push(emitter.emitBranch(0xa7));
+      } else {
+        const info = ctx.breakPatches[ctx.breakPatches.length - 1];
+        if (!info) throw new Error("break outside of loop/switch");
+        info.patches.push(emitter.emitBranch(0xa7));
+      }
+      break;
+    }
+    case "continue": {
+      if (stmt.label) {
+        const info = [...ctx.continuePatches].reverse().find(c => c.label === stmt.label);
+        if (!info) throw new Error(`continue label '${stmt.label}' not found`);
+        info.targets.push(emitter.emitBranch(0xa7));
+      } else {
+        const info = ctx.continuePatches[ctx.continuePatches.length - 1];
+        if (!info) throw new Error("continue outside of loop");
+        info.targets.push(emitter.emitBranch(0xa7));
+      }
+      break;
+    }
+    case "labeled": {
+      const breakInfo = { label: stmt.label, patches: [] as number[] };
+      const continueInfo = { label: stmt.label, targets: [] as number[] };
+      ctx.breakPatches.push(breakInfo);
+      ctx.continuePatches.push(continueInfo);
+      compileStmt(ctx, emitter, stmt.stmt);
+      ctx.breakPatches.pop();
+      ctx.continuePatches.pop();
+      for (const p of breakInfo.patches) emitter.patchBranch(p, emitter.pc);
+      // continue targets for labeled loops are patched by the loop itself
       break;
     }
     case "block": {
@@ -4358,7 +4903,7 @@ function compileMethod(
   lambdaCounter: { value: number },
   generatedMethods: MethodDecl[],
   lambdaBootstraps: LambdaBootstrap[],
-): { code: number[]; maxStack: number; maxLocals: number } {
+): { code: number[]; maxStack: number; maxLocals: number; exceptionTable: { startPc: number; endPc: number; handlerPc: number; catchType: number }[] } {
   const emitter = new BytecodeEmitter();
   const locals: LocalVar[] = [];
   let nextSlot = 0;
@@ -4393,6 +4938,8 @@ function compileMethod(
     generatedMethods,
     lambdaBootstraps,
     ownerIsStatic: method.isStatic,
+    breakPatches: [],
+    continuePatches: [],
   };
 
   emitter.maxLocals = nextSlot;
@@ -4408,7 +4955,7 @@ function compileMethod(
     emitter.emitReturn(method.returnType);
   }
 
-  return { code: emitter.code, maxStack: Math.max(emitter.maxStack, 4), maxLocals: emitter.maxLocals };
+  return { code: emitter.code, maxStack: Math.max(emitter.maxStack, 4), maxLocals: emitter.maxLocals, exceptionTable: emitter.exceptionTable };
 }
 
 function exprHasSuperCall(expr: Expr): boolean {
@@ -4422,6 +4969,7 @@ function exprHasSuperCall(expr: Expr): boolean {
     case "newExpr": return expr.args.some(exprHasSuperCall);
     case "cast": return exprHasSuperCall(expr.expr);
     case "postIncrement": return exprHasSuperCall(expr.operand);
+    case "preIncrement": return exprHasSuperCall(expr.operand);
     case "instanceof": return exprHasSuperCall(expr.expr);
     case "arrayAccess": return exprHasSuperCall(expr.array) || exprHasSuperCall(expr.index);
     case "arrayLit": return expr.elements.some(exprHasSuperCall);
@@ -4452,6 +5000,15 @@ function stmtHasSuperCall(stmt: Stmt): boolean {
     case "switch":
       return exprHasSuperCall(stmt.selector)
         || stmt.cases.some(c => (c.expr && exprHasSuperCall(c.expr)) || (c.stmts && c.stmts.some(stmtHasSuperCall)));
+    case "doWhile": return exprHasSuperCall(stmt.cond) || stmt.body.some(stmtHasSuperCall);
+    case "forEach": return exprHasSuperCall(stmt.iterable) || stmt.body.some(stmtHasSuperCall);
+    case "throw": return exprHasSuperCall(stmt.expr);
+    case "tryCatch": return stmt.tryBody.some(stmtHasSuperCall)
+      || stmt.catches.some(c => c.body.some(stmtHasSuperCall))
+      || !!stmt.finallyBody?.some(stmtHasSuperCall);
+    case "break": return false;
+    case "continue": return false;
+    case "labeled": return stmtHasSuperCall(stmt.stmt);
     case "block": return stmt.stmts.some(stmtHasSuperCall);
   }
 }
@@ -4568,6 +5125,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     code: number[];
     maxStack: number;
     maxLocals: number;
+    exceptionTable?: { startPc: number; endPc: number; handlerPc: number; catchType: number }[];
   }[] = [];
 
   const methodQueue: MethodDecl[] = [...classDecl.methods];
@@ -4610,6 +5168,8 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         generatedMethods,
         lambdaBootstraps,
         ownerIsStatic: false,
+        breakPatches: [],
+        continuePatches: [],
       };
       if (emitter.maxLocals < method.params.length + 1) emitter.maxLocals = method.params.length + 1;
 
@@ -4635,6 +5195,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         code: emitter.code,
         maxStack: Math.max(emitter.maxStack, 4),
         maxLocals: Math.max(emitter.maxLocals, method.params.length + 1),
+        exceptionTable: emitter.exceptionTable.length > 0 ? emitter.exceptionTable : undefined,
       });
     } else {
       const result = compileMethod(
@@ -4647,6 +5208,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         code: result.code,
         maxStack: result.maxStack,
         maxLocals: result.maxLocals,
+        exceptionTable: result.exceptionTable.length > 0 ? result.exceptionTable : undefined,
       });
     }
     while (generatedDrain < generatedMethods.length) {
@@ -4670,6 +5232,18 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   // Code attribute name
   const codeAttrName = cp.addUtf8("Code");
   const bootstrapAttrName = cp.addUtf8("BootstrapMethods");
+  const recordAttrName = classDecl.isRecord ? cp.addUtf8("Record") : 0;
+
+  // Pre-register record component names/descriptors in the constant pool
+  const recordComponentCpEntries: { nameIdx: number; descIdx: number }[] = [];
+  if (classDecl.isRecord && classDecl.recordComponents) {
+    for (const c of classDecl.recordComponents) {
+      recordComponentCpEntries.push({
+        nameIdx: cp.addUtf8(c.name),
+        descIdx: cp.addUtf8(typeToDescriptor(c.type)),
+      });
+    }
+  }
   const serializedBootstrapMethods: { methodRef: number; args: number[] }[] = [];
   for (const lb of lambdaBootstraps) {
     const metafactoryRef = cp.addMethodref("java/lang/invoke/LambdaMetafactory", "metafactory", "()V");
@@ -4678,8 +5252,9 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       ? cp.addInterfaceMethodref(lb.implOwner, lb.implMethodName, lb.implDescriptor)
       : cp.addMethodref(lb.implOwner, lb.implMethodName, lb.implDescriptor);
     const implHandle = cp.addMethodHandle(lb.implRefKind, implMethodRef);
-    const samType = cp.addMethodType(lb.implDescriptor);
-    serializedBootstrapMethods.push({ methodRef: bootstrapMethodRef, args: [samType, implHandle] });
+    const samType = cp.addMethodType(lb.samDescriptor);
+    const instantiatedType = cp.addMethodType(lb.implDescriptor);
+    serializedBootstrapMethods.push({ methodRef: bootstrapMethodRef, args: [samType, implHandle, instantiatedType] });
   }
 
   // Now serialize the class file
@@ -4725,18 +5300,29 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     // Code attribute
     out.push((codeAttrName >> 8) & 0xff, codeAttrName & 0xff);
     const codeLen = m.code.length;
-    const attrLen = 2 + 2 + 4 + codeLen + 2 + 2; // max_stack + max_locals + code_length + code + exception_table_length + attributes_count
+    const exTblLen = m.exceptionTable ? m.exceptionTable.length : 0;
+    const attrLen = 2 + 2 + 4 + codeLen + 2 + exTblLen * 8 + 2; // max_stack + max_locals + code_length + code + exception_table + attributes_count
     out.push((attrLen >> 24) & 0xff, (attrLen >> 16) & 0xff, (attrLen >> 8) & 0xff, attrLen & 0xff);
     out.push((m.maxStack >> 8) & 0xff, m.maxStack & 0xff);
     out.push((m.maxLocals >> 8) & 0xff, m.maxLocals & 0xff);
     out.push((codeLen >> 24) & 0xff, (codeLen >> 16) & 0xff, (codeLen >> 8) & 0xff, codeLen & 0xff);
     out.push(...m.code);
-    out.push(0x00, 0x00); // exception_table_length = 0
+    out.push((exTblLen >> 8) & 0xff, exTblLen & 0xff);
+    if (m.exceptionTable) {
+      for (const e of m.exceptionTable) {
+        out.push((e.startPc >> 8) & 0xff, e.startPc & 0xff);
+        out.push((e.endPc >> 8) & 0xff, e.endPc & 0xff);
+        out.push((e.handlerPc >> 8) & 0xff, e.handlerPc & 0xff);
+        out.push((e.catchType >> 8) & 0xff, e.catchType & 0xff);
+      }
+    }
     out.push(0x00, 0x00); // attributes_count = 0
   }
 
   // class attributes
-  const classAttrCount = serializedBootstrapMethods.length > 0 ? 1 : 0;
+  let classAttrCount = 0;
+  if (serializedBootstrapMethods.length > 0) classAttrCount++;
+  if (classDecl.isRecord && recordComponentCpEntries.length > 0) classAttrCount++;
   out.push((classAttrCount >> 8) & 0xff, classAttrCount & 0xff);
   if (serializedBootstrapMethods.length > 0) {
     out.push((bootstrapAttrName >> 8) & 0xff, bootstrapAttrName & 0xff);
@@ -4748,6 +5334,19 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       out.push((bm.methodRef >> 8) & 0xff, bm.methodRef & 0xff);
       out.push((bm.args.length >> 8) & 0xff, bm.args.length & 0xff);
       for (const a of bm.args) out.push((a >> 8) & 0xff, a & 0xff);
+    }
+  }
+  // Record attribute
+  if (classDecl.isRecord && recordComponentCpEntries.length > 0) {
+    out.push((recordAttrName >> 8) & 0xff, recordAttrName & 0xff);
+    // Each component: name(2) + descriptor(2) + attributes_count(2) = 6 bytes
+    const recBodyLen = 2 + recordComponentCpEntries.length * 6;
+    out.push((recBodyLen >> 24) & 0xff, (recBodyLen >> 16) & 0xff, (recBodyLen >> 8) & 0xff, recBodyLen & 0xff);
+    out.push((recordComponentCpEntries.length >> 8) & 0xff, recordComponentCpEntries.length & 0xff);
+    for (const rc of recordComponentCpEntries) {
+      out.push((rc.nameIdx >> 8) & 0xff, rc.nameIdx & 0xff);
+      out.push((rc.descIdx >> 8) & 0xff, rc.descIdx & 0xff);
+      out.push(0x00, 0x00); // attributes_count = 0
     }
   }
 

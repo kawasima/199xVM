@@ -356,6 +356,13 @@ describe("Parser", () => {
     assert.equal(cls.superClass, "Parent");
   });
 
+  test("extends clause resolves imported JDK type", () => {
+    const src = `import java.util.concurrent.RecursiveTask;
+    public class Child extends RecursiveTask {}`;
+    const cls = parse(lex(src));
+    assert.equal(cls.superClass, "java/util/concurrent/RecursiveTask");
+  });
+
   test("ternary expression", () => {
     const src = `public class Ternary {
       public static String run() {
@@ -806,6 +813,18 @@ describe("Code generator", () => {
     assertValidClassFile(bytes);
     const text = new TextDecoder().decode(bytes);
     assert.ok(text.includes("java/lang/Record"), "extends Record");
+  });
+
+  test("record emits Record class attribute", () => {
+    const bytes = compile(`record Pair(String first, int second) {}`);
+    assertValidClassFile(bytes);
+    // The compiled class should contain a "Record" UTF8 entry in the constant pool
+    // (used as the attribute name for the Record attribute).
+    const text = new TextDecoder().decode(bytes);
+    assert.ok(text.includes("Record"), "class file contains Record attribute name");
+    // Also verify record component names are present
+    assert.ok(text.includes("first"), "record component 'first'");
+    assert.ok(text.includes("second"), "record component 'second'");
   });
 
   // --- New feature tests ---
@@ -1458,6 +1477,39 @@ describe("Runtime (WASM)", () => {
     assert.match(result, /\n  at RuntimeStackTrace\.run\(\)Ljava\/lang\/String;/);
   });
 
+  test("ForkJoin RecursiveTask invoke executes", async () => {
+    const result = await runSnippet(`import java.util.concurrent.RecursiveTask;
+      import java.util.concurrent.ForkJoinPool;
+      public class RuntimeForkJoin {
+        static class SumTask extends RecursiveTask {
+          int lo;
+          int hi;
+          SumTask(int lo, int hi) { this.lo = lo; this.hi = hi; }
+          protected Object compute() {
+            int n = hi - lo;
+            if (n <= 4) {
+              int s = 0;
+              for (int i = lo; i <= hi; i++) s += i;
+              return s;
+            }
+            int mid = (lo + hi) / 2;
+            SumTask left = new SumTask(lo, mid);
+            SumTask right = new SumTask(mid + 1, hi);
+            left.fork();
+            int r = (int) right.compute();
+            int l = (int) left.join();
+            return l + r;
+          }
+        }
+        public static String run() {
+          ForkJoinPool pool = ForkJoinPool.commonPool();
+          int sum = (int) pool.invoke(new SumTask(1, 20));
+          return "" + sum;
+        }
+      }`, "RuntimeForkJoin");
+    assert.equal(result, "210");
+  });
+
 });
 
 // ============================================================================
@@ -1496,6 +1548,23 @@ describe("Class reader", () => {
     assert.deepEqual(reg["Bar.compute(I)"].paramTypes, ["int"]);
   });
 
+  test("buildMethodRegistry handles classes with long/double constants", () => {
+    // Long constants occupy 2 CP slots. If the class-reader doesn't account
+    // for this, all subsequent CP indices are shifted and method names are corrupted.
+    const bytes = compile(`public class LongConst {
+      public static long BIG = 9999999999L;
+      public static String convert(long v) { return "" + v; }
+      public static int add(int a, int b) { return a + b; }
+    }`);
+    const classes = [parseClassMeta(bytes)];
+    const reg = buildMethodRegistry(classes);
+    // Methods should be correctly named despite the long constant in the CP
+    assert.ok(reg["LongConst.convert(J)"], "convert(J) should be registered");
+    assert.ok(reg["LongConst.add(II)"], "add(II) should be registered");
+    assert.equal(reg["LongConst.convert(J)"].returnType, "String");
+    assert.equal(reg["LongConst.add(II)"].returnType, "int");
+  });
+
   test("parseBundleMeta handles multi-class bundle", () => {
     const bytes = compile(`public class A {
       public static String run() { return "a"; }
@@ -1507,5 +1576,498 @@ describe("Class reader", () => {
     assert.equal(classes.length, 2);
     const names = classes.map(c => c.name).sort();
     assert.deepEqual(names, ["A", "B"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// New syntax tests
+// ---------------------------------------------------------------------------
+
+describe("Parser – new syntax", () => {
+  test("do-while loop", () => {
+    const src = `public class DoWhile {
+      public static String run() {
+        int i = 0;
+        do { i = i + 1; } while (i < 3);
+        return "" + i;
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods[0].body;
+    assert.equal(body[1].kind, "doWhile");
+  });
+
+  test("throw statement", () => {
+    const src = `public class ThrowTest {
+      public static String run() {
+        throw new RuntimeException();
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods[0].body;
+    assert.equal(body[0].kind, "throw");
+  });
+
+  test("try-catch", () => {
+    const src = `public class TryCatch {
+      public static String run() {
+        try {
+          int x = 1;
+        } catch (Exception e) {
+          int y = 2;
+        }
+        return "ok";
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods[0].body;
+    assert.equal(body[0].kind, "tryCatch");
+    const tc = body[0] as any;
+    assert.equal(tc.catches.length, 1);
+    assert.equal(tc.catches[0].exType, "Exception");
+    assert.equal(tc.catches[0].varName, "e");
+  });
+
+  test("try-catch-finally", () => {
+    const src = `public class TryCatchFinally {
+      public static String run() {
+        try { int x = 1; }
+        catch (Exception e) { int y = 2; }
+        finally { int z = 3; }
+        return "ok";
+      }
+    }`;
+    const cls = parse(lex(src));
+    const tc = cls.methods[0].body[0] as any;
+    assert.equal(tc.kind, "tryCatch");
+    assert.ok(tc.finallyBody);
+    assert.ok(tc.finallyBody.length > 0);
+  });
+
+  test("enhanced for loop", () => {
+    const src = `public class ForEach {
+      public static String run() {
+        int[] arr = new int[3];
+        for (int x : arr) {
+          int y = x;
+        }
+        return "ok";
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods[0].body;
+    assert.equal(body[1].kind, "forEach");
+    const fe = body[1] as any;
+    assert.equal(fe.varName, "x");
+    assert.equal(fe.varType, "int");
+  });
+
+  test("multiple variable declaration", () => {
+    const src = `public class MultiDecl {
+      public static String run() {
+        int a = 1, b = 2;
+        return "" + a + b;
+      }
+    }`;
+    const cls = parse(lex(src));
+    // Multi-decl is flattened into the enclosing block
+    const body = cls.methods[0].body;
+    assert.equal(body[0].kind, "varDecl");
+    assert.equal((body[0] as any).name, "a");
+    assert.equal(body[1].kind, "varDecl");
+    assert.equal((body[1] as any).name, "b");
+  });
+
+  test("switch colon syntax", () => {
+    const src = `public class SwitchColon {
+      public static String run() {
+        int x = 1;
+        switch (x) {
+          case 1:
+            return "one";
+          case 2:
+            return "two";
+          default:
+            return "other";
+        }
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods[0].body;
+    assert.equal(body[1].kind, "switch");
+    const sw = body[1] as any;
+    assert.equal(sw.cases.length, 3);
+  });
+
+  test("labeled statement and break label", () => {
+    const src = `public class LabelTest {
+      public static String run() {
+        outer: for (int i = 0; i < 3; i++) {
+          break outer;
+        }
+        return "ok";
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods[0].body;
+    assert.equal(body[0].kind, "labeled");
+    const lbl = body[0] as any;
+    assert.equal(lbl.label, "outer");
+    assert.equal(lbl.stmt.kind, "for");
+  });
+
+  test("prefix increment", () => {
+    const src = `public class PreInc {
+      public static String run() {
+        int i = 5;
+        int j = ++i;
+        return "" + j;
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods[0].body;
+    const decl = body[1] as any;
+    assert.equal(decl.init.kind, "preIncrement");
+    assert.equal(decl.init.op, "++");
+  });
+
+  test("prefix decrement", () => {
+    const src = `public class PreDec {
+      public static String run() {
+        int i = 5;
+        int j = --i;
+        return "" + j;
+      }
+    }`;
+    const cls = parse(lex(src));
+    const decl = cls.methods[0].body[1] as any;
+    assert.equal(decl.init.kind, "preIncrement");
+    assert.equal(decl.init.op, "--");
+  });
+
+  test("break and continue", () => {
+    const src = `public class BreakCont {
+      public static String run() {
+        for (int i = 0; i < 10; i++) {
+          if (i == 5) break;
+          if (i == 3) continue;
+        }
+        return "ok";
+      }
+    }`;
+    const cls = parse(lex(src));
+    // Should parse without error
+    assert.equal(cls.name, "BreakCont");
+  });
+});
+
+describe("Code generator – new syntax", () => {
+  test("compiles do-while loop", () => {
+    const bytes = compile(`public class DoWhile {
+      public static String run() {
+        int i = 0;
+        do { i = i + 1; } while (i < 3);
+        return "" + i;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles throw statement", () => {
+    const bytes = compile(`public class ThrowTest {
+      public static String run() {
+        throw new RuntimeException();
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles try-catch", () => {
+    const bytes = compile(`public class TryCatch {
+      public static String run() {
+        try {
+          int x = 1;
+        } catch (Exception e) {
+          int y = 2;
+        }
+        return "ok";
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles try-catch-finally", () => {
+    const bytes = compile(`public class TryCatchFinally {
+      public static String run() {
+        try { int x = 1; }
+        catch (Exception e) { int y = 2; }
+        finally { int z = 3; }
+        return "ok";
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles enhanced for on array", () => {
+    const bytes = compile(`public class ForEachArr {
+      public static String run() {
+        int[] arr = new int[3];
+        int sum = 0;
+        for (int x : arr) {
+          sum = sum + x;
+        }
+        return "" + sum;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles multiple variable declaration", () => {
+    const bytes = compile(`public class MultiDecl {
+      public static String run() {
+        int a = 1, b = 2, c = 3;
+        return "" + (a + b + c);
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles switch with colon syntax", () => {
+    const bytes = compile(`public class SwitchColon {
+      public static String run() {
+        int x = 2;
+        switch (x) {
+          case 1:
+            return "one";
+          case 2:
+            return "two";
+          default:
+            return "other";
+        }
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles labeled break", () => {
+    const bytes = compile(`public class LabelBreak {
+      public static String run() {
+        int count = 0;
+        outer: for (int i = 0; i < 5; i++) {
+          for (int j = 0; j < 5; j++) {
+            if (j == 2) break outer;
+            count = count + 1;
+          }
+        }
+        return "" + count;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles prefix increment", () => {
+    const bytes = compile(`public class PreInc {
+      public static String run() {
+        int i = 5;
+        int j = ++i;
+        return "" + j;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles break and continue in loops", () => {
+    const bytes = compile(`public class BreakCont {
+      public static String run() {
+        int sum = 0;
+        for (int i = 0; i < 10; i++) {
+          if (i == 7) break;
+          if (i == 3) continue;
+          sum = sum + i;
+        }
+        return "" + sum;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles continue in while loop", () => {
+    const bytes = compile(`public class WhileCont {
+      public static String run() {
+        int i = 0;
+        int sum = 0;
+        while (i < 5) {
+          i = i + 1;
+          if (i == 3) continue;
+          sum = sum + i;
+        }
+        return "" + sum;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles break in do-while", () => {
+    const bytes = compile(`public class DoBreak {
+      public static String run() {
+        int i = 0;
+        do {
+          i = i + 1;
+          if (i == 3) break;
+        } while (i < 10);
+        return "" + i;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+});
+
+describe("Runtime – new syntax", () => {
+  test("do-while executes correctly", async () => {
+    const result = await runSnippet(`public class DoWhileRun {
+      public static String run() {
+        int i = 0;
+        do { i = i + 1; } while (i < 3);
+        return "" + i;
+      }
+    }`, "DoWhileRun");
+    assert.equal(result, "3");
+  });
+
+  test("prefix increment returns new value", async () => {
+    const result = await runSnippet(`public class PreIncRun {
+      public static String run() {
+        int i = 5;
+        int j = ++i;
+        return "" + j;
+      }
+    }`, "PreIncRun");
+    assert.equal(result, "6");
+  });
+
+  test("prefix decrement returns new value", async () => {
+    const result = await runSnippet(`public class PreDecRun {
+      public static String run() {
+        int i = 5;
+        int j = --i;
+        return "" + j;
+      }
+    }`, "PreDecRun");
+    assert.equal(result, "4");
+  });
+
+  test("break exits loop early", async () => {
+    const result = await runSnippet(`public class BreakRun {
+      public static String run() {
+        int sum = 0;
+        for (int i = 0; i < 10; i++) {
+          if (i == 5) break;
+          sum = sum + i;
+        }
+        return "" + sum;
+      }
+    }`, "BreakRun");
+    assert.equal(result, "10"); // 0+1+2+3+4
+  });
+
+  test("continue skips iteration", async () => {
+    const result = await runSnippet(`public class ContinueRun {
+      public static String run() {
+        int sum = 0;
+        for (int i = 0; i < 5; i++) {
+          if (i == 2) continue;
+          sum = sum + i;
+        }
+        return "" + sum;
+      }
+    }`, "ContinueRun");
+    assert.equal(result, "8"); // 0+1+3+4
+  });
+
+  test("labeled break exits outer loop", async () => {
+    const result = await runSnippet(`public class LabelBreakRun {
+      public static String run() {
+        int count = 0;
+        outer: for (int i = 0; i < 5; i++) {
+          for (int j = 0; j < 5; j++) {
+            if (j == 2) break outer;
+            count = count + 1;
+          }
+        }
+        return "" + count;
+      }
+    }`, "LabelBreakRun");
+    assert.equal(result, "2"); // j=0, j=1 then break outer
+  });
+
+  test("multiple variable declaration works", async () => {
+    const result = await runSnippet(`public class MultiDeclRun {
+      public static String run() {
+        int a = 10, b = 20, c = 30;
+        return "" + (a + b + c);
+      }
+    }`, "MultiDeclRun");
+    assert.equal(result, "60");
+  });
+
+  test("switch colon syntax executes", async () => {
+    const result = await runSnippet(`public class SwitchColonRun {
+      public static String run() {
+        int x = 2;
+        switch (x) {
+          case 1:
+            return "one";
+          case 2:
+            return "two";
+          default:
+            return "other";
+        }
+      }
+    }`, "SwitchColonRun");
+    assert.equal(result, "two");
+  });
+
+  test("enhanced for on array executes", async () => {
+    const result = await runSnippet(`public class ForEachRun {
+      public static String run() {
+        int[] arr = { 10, 20, 30 };
+        int sum = 0;
+        for (int x : arr) {
+          sum = sum + x;
+        }
+        return "" + sum;
+      }
+    }`, "ForEachRun");
+    assert.equal(result, "60");
+  });
+
+  test("break in do-while executes", async () => {
+    const result = await runSnippet(`public class DoBreakRun {
+      public static String run() {
+        int i = 0;
+        do {
+          i = i + 1;
+          if (i == 3) break;
+        } while (i < 10);
+        return "" + i;
+      }
+    }`, "DoBreakRun");
+    assert.equal(result, "3");
+  });
+
+  test("continue in while loop executes", async () => {
+    const result = await runSnippet(`public class WhileContRun {
+      public static String run() {
+        int i = 0;
+        int sum = 0;
+        while (i < 5) {
+          i = i + 1;
+          if (i == 3) continue;
+          sum = sum + i;
+        }
+        return "" + sum;
+      }
+    }`, "WhileContRun");
+    assert.equal(result, "12"); // 1+2+4+5
   });
 });

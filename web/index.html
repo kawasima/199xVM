@@ -81,16 +81,89 @@
     button#run-btn:hover { background: var(--accent-hover); }
     button#run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-    select#snippet {
+    @keyframes spin { to { transform: rotate(360deg); } }
+    button#run-btn .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      vertical-align: middle;
+    }
+
+    /* ── snippet menu ── */
+    .snippet-menu {
+      position: relative;
+    }
+    .snippet-menu-btn {
       background: var(--bg);
       color: var(--text);
       border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 5px 10px;
+      padding: 5px 12px;
       font-family: var(--font-mono);
       font-size: 12px;
       cursor: pointer;
-      max-width: 260px;
+      white-space: nowrap;
+    }
+    .snippet-menu-btn:hover { border-color: var(--accent); }
+    .snippet-categories {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      margin-top: 4px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 0;
+      z-index: 100;
+      min-width: 180px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .snippet-menu.open > .snippet-categories { display: block; }
+    .snippet-categories .cat-item {
+      position: relative;
+      padding: 6px 14px;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .snippet-categories .cat-item:hover {
+      background: var(--accent);
+      color: #fff;
+    }
+    .snippet-categories .cat-item .arrow { font-size: 10px; opacity: 0.6; }
+    .cat-item:hover .arrow { opacity: 1; }
+    .cat-submenu {
+      display: none;
+      position: absolute;
+      left: 100%;
+      top: -4px;
+      margin-left: 2px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 0;
+      min-width: 220px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .cat-item:hover > .cat-submenu { display: block; }
+    .cat-submenu .snippet-item {
+      padding: 5px 14px;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .cat-submenu .snippet-item:hover {
+      background: var(--accent);
+      color: #fff;
     }
 
     .toolbar-sep {
@@ -245,57 +318,80 @@
   <div id="toolbar">
     <button id="run-btn" onclick="runCode()">&#9654; Run</button>
     <div class="toolbar-sep"></div>
-    <select id="snippet" onchange="loadSnippet()">
-      <option value="">— load example —</option>
-      <optgroup label="Basics">
-        <option value="hello">Hello World</option>
-        <option value="arithmetic">Arithmetic</option>
-        <option value="strings">String ops</option>
-        <option value="string_format">String.formatted()</option>
-        <option value="loop">Loop &amp; accumulate</option>
-        <option value="while_loop">While loop</option>
-        <option value="nested_if">Nested if / ternary</option>
-      </optgroup>
-      <optgroup label="OOP">
-        <option value="class_fields">Class with fields</option>
-        <option value="inheritance">Inheritance</option>
-        <option value="record_type">Record type</option>
-        <option value="static_method">Static methods</option>
-      </optgroup>
-      <optgroup label="Algorithms">
-        <option value="fibonacci">Fibonacci (recursive)</option>
-        <option value="fibonacci_iter">Fibonacci (iterative)</option>
-        <option value="factorial">Factorial</option>
-        <option value="gcd">GCD / Euclid</option>
-        <option value="bubble_sort">Bubble sort</option>
-        <option value="binary_search">Binary search</option>
-      </optgroup>
-      <optgroup label="Collections">
-        <option value="arraylist">ArrayList</option>
-        <option value="list_ops">List operations</option>
-      </optgroup>
-      <optgroup label="Modern Java">
-        <option value="lambda_method_ref">Lambda &amp; method reference</option>
-        <option value="switch_expr">Switch expression</option>
-        <option value="pattern_matching">Pattern matching</option>
-        <option value="record_modern">Record</option>
-      </optgroup>
-      <optgroup label="Raoh">
-        <option value="raoh_object_string">Raoh ObjectDecoders: string</option>
-        <option value="raoh_object_number">Raoh ObjectDecoders: int/decimal</option>
-        <option value="raoh_map_fields">Raoh MapDecoders: field decode</option>
-        <option value="raoh_map_combine">Raoh MapDecoders: combine</option>
-        <option value="raoh_json_fields">Raoh JsonDecoders: field decode</option>
-        <option value="raoh_json_combine">Raoh JsonDecoders: combine</option>
-      </optgroup>
-      <optgroup label="JVM Showcase">
-        <option value="jvm_reflection_record">Reflection + Record metadata</option>
-        <option value="jvm_bigdecimal">BigDecimal / BigInteger</option>
-        <option value="jvm_completable_future">CompletableFuture</option>
-        <option value="jvm_forkjoin">ForkJoin / RecursiveTask</option>
-        <option value="jvm_pattern_switch_record">Pattern + Switch + Record</option>
-      </optgroup>
-    </select>
+    <div class="snippet-menu" id="snippet-menu">
+      <button class="snippet-menu-btn" onclick="toggleSnippetMenu()">Examples</button>
+      <div class="snippet-categories">
+        <div class="cat-item">
+          Basics <span class="arrow">&#9654;</span>
+          <div class="cat-submenu">
+            <div class="snippet-item" data-key="hello">Hello World</div>
+            <div class="snippet-item" data-key="arithmetic">Arithmetic</div>
+            <div class="snippet-item" data-key="strings">String ops</div>
+            <div class="snippet-item" data-key="string_format">String.formatted()</div>
+            <div class="snippet-item" data-key="loop">Loop &amp; accumulate</div>
+            <div class="snippet-item" data-key="while_loop">While loop</div>
+            <div class="snippet-item" data-key="nested_if">Nested if / ternary</div>
+          </div>
+        </div>
+        <div class="cat-item">
+          OOP <span class="arrow">&#9654;</span>
+          <div class="cat-submenu">
+            <div class="snippet-item" data-key="class_fields">Class with fields</div>
+            <div class="snippet-item" data-key="inheritance">Inheritance</div>
+            <div class="snippet-item" data-key="record_type">Record type</div>
+            <div class="snippet-item" data-key="static_method">Static methods</div>
+          </div>
+        </div>
+        <div class="cat-item">
+          Algorithms <span class="arrow">&#9654;</span>
+          <div class="cat-submenu">
+            <div class="snippet-item" data-key="fibonacci">Fibonacci (recursive)</div>
+            <div class="snippet-item" data-key="fibonacci_iter">Fibonacci (iterative)</div>
+            <div class="snippet-item" data-key="factorial">Factorial</div>
+            <div class="snippet-item" data-key="gcd">GCD / Euclid</div>
+            <div class="snippet-item" data-key="bubble_sort">Bubble sort</div>
+            <div class="snippet-item" data-key="binary_search">Binary search</div>
+          </div>
+        </div>
+        <div class="cat-item">
+          Collections <span class="arrow">&#9654;</span>
+          <div class="cat-submenu">
+            <div class="snippet-item" data-key="arraylist">ArrayList</div>
+            <div class="snippet-item" data-key="list_ops">List operations</div>
+          </div>
+        </div>
+        <div class="cat-item">
+          Modern Java <span class="arrow">&#9654;</span>
+          <div class="cat-submenu">
+            <div class="snippet-item" data-key="lambda_method_ref">Lambda &amp; method ref</div>
+            <div class="snippet-item" data-key="switch_expr">Switch expression</div>
+            <div class="snippet-item" data-key="pattern_matching">Pattern matching</div>
+            <div class="snippet-item" data-key="record_modern">Record</div>
+          </div>
+        </div>
+        <div class="cat-item">
+          Raoh <span class="arrow">&#9654;</span>
+          <div class="cat-submenu">
+            <div class="snippet-item" data-key="raoh_object_string">ObjectDecoders: string</div>
+            <div class="snippet-item" data-key="raoh_object_number">ObjectDecoders: int/decimal</div>
+            <div class="snippet-item" data-key="raoh_map_fields">MapDecoders: field decode</div>
+            <div class="snippet-item" data-key="raoh_map_combine">MapDecoders: combine</div>
+            <div class="snippet-item" data-key="raoh_json_fields">JsonDecoders: field decode</div>
+            <div class="snippet-item" data-key="raoh_json_combine">JsonDecoders: combine</div>
+          </div>
+        </div>
+        <div class="cat-item">
+          JVM Showcase <span class="arrow">&#9654;</span>
+          <div class="cat-submenu">
+            <div class="snippet-item" data-key="jvm_reflection_record">Reflection + Record</div>
+            <div class="snippet-item" data-key="jvm_bigdecimal">BigDecimal / BigInteger</div>
+            <div class="snippet-item" data-key="jvm_completable_future">CompletableFuture</div>
+            <div class="snippet-item" data-key="jvm_forkjoin">ForkJoin / RecursiveTask</div>
+            <div class="snippet-item" data-key="jvm_pattern_switch_record">Pattern + Switch + Record</div>
+          </div>
+        </div>
+      </div>
+    </div>
     <span class="status" id="status">Loading WASM…</span>
   </div>
 
@@ -328,6 +424,13 @@
       </div>
     </div>
   </div>
+
+  <script>
+    function toggleSnippetMenu() {
+      var menu = document.getElementById("snippet-menu");
+      if (menu) menu.classList.toggle("open");
+    }
+  </script>
 
   <script type="module">
     import { compile, disassemble, parseBundleMeta, buildMethodRegistry, setMethodRegistry, readJar, classFilesToBundle } from "./javac.js?v=__BUILD_TIMESTAMP__";
@@ -892,6 +995,12 @@ public class JvmPatternSwitchRecord {
     let wasmReady = false;
     let jvmModule = null;
     let classBundle = null;
+    const ASSET_VERSION = "__BUILD_TIMESTAMP__";
+
+    function withVersion(url) {
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}v=${ASSET_VERSION}`;
+    }
 
     async function initWasm() {
       const statusEl = document.getElementById("status");
@@ -911,7 +1020,7 @@ public class JvmPatternSwitchRecord {
 
     async function loadClassBundle() {
       try {
-        const shimResp = await fetch("../jdk-shim/bundle.bin");
+        const shimResp = await fetch(withVersion("../jdk-shim/bundle.bin"));
         if (!shimResp.ok) throw new Error(`shim bundle: HTTP ${shimResp.status}`);
         classBundle = new Uint8Array(await shimResp.arrayBuffer());
         const classMetas = parseBundleMeta(classBundle);
@@ -927,7 +1036,7 @@ public class JvmPatternSwitchRecord {
     /** Load a JAR from a URL, register its methods, and append to classBundle. */
     window.loadJar = async function(url) {
       log("info", `Loading JAR: ${url} ...`);
-      const resp = await fetch(url);
+      const resp = await fetch(withVersion(url));
       if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
       const jarBytes = new Uint8Array(await resp.arrayBuffer());
       const classFiles = await readJar(jarBytes);
@@ -1011,14 +1120,32 @@ public class JvmPatternSwitchRecord {
         return;
       }
 
+      const btn = document.getElementById("run-btn");
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>';
+
       clearOutput();
       const source = editorView.state.doc.toString();
       const className = extractRunClassName(source);
       if (!className) {
         log("err", "Cannot find 'public class <Name>' in source.");
+        btn.disabled = false;
+        btn.innerHTML = "&#9654; Run";
         return;
       }
 
+      // Defer heavy work so the browser can repaint (show spinner)
+      setTimeout(() => {
+        try {
+          _runCodeInner(source, className);
+        } finally {
+          btn.disabled = false;
+          btn.innerHTML = "&#9654; Run";
+        }
+      }, 20);
+    };
+
+    function _runCodeInner(source, className) {
       // Compile
       let userBundle;
       let classBytes;
@@ -1030,11 +1157,6 @@ public class JvmPatternSwitchRecord {
           // Already a length-prefixed multi-class bundle — use as-is
           userBundle = classBytes;
           log("ok", `Compiled ${classBytes.length} bytes (multi-class bundle).`);
-          // Show bytecode of last class for display
-          const lastLen = (classBytes[classBytes.length - 4 - 1] << 24) |
-                          (classBytes[classBytes.length - 3 - 1] << 16) |
-                          (classBytes[classBytes.length - 2 - 1] << 8)  |
-                           classBytes[classBytes.length - 1 - 1];
           // Parse bundle to find last class for disassembly
           let off = 0;
           let lastClass = null;
@@ -1076,18 +1198,28 @@ public class JvmPatternSwitchRecord {
       } catch (e) {
         log("err", `Runtime error: ${String(e)}`);
       }
-    };
+    }
 
-    window.loadSnippet = function() {
-      const sel = document.getElementById("snippet");
-      const key = sel.value;
+    // Close menu when clicking outside
+    document.addEventListener("click", (e) => {
+      const menu = document.getElementById("snippet-menu");
+      if (menu && !menu.contains(e.target)) {
+        menu.classList.remove("open");
+      }
+    });
+
+    // Snippet item click handler
+    document.getElementById("snippet-menu").addEventListener("click", (e) => {
+      const item = e.target.closest(".snippet-item");
+      if (!item) return;
+      const key = item.dataset.key;
       if (key && SNIPPETS[key]) {
         editorView.dispatch({
           changes: { from: 0, to: editorView.state.doc.length, insert: SNIPPETS[key] },
         });
       }
-      sel.value = "";
-    };
+      document.getElementById("snippet-menu").classList.remove("open");
+    });
 
     window.clearOutput = function() {
       document.getElementById("output").innerHTML = "";

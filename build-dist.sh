@@ -12,6 +12,14 @@ GCS_TARGET="${1:-}"   # e.g. gs://mapper/bucket
 BUILD_TS="$(date +%s)"
 M2_REPO="${HOME}/.m2/repository"
 
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Error: required command not found: $cmd"
+    exit 1
+  fi
+}
+
 find_latest_artifact_jar() {
   local group_path="$1"
   local artifact="$2"
@@ -36,6 +44,14 @@ find_preferred_or_latest_jar() {
   fi
   find_latest_artifact_jar "$group_path" "$artifact"
 }
+
+echo "==> Building prerequisites..."
+require_cmd javac
+require_cmd npm
+require_cmd wasm-pack
+./build-shim.sh
+npm run build:javac
+wasm-pack build jvm-core --target web
 
 echo "==> Cleaning $DIST/"
 rm -rf "$DIST"
@@ -107,20 +123,41 @@ if [ -z "$GCS_TARGET" ]; then
 fi
 
 echo ""
-echo "==> Uploading to $GCS_TARGET ..."
+echo "==> Uploading to $GCS_TARGET (incremental) ..."
 
-# Upload static assets with long cache (1 year)
-gcloud storage cp "$DIST/javac.js"                "${GCS_TARGET}/javac.js"               --cache-control="public,max-age=31536000"
-gcloud storage cp "$DIST/pkg/jvm_core.js"         "${GCS_TARGET}/pkg/jvm_core.js"        --cache-control="public,max-age=31536000"
-gcloud storage cp "$DIST/pkg/jvm_core_bg.wasm"    "${GCS_TARGET}/pkg/jvm_core_bg.wasm"   --cache-control="public,max-age=31536000" --content-type="application/wasm"
-gcloud storage cp "$DIST/bundle/shim.bin"         "${GCS_TARGET}/bundle/shim.bin"        --cache-control="public,max-age=31536000" --content-type="application/octet-stream"
-gcloud storage cp "$DIST/raoh.jar"                "${GCS_TARGET}/raoh.jar"               --cache-control="public,max-age=31536000" --content-type="application/java-archive"
-gcloud storage cp "$DIST/raoh-json.jar"           "${GCS_TARGET}/raoh-json.jar"          --cache-control="public,max-age=31536000" --content-type="application/java-archive"
-gcloud storage cp "$DIST/jackson-databind.jar"    "${GCS_TARGET}/jackson-databind.jar"   --cache-control="public,max-age=31536000" --content-type="application/java-archive"
-gcloud storage cp "$DIST/jackson-core.jar"        "${GCS_TARGET}/jackson-core.jar"       --cache-control="public,max-age=31536000" --content-type="application/java-archive"
-gcloud storage cp "$DIST/jackson-annotations.jar" "${GCS_TARGET}/jackson-annotations.jar" --cache-control="public,max-age=31536000" --content-type="application/java-archive"
+# upload_if_changed <local_path> <gcs_path> [extra gcloud flags...]
+# Compares local MD5 with remote MD5 metadata; skips upload when identical.
+upload_if_changed() {
+  local src="$1"; shift
+  local dst="$1"; shift
+  local local_md5
+  local_md5="$(md5 -q "$src" 2>/dev/null || md5sum "$src" | cut -d' ' -f1)"
+  local remote_md5
+  remote_md5="$(gcloud storage objects describe "$dst" --format='value(md5_hash)' 2>/dev/null || true)"
+  # gcloud returns base64-encoded MD5; convert local hex to base64 for comparison
+  local local_md5_b64
+  local_md5_b64="$(printf '%s' "$local_md5" | xxd -r -p | base64)"
+  if [ "$local_md5_b64" = "$remote_md5" ]; then
+    echo "  skip (unchanged): $(basename "$src")"
+    return 0
+  fi
+  echo "  upload: $(basename "$src")"
+  gcloud storage cp "$src" "$dst" "$@"
+}
 
-# Upload index.html with no-cache (always fresh)
+# Static assets with long cache (1 year)
+upload_if_changed "$DIST/javac.js"                "${GCS_TARGET}/javac.js"               --cache-control="public,max-age=31536000"
+upload_if_changed "$DIST/pkg/jvm_core.js"         "${GCS_TARGET}/pkg/jvm_core.js"        --cache-control="public,max-age=31536000"
+upload_if_changed "$DIST/pkg/jvm_core_bg.wasm"    "${GCS_TARGET}/pkg/jvm_core_bg.wasm"   --cache-control="public,max-age=31536000" --content-type="application/wasm"
+upload_if_changed "$DIST/bundle/shim.bin"         "${GCS_TARGET}/bundle/shim.bin"        --cache-control="public,max-age=31536000" --content-type="application/octet-stream"
+upload_if_changed "$DIST/raoh.jar"                "${GCS_TARGET}/raoh.jar"               --cache-control="public,max-age=31536000" --content-type="application/java-archive"
+upload_if_changed "$DIST/raoh-json.jar"           "${GCS_TARGET}/raoh-json.jar"          --cache-control="public,max-age=31536000" --content-type="application/java-archive"
+upload_if_changed "$DIST/jackson-databind.jar"    "${GCS_TARGET}/jackson-databind.jar"   --cache-control="public,max-age=31536000" --content-type="application/java-archive"
+upload_if_changed "$DIST/jackson-core.jar"        "${GCS_TARGET}/jackson-core.jar"       --cache-control="public,max-age=31536000" --content-type="application/java-archive"
+upload_if_changed "$DIST/jackson-annotations.jar" "${GCS_TARGET}/jackson-annotations.jar" --cache-control="public,max-age=31536000" --content-type="application/java-archive"
+
+# index.html is always uploaded (no-cache)
+echo "  upload: index.html (always)"
 gcloud storage cp "$DIST/index.html"              "${GCS_TARGET}/index.html"             --cache-control="no-cache" --content-type="text/html; charset=utf-8"
 
 echo ""

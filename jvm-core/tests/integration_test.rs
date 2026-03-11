@@ -106,3 +106,51 @@ fn factorial_long() {
     );
     assert_eq!(result, "10!=3628800 15!=1307674368000");
 }
+
+// ---------------------------------------------------------------------------
+// Arrays.copyOf(int[], int)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn arrays_copy_of_int() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "ArraysCopyOfTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "5:1,3,0");
+}
+
+// ---------------------------------------------------------------------------
+// Stream.reduce(BinaryOperator) returning Optional
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stream_reduce_optional() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "StreamReduceTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "abc:false");
+}
+
+// ---------------------------------------------------------------------------
+// Lambda SAM dispatch respects argument arity (overloaded interface methods)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lambda_overload_arity() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "LambdaOverloadTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "HELLO!|HI?");
+}

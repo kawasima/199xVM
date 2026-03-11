@@ -25,18 +25,15 @@ $HOME/.cargo/bin/cargo test --package jvm-core
 - Always run `npm test` after modifying `web/javac.ts`.
 
 ## JDK Shim Design
-- **Target: Java 25 API compatibility.** JDK shim classes should provide the same public API as JDK 25.
+- **Target: Java 25 API compatibility.** Shim classes provide the same public API as JDK 25.
 - JDK standard library classes are implemented as pure Java shims in `jdk-shim/` (compiled to bytecode).
-- **Do NOT add native stubs in Rust** for classes that can be implemented in Java bytecode. If the class doesn't require native (OS-level) functionality, write a Java shim instead.
-- To add a new JDK class: create the `.java` file under `jdk-shim/java/...`, add it to `build-shim.sh` entry points if needed, and run `./build-shim.sh`.
-- The VM only uses native stubs (`native_virtual` in `interpreter.rs`) for truly native operations (e.g., `String` backed by Rust `String`, `PrintStream`).
+- To add a new JDK class: create `.java` under `jdk-shim/java/...`, add to `build-shim.sh` entry points if needed, run `./build-shim.sh`.
+- Native stubs (`native_virtual` in `interpreter.rs`) are only for truly native operations (e.g., `String` backed by Rust, `PrintStream`). **Do NOT add native stubs** for classes implementable in Java.
 
 ### Shim Implementation Policy
-- **JDK source copy first**: When implementing a shim, start by copying the JDK 25 source. Replace only the parts that depend on JDK-internal APIs (`jdk.internal.*`, `sun.*`, `@IntrinsicCandidate`, etc.) with simple standalone implementations.
-- **String is native-backed**: This VM's `String` is backed by Rust `NativePayload::JavaString`, not a byte array. Classes that construct strings at the byte level (Integer.toString, AbstractStringBuilder) must use their own implementation rather than JDK's internal compact-string path.
-- **Remove serialization**: Serialization-related code (`readObject`, `writeObject`, `serialVersionUID`, `SharedSecrets` for deserialization validation) can be removed — this VM does not support Java serialization.
-- **Remove `Unsafe` usage**: Replace `jdk.internal.misc.Unsafe` usages with standard field access.
-- **Annotations**: Strip `@IntrinsicCandidate`, `@ForceInline`, `@Stable`, `@jdk.internal.ValueBased` — they have no effect in this VM.
+1. **JDK 25ソースをコピーして始める。** `jdk.internal.*`、`sun.*`、nativeメソッドの部分だけ代替実装に置き換える。ゼロから書かない。
+2. **String is native-backed**: `NativePayload::JavaString`（Rust String）で管理。JDKのcompact-string (byte[]) パスは使えない。`Integer.toString`、`AbstractStringBuilder`等は独自実装を維持。
+3. **削除してよいもの**: serialization (`readObject`/`writeObject`/`serialVersionUID`/`SharedSecrets`)、`Unsafe`（標準フィールドアクセスに置換）、JDK内部アノテーション (`@IntrinsicCandidate`/`@ForceInline`/`@Stable`/`@ValueBased`)。
 
 ## Web Compiler (`web/javac.ts`)
 - The `KNOWN_METHODS` table maps JDK method signatures to their descriptors for correct bytecode emission.

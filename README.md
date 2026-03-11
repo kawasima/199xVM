@@ -17,8 +17,8 @@ No transpilation, no server round-trip — write Java in the editor, compile to 
 
 - **Browser-first** — the only runtime is a `.wasm` module + JS, served as static files
 - **Zero server dependency** — compile and run Java entirely in the browser
-- **JDK shims in pure Java** — standard library classes (`ArrayList`, `HashMap`, `StringBuilder`, etc.) are implemented as Java source compiled to bytecode, not as native Rust stubs
-- **Hackable** — the interpreter is ~1,600 lines of Rust; the compiler is ~2,400 lines of TypeScript
+- **JDK shims in pure Java** — standard library classes are implemented as Java source compiled to bytecode, not as native Rust stubs
+- **Hackable** — the interpreter is ~4,500 lines of Rust; the compiler is ~5,600 lines of TypeScript
 
 ---
 
@@ -35,13 +35,20 @@ No transpilation, no server round-trip — write Java in the editor, compile to 
 ├── web/
 │   ├── index.html          # playground UI (CodeMirror editor + output)
 │   ├── javac.ts            # in-browser Java subset compiler
-│   └── javac.test.ts       # compiler test suite
-├── jdk-shim/               # JDK standard library shims (pure Java)
+│   ├── class-reader.ts     # .class / JAR parser for method registry
+│   └── javac.test.ts       # compiler test suite (146 tests)
+├── jdk-shim/               # JDK standard library shims (pure Java, 249 classes)
 │   ├── java/lang/          # String, StringBuilder, Integer, Record, ...
-│   ├── java/util/          # ArrayList, HashMap, Optional, ...
+│   ├── java/util/          # ArrayList, HashMap, Optional, stream, ...
+│   ├── java/math/          # BigInteger, BigDecimal, MathContext, ...
+│   ├── java/time/          # Month, ZoneId, temporal, format, ...
+│   ├── java/io/            # InputStream, OutputStream, Serializable, ...
+│   ├── java/text/          # DateFormat, SimpleDateFormat, Formatter, ...
 │   └── bundle.bin          # compiled shim classes (length-prefixed bundle)
+├── raoh-classes/            # Pre-compiled Raoh decoder library (66 classes)
 ├── build-shim.sh           # compile shim sources → bundle.bin
-└── build-test-bundle.sh    # compile test classes → test-classes/bundle.bin
+├── build-test-bundle.sh    # compile test classes → test-classes/bundle.bin
+└── build-dist.sh           # build all artifacts and deploy to GCS
 ```
 
 ### Class bundle format
@@ -69,7 +76,7 @@ wasm-pack build jvm-core --target web
 
 ```sh
 ./build-shim.sh
-# → jdk-shim/bundle.bin (63 shim classes)
+# → jdk-shim/bundle.bin (249 shim classes)
 ```
 
 ### 3. Build the compiler
@@ -91,42 +98,65 @@ npx serve .
 
 ## In-browser compiler (`web/javac.ts`)
 
-The compiler supports a subset of Java:
+The compiler supports a substantial subset of Java:
 
 - Class declarations with fields, constructors, instance/static methods
 - Inheritance (`extends`) with `super()` calls
-- Record types
-- Control flow: `if`/`else`, `while`, `for`, ternary `? :`
-- Expressions: arithmetic, comparisons, logical `&&`/`||`/`!`, string concatenation
-- `new`, method calls (static, virtual), field access
+- Record types (with `Record` class attribute emission)
+- Control flow: `if`/`else`, `while`, `do-while`, `for`, enhanced `for`, `break`, `continue`, labeled `break`
+- Switch statements and switch expressions (including pattern matching, guards, record patterns)
+- Expressions: arithmetic, comparisons, logical `&&`/`||`/`!`, string concatenation, ternary `? :`
+- `new`, method calls (static, virtual, interface), field access
 - Arrays: `new int[n]`, `arr[i]`, `arr.length`
-- `import` resolution for JDK classes
+- Lambda expressions and method references (`invokedynamic` + `LambdaMetafactory`)
+- `instanceof` with type patterns and record patterns
+- Unboxing / boxing casts (e.g., `(int) someObject`)
+- `try`/`catch`/`finally`, `throw`
+- `import` resolution for JDK classes (named, wildcard, static)
 - Multi-class source files (compiled to length-prefixed bundle)
 
-### Example snippets included
+### Example snippets (playground)
 
 | Category | Snippets |
 | --- | --- |
-| Basics | Hello World, Arithmetic, String ops, Loops, Conditionals |
+| Basics | Hello World, Arithmetic, String ops, String.formatted(), Loops, Conditionals |
 | OOP | Class with fields, Inheritance, Record type, Static methods |
-| Algorithms | Fibonacci, Factorial, GCD, Bubble sort, Binary search |
+| Algorithms | Fibonacci (recursive/iterative), Factorial, GCD, Bubble sort, Binary search |
 | Collections | ArrayList, List operations |
+| Modern Java | Lambda & method ref, Switch expression, Pattern matching, Record |
+| Raoh | ObjectDecoders, MapDecoders, JsonDecoders (string, int/decimal, field, combine) |
+| JVM Showcase | Reflection + Record, BigDecimal, CompletableFuture, ForkJoin, Pattern + Switch + Record |
 
 ---
 
 ## JDK shim classes
 
-Standard library classes are implemented as **pure Java** in `jdk-shim/`, compiled to bytecode with `javac --patch-module`. This approach avoids native Rust stubs for anything that can be expressed in Java.
+Standard library classes are implemented as **pure Java** in `jdk-shim/`, compiled to bytecode with `javac --patch-module`. Shims target **Java 25 API compatibility** — implementations start from JDK 25 source, replacing only internal API dependencies (`jdk.internal.*`, `sun.*`).
 
-Currently shimmed:
-- `java.lang`: Object, String, StringBuilder, Integer, Long, Boolean, Record, Enum, ...
-- `java.util`: ArrayList, HashMap, Optional, Collections, Arrays, Iterator, ...
-- `java.util.stream`: Stream, Collectors (basic)
-- `java.util.function`: Function, Predicate, Consumer, Supplier, ...
+Currently shimmed (249 classes across 15 packages):
+
+- `java.lang`: Object, String, StringBuilder, Integer, Long, Float, Double, Boolean, Character, Math, System, Class, Record, Enum, 30+ exception types
+- `java.lang.reflect`: Field, Method, Constructor, Array, RecordComponent, Modifier, ...
+- `java.lang.annotation`: Annotation, Target, Retention, ...
+- `java.util`: ArrayList, HashMap, HashSet, LinkedHashMap, ArrayDeque, BitSet, Optional, Arrays, Collections, Formatter, ...
+- `java.util.stream`: Stream, StreamImpl, Collector, Collectors
+- `java.util.function`: Function, BiFunction, Predicate, Consumer, BiConsumer, Supplier
+- `java.util.regex`: Pattern, Matcher
+- `java.util.concurrent`: ForkJoinPool, CompletableFuture, ExecutorService, CountDownLatch, ConcurrentHashMap, RecursiveTask, ...
+- `java.util.concurrent.atomic`: AtomicReference, AtomicLong, ...
+- `java.util.concurrent.locks`: Lock, ReentrantLock, Condition
+- `java.math`: BigInteger, BigDecimal, MathContext, RoundingMode
+- `java.time`: Month, ZoneId, temporal (ChronoField, ChronoUnit), format (DateTimeFormatter)
+- `java.text`: DateFormat, SimpleDateFormat
+- `java.io`: InputStream, OutputStream, PrintStream, Serializable, ...
+- `java.beans`: ConstructorProperties, Transient
 
 Native stubs (Rust) are only used for operations requiring host access:
-- `String` methods (backed by Rust `String`)
-- `PrintStream.println` (output capture)
+
+- `String` methods (backed by Rust `NativePayload::JavaString`)
+- `PrintStream.println` / `System.out` (output capture)
+- `System.currentTimeMillis` (via `js_sys::Date::now()` on WASM)
+- `System.identityHashCode`
 
 ---
 
@@ -134,19 +164,21 @@ Native stubs (Rust) are only used for operations requiring host access:
 
 The interpreter covers:
 
-- Load/store: `aload`, `iload`, `lload`, `dload`, `astore`, `istore`, ...
-- Constants: `iconst`, `lconst`, `bipush`, `sipush`, `ldc`
-- Arithmetic: `iadd`, `isub`, `imul`, `idiv`, `irem`, `ineg`, `ladd`, `lsub`, ...
-- Comparisons: `if_icmp*`, `ifle`, `ifeq`, `lcmp`
+- Load/store: `aload`, `iload`, `lload`, `fload`, `dload`, `astore`, `istore`, `lstore`, ...
+- Constants: `iconst`, `lconst`, `fconst`, `dconst`, `bipush`, `sipush`, `ldc`, `ldc_w`, `ldc2_w`
+- Arithmetic: `iadd`, `isub`, `imul`, `idiv`, `irem`, `ineg`, `ladd`, `lsub`, `lmul`, `ldiv`, `fadd`, `fsub`, `fmul`, `fdiv`, `dadd`, `dsub`, `dmul`, `ddiv`, ...
+- Type conversion: `i2l`, `i2f`, `i2d`, `l2i`, `l2f`, `l2d`, `f2i`, `f2d`, `d2i`, `d2f`, `i2b`, `i2c`, `i2s`
+- Comparisons: `if_icmp*`, `if_acmp*`, `ifle`, `ifeq`, `ifne`, `ifnull`, `ifnonnull`, `lcmp`, `fcmpl`, `fcmpg`, `dcmpl`, `dcmpg`
 - Control flow: `goto`, `tableswitch`, `lookupswitch`
-- Objects: `new`, `newarray`, `anewarray`, `arraylength`
-- Arrays: `iaload`, `iastore`, `aaload`, `aastore`, `baload`, `bastore`
+- Objects: `new`, `newarray`, `anewarray`, `multianewarray`, `arraylength`
+- Arrays: `iaload`, `iastore`, `aaload`, `aastore`, `baload`, `bastore`, `caload`, `castore`, `laload`, `lastore`, `faload`, `fastore`, `daload`, `dastore`
 - Fields: `getfield`, `putfield`, `getstatic`, `putstatic`
 - Methods: `invokestatic`, `invokevirtual`, `invokespecial`, `invokeinterface`
 - `invokedynamic`: LambdaMetafactory, StringConcatFactory, SwitchBootstraps
 - Type checks: `instanceof`, `checkcast`
-- Exceptions: `athrow`
-- `wide` prefix, `dup`, `dup_x1`, `swap`, `pop`, `pop2`
+- Exceptions: `athrow`, try/catch dispatch via exception table
+- Stack: `dup`, `dup_x1`, `dup_x2`, `dup2`, `swap`, `pop`, `pop2`
+- `wide` prefix, `iinc`, `monitorenter`/`monitorexit` (no-op)
 
 ---
 
@@ -154,28 +186,29 @@ The interpreter covers:
 
 | Area | Status |
 | --- | --- |
-| Lambda / Stream | `invokedynamic` lambda capture works; stream operations are basic |
+| Lambda / Stream | `invokedynamic` lambda capture works; stream operations cover `map`, `filter`, `reduce`, `collect`, `forEach`, `findAny`, `min`, `toList` |
 | Threads / `synchronized` | Not supported (`monitorenter`/`monitorexit` are no-ops) |
 | GC | Reference-counting; no cycle collection |
-| Reflection | Not supported |
-| `java.io` / `java.net` | Not supported |
-| Exception handling (`try`/`catch`) | `athrow` works; catch dispatch is not implemented |
-| `float` / `double` | Basic ops work; `Math.*` transcendentals are not stubbed |
+| Reflection | Basic support: `getRecordComponents`, `getClass`, `getSimpleName`, `forName` |
+| `java.net` | Not supported |
+| `float` / `double` | Arithmetic works; `Math.*` transcendentals are partially stubbed |
 
 ---
 
 ## Development
 
 ```sh
-# Run compiler tests
+# Run compiler tests (146 tests)
 npm test
 
-# Run VM integration tests
-export PATH="$HOME/.cargo/bin:$PATH"
+# Run VM integration tests (8 tests)
 cargo test --package jvm-core
 
 # Rebuild everything
 ./build-shim.sh && npm run build:javac && wasm-pack build jvm-core --target web
+
+# Deploy (incremental upload to GCS)
+./build-dist.sh
 ```
 
 ---
@@ -184,4 +217,5 @@ cargo test --package jvm-core
 
 - **Interpreter**: [jvm-core/src/interpreter.rs](jvm-core/src/interpreter.rs) — each opcode is a `match` arm
 - **Compiler**: [web/javac.ts](web/javac.ts) — lexer, parser, code generator
+- **Class reader**: [web/class-reader.ts](web/class-reader.ts) — `.class` / JAR parser for method registry
 - **JDK shims**: [jdk-shim/](jdk-shim/) — pure Java implementations of standard library classes

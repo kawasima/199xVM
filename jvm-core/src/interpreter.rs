@@ -477,9 +477,10 @@ impl Vm {
 
         // If receiver carries lambda payload, try direct SAM dispatch.
         let lambda_info = match &this.borrow().native {
-            NativePayload::BytecodeLambda { sam_method, sam_desc: _, impl_class, impl_method, impl_desc, ref_kind, captured } => {
+            NativePayload::BytecodeLambda { sam_method, sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured } => {
                 Some((
                     sam_method.clone(),
+                    sam_desc.clone(),
                     impl_class.clone(),
                     impl_method.clone(),
                     impl_desc.clone(),
@@ -493,10 +494,14 @@ impl Vm {
             }
             _ => None,
         };
-        if let Some((sam_method, impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info {
+        if let Some((sam_method, sam_desc_str, impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info {
             // Generic interface call sites may use erased descriptors
-            // (e.g. Function.apply(Object)), so match by SAM method name.
-            if method_name == sam_method {
+            // (e.g. Function.apply(Object)), so match by SAM method name AND argument count.
+            // This prevents matching overloaded methods with different arities
+            // (e.g. Decoder.decode(Object) should NOT match SAM decode(Object, Path)).
+            let sam_arg_count = count_args(&sam_desc_str);
+            let call_arg_count = count_args(descriptor);
+            if method_name == sam_method && call_arg_count == sam_arg_count {
                 let mut full_args = captured;
                 full_args.extend(args);
                 // ref_kind 5 = invokeVirtual, 7 = invokeSpecial, 9 = invokeInterface
@@ -1750,9 +1755,11 @@ impl Vm {
         match this_val {
             JValue::Ref(Some(r)) => self.invoke_virtual(r, &class_name, &method_name, &descriptor, args),
             JValue::Ref(None) => Err(format!("NullPointerException: invokevirtual {class_name}.{method_name}{descriptor}")),
-            other => Err(format!(
-                "Expected reference for invokevirtual {class_name}.{method_name}{descriptor}, got {other:?}"
-            )),
+            other => {
+                Err(format!(
+                    "Expected reference for invokevirtual {class_name}.{method_name}{descriptor}, got {other:?}"
+                ))
+            }
         }
     }
 
@@ -1973,13 +1980,16 @@ impl Vm {
                     "\x01".repeat(n_args)
                 };
 
+                let arg_types = arg_type_chars(&descriptor);
                 let mut result = String::new();
                 let mut arg_idx = 0;
                 for ch in recipe.chars() {
                     if ch == '\x01' {
                         // Substitute argument — call toString() for objects.
                         if let Some(a) = args.get(arg_idx) {
+                            let is_bool = arg_types.get(arg_idx) == Some(&'Z');
                             match a {
+                                JValue::Int(v) if is_bool => result.push_str(if *v != 0 { "true" } else { "false" }),
                                 JValue::Int(v) => result.push_str(&v.to_string()),
                                 JValue::Long(v) => result.push_str(&v.to_string()),
                                 JValue::Float(v) => result.push_str(&v.to_string()),
@@ -2206,6 +2216,9 @@ impl Vm {
                 Some(JValue::Ref(Some(self.class_object(internal))))
             }
             ("java/lang/System", "currentTimeMillis", "()J") => {
+                #[cfg(target_arch = "wasm32")]
+                let ms = js_sys::Date::now() as i64;
+                #[cfg(not(target_arch = "wasm32"))]
                 let ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .ok()
@@ -4480,6 +4493,34 @@ fn count_args(descriptor: &str) -> usize {
         }
     }
     count
+}
+
+/// Extract the first character of each argument type in a method descriptor.
+/// E.g., "(Ljava/lang/String;ZI)V" → ['L', 'Z', 'I']
+fn arg_type_chars(descriptor: &str) -> Vec<char> {
+    let mut types = Vec::new();
+    let mut chars = descriptor.chars().peekable();
+    if chars.next() != Some('(') { return types; }
+    loop {
+        match chars.next() {
+            Some(')') | None => break,
+            Some('L') => {
+                for c in chars.by_ref() { if c == ';' { break; } }
+                types.push('L');
+            }
+            Some('[') => {
+                if chars.peek() == Some(&'L') {
+                    chars.next();
+                    for c in chars.by_ref() { if c == ';' { break; } }
+                } else {
+                    chars.next();
+                }
+                types.push('[');
+            }
+            Some(c) => types.push(c),
+        }
+    }
+    types
 }
 
 fn method_return_descriptor(descriptor: &str) -> Option<&str> {

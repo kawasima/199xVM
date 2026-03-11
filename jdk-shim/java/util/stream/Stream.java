@@ -32,6 +32,16 @@ public interface Stream<T> {
         return acc;
     }
 
+    default Optional<T> reduce(BinaryOperator<T> op) {
+        java.util.List<T> list = toList();
+        if (list.isEmpty()) return Optional.empty();
+        T acc = list.get(0);
+        for (int i = 1; i < list.size(); i++) {
+            acc = op.apply(acc, list.get(i));
+        }
+        return Optional.ofNullable(acc);
+    }
+
     default Optional<T> findAny() {
         java.util.List<T> list = toList();
         return list.isEmpty() ? Optional.empty() : Optional.ofNullable(list.get(0));
