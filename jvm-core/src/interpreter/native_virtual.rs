@@ -1041,10 +1041,12 @@ impl super::Vm {
             }
             ("java/lang/String", "lastIndexOf") => {
                 let s = this.borrow().as_java_string().unwrap_or("").to_owned();
-                // fromIndex (char-index): default = end of string
+                // fromIndex (char-index): default = end of string.
+                // JDK semantics: search backwards starting AT fromIndex (inclusive),
+                // so slice up to the byte offset of fromIndex+1.
                 let char_len = s.chars().count();
                 let from_char = _args.get(1).map(|v| (v.as_int() as usize).min(char_len)).unwrap_or(char_len);
-                let from_byte = char_to_byte_offset(&s, from_char);
+                let from_byte = char_to_byte_offset(&s, from_char.saturating_add(1).min(char_len));
                 let search_str = &s[..from_byte];
                 let idx = match _args.first() {
                     Some(JValue::Ref(Some(r))) => {
