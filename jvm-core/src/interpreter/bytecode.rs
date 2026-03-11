@@ -162,10 +162,9 @@ impl Vm {
                     frame.stack.push(JValue::Int(b as i32));
                 }
                 0x11 => { // sipush
-                    let hi = code[frame.pc] as i16;
-                    let lo = code[frame.pc + 1] as i16;
+                    let val = i16::from_be_bytes([code[frame.pc], code[frame.pc + 1]]);
                     frame.pc += 2;
-                    frame.stack.push(JValue::Int(((hi << 8) | lo) as i32));
+                    frame.stack.push(JValue::Int(val as i32));
                 }
                 0x12 => { // ldc
                     let idx = code[frame.pc] as u16;
@@ -797,7 +796,11 @@ impl Vm {
                 }
                 0xbc => { // newarray
                     let atype = code[frame.pc]; frame.pc += 1;
-                    let count = frame.stack.pop().unwrap().as_int() as usize;
+                    let count_int = frame.stack.pop().unwrap().as_int();
+                    if count_int < 0 {
+                        return Err(format!("java/lang/NegativeArraySizeException: {count_int}"));
+                    }
+                    let count = count_int as usize;
                     let arr = match atype {
                         4 => JObject::new_array("[Z", vec![JValue::Int(0); count]),   // boolean
                         5 => JObject::new_array("[C", vec![JValue::Int(0); count]),   // char
@@ -814,7 +817,11 @@ impl Vm {
                 0xbd => { // anewarray
                     let idx = read_u16(code, &mut frame.pc);
                     let elem_class = resolve_class_name(cp, idx);
-                    let count = frame.stack.pop().unwrap().as_int() as usize;
+                    let count_int = frame.stack.pop().unwrap().as_int();
+                    if count_int < 0 {
+                        return Err(format!("java/lang/NegativeArraySizeException: {count_int}"));
+                    }
+                    let count = count_int as usize;
                     let arr = JObject::new_array(
                         format!("[L{elem_class};"),
                         vec![JValue::Ref(None); count],
@@ -828,7 +835,11 @@ impl Vm {
                     let class_name_str = resolve_class_name(cp, idx);
                     let mut dim_sizes = Vec::with_capacity(dimensions);
                     for _ in 0..dimensions {
-                        dim_sizes.push(frame.stack.pop().unwrap().as_int() as usize);
+                        let n = frame.stack.pop().unwrap().as_int();
+                        if n < 0 {
+                            return Err(format!("java/lang/NegativeArraySizeException: {n}"));
+                        }
+                        dim_sizes.push(n as usize);
                     }
                     dim_sizes.reverse();
                     let arr = self.create_multi_array(&class_name_str, &dim_sizes, 0);
@@ -997,7 +1008,7 @@ impl Vm {
     ) -> Result<JValue, String> {
         let (class_name, field_name, descriptor) = resolve_fieldref(cp, idx);
         // Run <clinit> if not yet done (initialises static fields via putstatic).
-        self.ensure_class_init(&class_name.clone())?;
+        self.ensure_class_init(&class_name)?;
         // Search this class and its super-class chain for the static field (JVMS §5.4.3.2).
         if let Some(v) = self.resolve_static_field_in_hierarchy(&class_name, &field_name) {
             return Ok(v);
