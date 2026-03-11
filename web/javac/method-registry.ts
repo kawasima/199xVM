@@ -15,7 +15,7 @@ const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
   "java/lang/Integer.intValue()": { owner: "java/lang/Integer", returnType: "int", paramTypes: [] },
   // String
   "java/lang/String.length()": { owner: "java/lang/String", returnType: "int", paramTypes: [] },
-  "java/lang/String.charAt(I)": { owner: "java/lang/String", returnType: "int", paramTypes: ["int"] },
+  "java/lang/String.charAt(I)": { owner: "java/lang/String", returnType: "char", paramTypes: ["int"] },
   "java/lang/String.substring(I)": { owner: "java/lang/String", returnType: "String", paramTypes: ["int"] },
   "java/lang/String.substring(II)": { owner: "java/lang/String", returnType: "String", paramTypes: ["int", "int"] },
   "java/lang/String.equals(Ljava/lang/Object;)": { owner: "java/lang/String", returnType: "boolean", paramTypes: [{ className: "java/lang/Object" }] },

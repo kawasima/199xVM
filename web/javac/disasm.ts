@@ -105,7 +105,21 @@ export function disassemble(classBytes: Uint8Array): string {
       case 18: { cp.push(`#indy:${u16()}:${u16()}`); break; }
       case 3: { cp.push(`int:${dv.getInt32(pos)}`); pos += 4; break; }
       case 4: { cp.push(`float:${dv.getFloat32(pos)}`); pos += 4; break; }
-      case 5: { cp.push(`long:${dv.getBigInt64 ? dv.getBigInt64(pos) : pos}`); pos += 8; cp.push(null); i++; break; }
+      case 5: {
+        let longRepr: string;
+        if (typeof (dv as any).getBigInt64 === "function") {
+          longRepr = String((dv as any).getBigInt64(pos));
+        } else if (typeof BigInt !== "undefined") {
+          const hi = dv.getUint32(pos);
+          const lo = dv.getUint32(pos + 4);
+          let v = (BigInt(hi) << 32n) | BigInt(lo);
+          if (hi & 0x80000000) v = v - (1n << 64n);
+          longRepr = String(v);
+        } else {
+          longRepr = "?";
+        }
+        cp.push(`long:${longRepr}`); pos += 8; cp.push(null); i++; break;
+      }
       case 15: { cp.push(`#mhnd:${u8()}:${u16()}`); break; }
       case 16: { cp.push(`#mtype:${u16()}`); break; }
       default: { cp.push(`?tag${tag}`); break; }
