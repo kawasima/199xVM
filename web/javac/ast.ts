@@ -67,6 +67,8 @@ export type Stmt =
   | { kind: "switch"; selector: Expr; cases: SwitchCase[] }
   | { kind: "doWhile"; cond: Expr; body: Stmt[] }
   | { kind: "forEach"; varName: string; varType: Type; iterable: Expr; body: Stmt[] }
+  | { kind: "assert"; cond: Expr; message?: Expr }
+  | { kind: "synchronized"; monitor: Expr; body: Stmt[] }
   | { kind: "throw"; expr: Expr }
   | { kind: "tryCatch"; tryBody: Stmt[]; catches: { exType: string; varName: string; body: Stmt[] }[]; finallyBody?: Stmt[] }
   | { kind: "break"; label?: string }
