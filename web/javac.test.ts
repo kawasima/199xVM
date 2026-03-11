@@ -177,6 +177,20 @@ describe("Lexer", () => {
     ]);
   });
 
+  test("bitwise/shift and compound assignment operators", () => {
+    const tokens = lex("& | ^ ~ << <<= *= /= %= &= |= ^= >>= >>>= >>>");
+    const kinds = tokens.slice(0, -1).map(t => t.kind);
+    assert.deepEqual(kinds, [
+      TokenKind.BitAnd, TokenKind.BitOr, TokenKind.BitXor, TokenKind.BitNot,
+      TokenKind.ShiftLeft, TokenKind.ShiftLeftAssign,
+      TokenKind.StarAssign, TokenKind.SlashAssign, TokenKind.PercentAssign,
+      TokenKind.AndAssign, TokenKind.OrAssign, TokenKind.XorAssign,
+      TokenKind.Gt, TokenKind.Ge, // >>=
+      TokenKind.Gt, TokenKind.Gt, TokenKind.Ge, // >>>=
+      TokenKind.Gt, TokenKind.Gt, TokenKind.Gt, // >>>
+    ]);
+  });
+
   test("line comments are skipped", () => {
     const tokens = lex("// this is a comment\n42");
     assert.equal(tokens[0].kind, TokenKind.IntLiteral);
@@ -340,6 +354,18 @@ describe("Parser", () => {
     }`;
     const cls = parse(lex(src));
     assert.equal(cls.methods.length, 1);
+  });
+
+  test("bitwise and shift expressions parse", () => {
+    const src = `public class BitOps {
+      public static int run() {
+        return 1 | 2 ^ 3 & 4 << 1;
+      }
+    }`;
+    const cls = parse(lex(src));
+    const ret = cls.methods[0].body[0];
+    assert.equal(ret.kind, "return");
+    assert.equal(ret.value?.kind, "binary");
   });
 
   test("import and package are skipped", () => {
@@ -767,6 +793,38 @@ describe("Code generator", () => {
         boolean b = true;
         if (b) return "yes";
         return "no";
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles bitwise and shift operators", () => {
+    const bytes = compile(`public class BitShift {
+      public static int run() {
+        int a = 6;
+        int b = 3;
+        return (a & b) + (a | b) + (a ^ b) + (a << 1) + (a >> 1) + (a >>> 1);
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles compound assignment operators", () => {
+    const bytes = compile(`public class CompoundAssign {
+      public static int run() {
+        int x = 10;
+        x *= 2;
+        x /= 4;
+        x %= 3;
+        x += 5;
+        x -= 1;
+        x <<= 2;
+        x >>= 1;
+        x >>>= 1;
+        x &= 7;
+        x |= 8;
+        x ^= 3;
+        return x;
       }
     }`);
     assertValidClassFile(bytes);
@@ -1640,6 +1698,28 @@ describe("Runtime (WASM)", () => {
       public static String run() { return new NamedImpl().label(); }
     }`, "NamedImpl");
     assert.equal(result, "ok");
+  });
+
+  test("bitwise/shift and compound assignments execute", async () => {
+    const result = await runSnippet(`public class RuntimeBitwiseOps {
+      public static String run() {
+        int x = 10;
+        x *= 2;
+        x /= 4;
+        x %= 3;
+        x += 5;
+        x -= 1;
+        x <<= 2;
+        x >>= 1;
+        x >>>= 1;
+        x &= 7;
+        x |= 8;
+        x ^= 3;
+        int y = (~1) + (8 >>> 1) + (8 >> 1) + (1 << 3) + (6 & 3) + (6 | 3) + (6 ^ 3);
+        return "" + x + ":" + y;
+      }
+    }`, "RuntimeBitwiseOps");
+    assert.equal(result, "13:28");
   });
 
 });
