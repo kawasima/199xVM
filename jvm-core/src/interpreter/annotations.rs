@@ -10,7 +10,7 @@ impl Vm {
         Some(b)
     }
 
-    fn read_u16(data: &[u8], p: &mut usize) -> Option<u16> {
+    fn read_u16_checked(data: &[u8], p: &mut usize) -> Option<u16> {
         let hi = *data.get(*p)? as u16;
         let lo = *data.get(*p + 1)? as u16;
         *p += 2;
@@ -21,20 +21,20 @@ impl Vm {
         let tag = Self::read_u8(data, p)?;
         match tag as char {
             'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 's' => {
-                let _ = Self::read_u16(data, p)?;
+                let _ = Self::read_u16_checked(data, p)?;
             }
             'e' => {
-                let _ = Self::read_u16(data, p)?;
-                let _ = Self::read_u16(data, p)?;
+                let _ = Self::read_u16_checked(data, p)?;
+                let _ = Self::read_u16_checked(data, p)?;
             }
             'c' => {
-                let _ = Self::read_u16(data, p)?;
+                let _ = Self::read_u16_checked(data, p)?;
             }
             '@' => {
                 Self::skip_annotation(data, p)?;
             }
             '[' => {
-                let n = Self::read_u16(data, p)? as usize;
+                let n = Self::read_u16_checked(data, p)? as usize;
                 for _ in 0..n {
                     Self::skip_annotation_element_value(data, p)?;
                 }
@@ -45,10 +45,10 @@ impl Vm {
     }
 
     fn skip_annotation(data: &[u8], p: &mut usize) -> Option<()> {
-        let _type_index = Self::read_u16(data, p)?;
-        let pairs = Self::read_u16(data, p)? as usize;
+        let _type_index = Self::read_u16_checked(data, p)?;
+        let pairs = Self::read_u16_checked(data, p)? as usize;
         for _ in 0..pairs {
-            let _name_index = Self::read_u16(data, p)?;
+            let _name_index = Self::read_u16_checked(data, p)?;
             Self::skip_annotation_element_value(data, p)?;
         }
         Some(())
@@ -68,12 +68,12 @@ impl Vm {
                 continue;
             }
             let mut p = 0usize;
-            let n = match Self::read_u16(data, &mut p) {
+            let n = match Self::read_u16_checked(data, &mut p) {
                 Some(v) => v as usize,
                 None => continue,
             };
             for _ in 0..n {
-                let type_index = match Self::read_u16(data, &mut p) {
+                let type_index = match Self::read_u16_checked(data, &mut p) {
                     Some(v) => v,
                     None => break,
                 };
@@ -81,12 +81,12 @@ impl Vm {
                 if let Some(inner) = desc.strip_prefix('L').and_then(|s| s.strip_suffix(';')) {
                     types.push(inner.to_owned());
                 }
-                let pairs = match Self::read_u16(data, &mut p) {
+                let pairs = match Self::read_u16_checked(data, &mut p) {
                     Some(v) => v as usize,
                     None => break,
                 };
                 for _ in 0..pairs {
-                    if Self::read_u16(data, &mut p).is_none() {
+                    if Self::read_u16_checked(data, &mut p).is_none() {
                         break;
                     }
                     if Self::skip_annotation_element_value(data, &mut p).is_none() {
@@ -122,18 +122,18 @@ impl Vm {
         let tag = Self::read_u8(data, p)? as char;
         match tag {
             'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 's' => {
-                let const_idx = Self::read_u16(data, p)?;
+                let const_idx = Self::read_u16_checked(data, p)?;
                 self.cp_const_to_jvalue(cp, const_idx)
             }
             'e' => {
-                let type_name_index = Self::read_u16(data, p)?;
-                let const_name_index = Self::read_u16(data, p)?;
+                let type_name_index = Self::read_u16_checked(data, p)?;
+                let const_name_index = Self::read_u16_checked(data, p)?;
                 let t = cp.utf8(type_name_index);
                 let c = cp.utf8(const_name_index);
                 Some(JValue::Ref(Some(self.intern_string(format!("{t}.{c}")))))
             }
             'c' => {
-                let class_info_index = Self::read_u16(data, p)?;
+                let class_info_index = Self::read_u16_checked(data, p)?;
                 let desc = cp.utf8(class_info_index);
                 Some(JValue::Ref(Some(self.class_object(Self::descriptor_to_runtime_class_name(desc)))))
             }
@@ -142,7 +142,7 @@ impl Vm {
                 Some(JValue::Ref(Some(ann)))
             }
             '[' => {
-                let n = Self::read_u16(data, p)? as usize;
+                let n = Self::read_u16_checked(data, p)? as usize;
                 let mut vals = Vec::with_capacity(n);
                 for _ in 0..n {
                     vals.push(self.parse_annotation_element_value(data, p, cp).unwrap_or(JValue::Ref(None)));
@@ -159,10 +159,10 @@ impl Vm {
         p: &mut usize,
         cp: &crate::class_file::ConstantPool,
     ) -> Option<JRef> {
-        let type_index = Self::read_u16(data, p)?;
+        let type_index = Self::read_u16_checked(data, p)?;
         let desc = cp.utf8(type_index).to_owned();
         let ann_class = desc.strip_prefix('L')?.strip_suffix(';')?.to_owned();
-        let pairs = Self::read_u16(data, p)? as usize;
+        let pairs = Self::read_u16_checked(data, p)? as usize;
         let ann_obj = JObject::new(ann_class.clone());
         {
             let mut o = ann_obj.borrow_mut();
@@ -172,7 +172,7 @@ impl Vm {
             );
         }
         for _ in 0..pairs {
-            let name_index = Self::read_u16(data, p)?;
+            let name_index = Self::read_u16_checked(data, p)?;
             let name = cp.utf8(name_index).to_owned();
             let value = self
                 .parse_annotation_element_value(data, p, cp)
@@ -200,7 +200,7 @@ impl Vm {
                 continue;
             }
             let mut p = 0usize;
-            let n = match Self::read_u16(data, &mut p) {
+            let n = match Self::read_u16_checked(data, &mut p) {
                 Some(v) => v as usize,
                 None => continue,
             };
@@ -235,13 +235,13 @@ impl Vm {
                 None => continue,
             };
             for i in 0..declared {
-                let n = match Self::read_u16(data, &mut p) {
+                let n = match Self::read_u16_checked(data, &mut p) {
                     Some(v) => v as usize,
                     None => break,
                 };
                 let mut ann_types = Vec::new();
                 for _ in 0..n {
-                    let type_index = match Self::read_u16(data, &mut p) {
+                    let type_index = match Self::read_u16_checked(data, &mut p) {
                         Some(v) => v,
                         None => break,
                     };
@@ -249,12 +249,12 @@ impl Vm {
                     if let Some(inner) = desc.strip_prefix('L').and_then(|s| s.strip_suffix(';')) {
                         ann_types.push(inner.to_owned());
                     }
-                    let pairs = match Self::read_u16(data, &mut p) {
+                    let pairs = match Self::read_u16_checked(data, &mut p) {
                         Some(v) => v as usize,
                         None => break,
                     };
                     for _ in 0..pairs {
-                        if Self::read_u16(data, &mut p).is_none() {
+                        if Self::read_u16_checked(data, &mut p).is_none() {
                             break;
                         }
                         if Self::skip_annotation_element_value(data, &mut p).is_none() {
@@ -291,7 +291,7 @@ impl Vm {
                 None => continue,
             };
             for i in 0..declared {
-                let n = match Self::read_u16(data, &mut p) {
+                let n = match Self::read_u16_checked(data, &mut p) {
                     Some(v) => v as usize,
                     None => break,
                 };

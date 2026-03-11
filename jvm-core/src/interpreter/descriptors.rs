@@ -224,19 +224,11 @@ impl Vm {
     }
 
     pub(super) fn class_display_name(internal_name: &str) -> String {
-        if internal_name.starts_with('[') {
-            internal_name.replace('/', ".")
-        } else {
-            internal_name.replace('/', ".")
-        }
+        internal_name.replace('/', ".")
     }
 
     pub(super) fn class_internal_name_from_runtime_name(name: &str) -> String {
-        if name.starts_with('[') {
-            name.replace('.', "/")
-        } else {
-            name.replace('.', "/")
-        }
+        name.replace('.', "/")
     }
 
     pub(super) fn descriptor_to_runtime_class_name(desc: &str) -> String {

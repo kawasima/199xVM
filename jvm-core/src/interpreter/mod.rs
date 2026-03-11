@@ -284,8 +284,6 @@ impl Vm {
         Ok(())
     }
 
-    /// Check if `runtime_class` is an instance of `target_class` (by name).
-    /// Handles array types per JVMS §6.5.instanceof / §6.5.checkcast.
     /// Recursively create a multi-dimensional array for `multianewarray`.
     fn create_multi_array(&self, desc: &str, sizes: &[usize], depth: usize) -> JRef {
         let count = sizes[depth];
@@ -313,6 +311,8 @@ impl Vm {
         }
     }
 
+    /// Check if `runtime_class` is an instance of `target_class` (by name).
+    /// Handles array types per JVMS §6.5.instanceof / §6.5.checkcast.
     fn is_instance_of(&self, runtime_class: &str, target_class: &str) -> bool {
         if runtime_class == target_class { return true; }
         // java/lang/Object is a supertype of everything.
