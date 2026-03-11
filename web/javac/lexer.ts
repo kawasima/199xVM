@@ -55,6 +55,8 @@ export enum TokenKind {
   KwTry = "try",
   KwCatch = "catch",
   KwFinally = "finally",
+  KwAssert = "assert",
+  KwSynchronized = "synchronized",
   KwBreak = "break",
   KwContinue = "continue",
 
@@ -189,6 +191,8 @@ const KEYWORDS: Record<string, TokenKind> = {
   try: TokenKind.KwTry,
   catch: TokenKind.KwCatch,
   finally: TokenKind.KwFinally,
+  assert: TokenKind.KwAssert,
+  synchronized: TokenKind.KwSynchronized,
   break: TokenKind.KwBreak,
   continue: TokenKind.KwContinue,
 };

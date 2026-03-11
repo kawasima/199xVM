@@ -138,11 +138,13 @@ describe("Lexer", () => {
   });
 
   test("keywords", () => {
-    const tokens = lex("public class static return");
+    const tokens = lex("public class static return assert synchronized");
     assert.equal(tokens[0].kind, TokenKind.KwPublic);
     assert.equal(tokens[1].kind, TokenKind.KwClass);
     assert.equal(tokens[2].kind, TokenKind.KwStatic);
     assert.equal(tokens[3].kind, TokenKind.KwReturn);
+    assert.equal(tokens[4].kind, TokenKind.KwAssert);
+    assert.equal(tokens[5].kind, TokenKind.KwSynchronized);
   });
 
   test("integer literals", () => {
@@ -1722,6 +1724,44 @@ describe("Runtime (WASM)", () => {
     assert.equal(result, "13:28");
   });
 
+  test("assert false throws AssertionError", async () => {
+    const result = await runSnippet(`public class AssertRun {
+      public static String run() {
+        assert false : "boom";
+        return "ng";
+      }
+    }`, "AssertRun");
+    assert.match(result, /^ERROR: Exception: java\/lang\/AssertionError:/);
+  });
+
+  test("synchronized block executes", async () => {
+    const result = await runSnippet(`public class SyncRun {
+      public static String run() {
+        Object lock = new Object();
+        int x = 0;
+        synchronized (lock) {
+          x = 9;
+        }
+        return "" + x;
+      }
+    }`, "SyncRun");
+    assert.equal(result, "9");
+  });
+
+  test("try-with-resources closes resource", async () => {
+    const result = await runSnippet(`public class TwrRun {
+      static int closed;
+      public void close() { closed = closed + 1; }
+      public static String run() {
+        try (TwrRun r = new TwrRun()) {
+          int x = 1;
+        }
+        return "" + closed;
+      }
+    }`, "TwrRun");
+    assert.equal(result, "1");
+  });
+
 });
 
 // ============================================================================
@@ -1854,6 +1894,49 @@ describe("Parser – new syntax", () => {
     assert.equal(tc.kind, "tryCatch");
     assert.ok(tc.finallyBody);
     assert.ok(tc.finallyBody.length > 0);
+  });
+
+  test("assert statement parses", () => {
+    const src = `public class AssertStmt {
+      public static String run() {
+        assert 1 < 2 : "bad";
+        return "ok";
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods[0].body;
+    assert.equal(body[0].kind, "assert");
+  });
+
+  test("synchronized statement parses", () => {
+    const src = `public class SyncStmt {
+      public static String run() {
+        Object lock = new Object();
+        synchronized (lock) {
+          int x = 1;
+        }
+        return "ok";
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods[0].body;
+    assert.equal(body[1].kind, "synchronized");
+  });
+
+  test("try-with-resources parses and lowers", () => {
+    const src = `public class TwrStmt {
+      int closed;
+      public void close() { closed = closed + 1; }
+      public static String run() {
+        try (TwrStmt r = new TwrStmt()) {
+          int x = 1;
+        }
+        return "ok";
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods.find(m => m.name === "run")!.body;
+    assert.equal(body[0].kind, "block");
   });
 
   test("enhanced for loop", () => {
@@ -2015,6 +2098,44 @@ describe("Code generator – new syntax", () => {
         catch (Exception e) { int y = 2; }
         finally { int z = 3; }
         return "ok";
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles assert statement", () => {
+    const bytes = compile(`public class AssertStmt {
+      public static String run() {
+        assert 1 < 2 : "bad";
+        return "ok";
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles synchronized statement", () => {
+    const bytes = compile(`public class SyncStmt {
+      public static String run() {
+        Object lock = new Object();
+        int x = 0;
+        synchronized (lock) {
+          x = 7;
+        }
+        return "" + x;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles try-with-resources", () => {
+    const bytes = compile(`public class TwrStmt {
+      static int closed;
+      public void close() { closed = closed + 1; }
+      public static String run() {
+        try (TwrStmt r = new TwrStmt()) {
+          int x = 1;
+        }
+        return "" + closed;
       }
     }`);
     assertValidClassFile(bytes);

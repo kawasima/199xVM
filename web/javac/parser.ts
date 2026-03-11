@@ -1030,9 +1030,65 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       return { kind: "throw", expr };
     }
 
+    // Assert
+    if (at(TokenKind.KwAssert)) {
+      advance();
+      const cond = parseExpr();
+      let message: Expr | undefined;
+      if (match(TokenKind.Colon)) {
+        message = parseExpr();
+      }
+      expect(TokenKind.Semi);
+      return { kind: "assert", cond, message };
+    }
+
+    // Synchronized
+    if (at(TokenKind.KwSynchronized)) {
+      advance();
+      expect(TokenKind.LParen);
+      const monitor = parseExpr();
+      expect(TokenKind.RParen);
+      let body: Stmt[];
+      if (at(TokenKind.LBrace)) {
+        expect(TokenKind.LBrace);
+        body = parseBlock();
+        expect(TokenKind.RBrace);
+      } else {
+        body = [parseStmt()];
+      }
+      return { kind: "synchronized", monitor, body };
+    }
+
     // Try/Catch/Finally
     if (at(TokenKind.KwTry)) {
       advance();
+      const resources: { name: string; type: Type; init: Expr }[] = [];
+      if (match(TokenKind.LParen)) {
+        while (!at(TokenKind.RParen) && !at(TokenKind.EOF)) {
+          while (at(TokenKind.KwFinal)) advance();
+          let resType: Type;
+          let resName: string;
+          let resInit: Expr;
+          if (match(TokenKind.KwVar)) {
+            resName = expect(TokenKind.Ident).value;
+            expect(TokenKind.Assign);
+            resInit = parseExpr();
+            resType = inferLocalVarType(resInit);
+          } else {
+            resType = parseType();
+            resName = expect(TokenKind.Ident).value;
+            expect(TokenKind.Assign);
+            resInit = parseExpr();
+          }
+          resources.push({ name: resName, type: resType, init: resInit });
+          if (match(TokenKind.Semi)) {
+            if (at(TokenKind.RParen)) break;
+          } else {
+            break;
+          }
+        }
+        expect(TokenKind.RParen);
+      }
       expect(TokenKind.LBrace);
       const tryBody = parseBlock();
       expect(TokenKind.RBrace);
@@ -1055,7 +1111,31 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         finallyBody = parseBlock();
         expect(TokenKind.RBrace);
       }
-      return { kind: "tryCatch", tryBody, catches, finallyBody };
+      if (resources.length === 0) {
+        return { kind: "tryCatch", tryBody, catches, finallyBody };
+      }
+      // Desugar try-with-resources into nested try/finally close calls.
+      let loweredTryBody = tryBody;
+      for (let i = resources.length - 1; i >= 0; i--) {
+        const r = resources[i];
+        const closeStmt: Stmt = {
+          kind: "if",
+          cond: { kind: "binary", op: "!=", left: { kind: "ident", name: r.name }, right: { kind: "nullLit" } },
+          then: [{
+            kind: "exprStmt",
+            expr: { kind: "call", object: { kind: "ident", name: r.name }, method: "close", args: [] },
+          }],
+        };
+        loweredTryBody = [{
+          kind: "tryCatch",
+          tryBody: loweredTryBody,
+          catches: [],
+          finallyBody: [closeStmt],
+        }];
+      }
+      const stmts: Stmt[] = resources.map(r => ({ kind: "varDecl", name: r.name, type: r.type, init: r.init }));
+      stmts.push({ kind: "tryCatch", tryBody: loweredTryBody, catches, finallyBody });
+      return { kind: "block", stmts };
     }
 
     // Break

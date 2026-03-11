@@ -1827,6 +1827,14 @@ function collectStmtIdentifiers(stmt: Stmt, out: Set<string>): void {
       collectExprIdentifiers(stmt.iterable, out);
       for (const s of stmt.body) collectStmtIdentifiers(s, out);
       break;
+    case "assert":
+      collectExprIdentifiers(stmt.cond, out);
+      if (stmt.message) collectExprIdentifiers(stmt.message, out);
+      break;
+    case "synchronized":
+      collectExprIdentifiers(stmt.monitor, out);
+      for (const s of stmt.body) collectStmtIdentifiers(s, out);
+      break;
     case "throw":
       collectExprIdentifiers(stmt.expr, out);
       break;
@@ -2588,6 +2596,60 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       emitter.emit(0xbf); // athrow
       break;
     }
+    case "assert": {
+      if (inferType(ctx, stmt.cond) !== "boolean") throw new Error("assert condition must be boolean");
+      compileExpr(ctx, emitter, stmt.cond);
+      const patchOk = emitter.emitBranch(0x9a); // ifne
+      const assertionClass = ctx.cp.addClass("java/lang/AssertionError");
+      emitter.emit(0xbb); // new
+      emitter.emitU16(assertionClass);
+      emitter.emit(0x59); // dup
+      if (stmt.message) {
+        compileExpr(ctx, emitter, stmt.message, { className: "java/lang/Object" });
+        const initRef = ctx.cp.addMethodref("java/lang/AssertionError", "<init>", "(Ljava/lang/Object;)V");
+        emitter.emitInvokespecial(initRef, 1, false);
+      } else {
+        const initRef = ctx.cp.addMethodref("java/lang/AssertionError", "<init>", "()V");
+        emitter.emitInvokespecial(initRef, 0, false);
+      }
+      emitter.emit(0xbf); // athrow
+      emitter.patchBranch(patchOk, emitter.pc);
+      break;
+    }
+    case "synchronized": {
+      const monitorType = inferType(ctx, stmt.monitor);
+      if (!isRefType(monitorType)) throw new Error("synchronized monitor must be a reference type");
+      withScopedLocals(ctx, () => {
+        compileExpr(ctx, emitter, stmt.monitor);
+        const monSlot = addLocal(ctx, "$sync_mon", monitorType);
+        if (emitter.maxLocals <= monSlot) emitter.maxLocals = monSlot + 1;
+        emitter.emitAstore(monSlot);
+
+        emitter.emitAload(monSlot);
+        emitter.emitPop(0xc2); // monitorenter
+
+        const syncStart = emitter.pc;
+        withScopedLocals(ctx, () => {
+          for (const s of stmt.body) compileStmt(ctx, emitter, s);
+        });
+        emitter.emitAload(monSlot);
+        emitter.emitPop(0xc3); // monitorexit
+        const patchEnd = emitter.emitBranch(0xa7); // goto end
+
+        const handlerPc = emitter.pc;
+        emitter.adjustStackForCatch();
+        const exSlot = addLocal(ctx, "$sync_ex", { className: "java/lang/Throwable" });
+        if (emitter.maxLocals <= exSlot) emitter.maxLocals = exSlot + 1;
+        emitter.emitAstore(exSlot);
+        emitter.emitAload(monSlot);
+        emitter.emitPop(0xc3); // monitorexit
+        emitter.emitAload(exSlot);
+        emitter.emit(0xbf); // athrow
+        emitter.exceptionTable.push({ startPc: syncStart, endPc: handlerPc, handlerPc, catchType: 0 });
+        emitter.patchBranch(patchEnd, emitter.pc);
+      });
+      break;
+    }
     case "tryCatch": {
       // Simplified try/catch: emit try body, then goto end; emit each catch handler
       // Exception table entries are not yet supported in the bytecode emitter,
@@ -2789,6 +2851,8 @@ function stmtHasSuperCall(stmt: Stmt): boolean {
         || stmt.cases.some(c => (c.expr && exprHasSuperCall(c.expr)) || (c.stmts && c.stmts.some(stmtHasSuperCall)));
     case "doWhile": return exprHasSuperCall(stmt.cond) || stmt.body.some(stmtHasSuperCall);
     case "forEach": return exprHasSuperCall(stmt.iterable) || stmt.body.some(stmtHasSuperCall);
+    case "assert": return exprHasSuperCall(stmt.cond) || !!stmt.message && exprHasSuperCall(stmt.message);
+    case "synchronized": return exprHasSuperCall(stmt.monitor) || stmt.body.some(stmtHasSuperCall);
     case "throw": return exprHasSuperCall(stmt.expr);
     case "tryCatch": return stmt.tryBody.some(stmtHasSuperCall)
       || stmt.catches.some(c => c.body.some(stmtHasSuperCall))
