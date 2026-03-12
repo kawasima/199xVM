@@ -1804,6 +1804,21 @@ describe("Runtime (WASM)", () => {
     assert.equal(result, "1");
   });
 
+  test("finally with early return does not re-run finally body", async () => {
+    const result = await runSnippet(`public class FinallyReturnOnceRun {
+      static int c;
+      public static String run() {
+        try {
+          c = 1;
+        } finally {
+          c = c + 1;
+          return "" + c;
+        }
+      }
+    }`, "FinallyReturnOnceRun");
+    assert.equal(result, "2");
+  });
+
   test("compound assignment evaluates array LHS once", async () => {
     const result = await runSnippet(`public class CompoundArraySideEffectRun {
       public static String run() {
@@ -2010,6 +2025,17 @@ describe("Parser – new syntax", () => {
       public static String run() {
         Object lock = new Object();
         synchronized (lock) return "ng";
+      }
+    }`;
+    assert.throws(() => parse(lex(src)));
+  });
+
+  test("try-with-resources rejects empty resource list", () => {
+    const src = `public class BadTwrEmpty {
+      public static String run() {
+        try () {
+          return "ng";
+        }
       }
     }`;
     assert.throws(() => parse(lex(src)));
