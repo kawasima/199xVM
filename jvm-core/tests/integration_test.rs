@@ -314,3 +314,39 @@ fn wait_notify_producer_consumer() {
     );
     assert_eq!(result, "produced:42,consumed:42");
 }
+
+#[test]
+fn notify_all_wakes_multiple_waiters() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "NotifyAllTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "3");
+}
+
+#[test]
+fn wait_without_lock_throws_imse() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "WaitWithoutLockTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "wait:IMSE,notify:IMSE,notifyAll:IMSE");
+}
+
+#[test]
+fn reentrant_wait_restores_count() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "ReentrantWaitTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ok");
+}
