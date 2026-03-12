@@ -675,18 +675,7 @@ impl Vm {
         }
 
         let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-        // ACC_SYNCHRONIZED on instance method: lock `this`
-        let synchronized_monitor = if info.access_flags & 0x0020 != 0 {
-            if let JValue::Ref(Some(ref this_ref)) = locals[0] {
-                let m = this_ref.clone();
-                self.monitor_enter(&m);
-                Some(m)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let synchronized_monitor = self.acquire_instance_synchronized_monitor(info.access_flags, &locals);
         Ok(Some(FrameInfo {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
             code: info.code, cp: info.cp, frame_owner: fo,
@@ -744,18 +733,7 @@ impl Vm {
         }
 
         let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-        // ACC_SYNCHRONIZED on instance method: lock `this`
-        let synchronized_monitor = if info.access_flags & 0x0020 != 0 {
-            if let JValue::Ref(Some(ref this_ref)) = locals[0] {
-                let m = this_ref.clone();
-                self.monitor_enter(&m);
-                Some(m)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let synchronized_monitor = self.acquire_instance_synchronized_monitor(info.access_flags, &locals);
         Ok(Some(FrameInfo {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
             code: info.code, cp: info.cp, frame_owner: fo,
@@ -763,6 +741,18 @@ impl Vm {
             push_return, concat_state: None, lambda_return_adapt: None,
             synchronized_monitor,
         }))
+    }
+
+    /// Acquire a monitor for an ACC_SYNCHRONIZED instance method (locals[0] = `this`).
+    fn acquire_instance_synchronized_monitor(&mut self, access_flags: u16, locals: &[JValue]) -> Option<JRef> {
+        if access_flags & 0x0020 != 0 {
+            if let JValue::Ref(Some(ref this_ref)) = locals[0] {
+                let m = this_ref.clone();
+                self.monitor_enter(&m);
+                return Some(m);
+            }
+        }
+        None
     }
 }
 

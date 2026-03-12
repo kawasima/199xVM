@@ -15,6 +15,12 @@ public class SynchronizedMethodTest {
         counter = tmp + 1;
     }
 
+    /** Synchronized method that throws — monitor must be released on exception. */
+    public synchronized void throwingIncrement() {
+        counter++;
+        throw new RuntimeException("boom");
+    }
+
     public static String run() {
         SynchronizedMethodTest obj = new SynchronizedMethodTest();
 
@@ -52,6 +58,17 @@ public class SynchronizedMethodTest {
         }
         String r3 = String.valueOf(counter);
 
-        return r1 + "," + r2 + "," + r3;
+        // Test that monitor is released when synchronized method throws
+        counter = 0;
+        try {
+            obj.throwingIncrement();
+        } catch (RuntimeException e) {
+            // expected
+        }
+        // If monitor was NOT released, this would deadlock
+        obj.increment();
+        String r4 = String.valueOf(counter);
+
+        return r1 + "," + r2 + "," + r3 + "," + r4;
     }
 }
