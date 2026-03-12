@@ -188,21 +188,21 @@ impl super::Vm {
     /// Handle ClassLoader instance methods that must dispatch by resolved owner, not runtime class.
     /// Returns `Some(value)` if the method was handled, `None` to fall through.
     fn native_classloader(&mut self, method_name: &str, args: &[JValue]) -> Option<JValue> {
-        // A null or missing name argument must surface as NullPointerException, not as a
-        // ClassNotFoundException for the empty string.
-        let name_str = match args
-            .first()
-            .and_then(|v| v.as_ref())
-            .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
-        {
-            Some(s) => s,
-            None => {
-                self.throw_null_pointer("name");
-                return Some(JValue::Void);
-            }
-        };
         match method_name {
             "loadClass" | "findClass" => {
+                // A null or missing name argument must surface as NullPointerException.
+                // (`defineClass` accepts a null name per JDK spec, so the check is here only.)
+                let name_str = match args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                {
+                    Some(s) => s,
+                    None => {
+                        self.throw_null_pointer("name");
+                        return Some(JValue::Void);
+                    }
+                };
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
                 self.ensure_class_ready(&internal);
                 match self.classes.get(&internal) {
@@ -220,6 +220,11 @@ impl super::Vm {
                 Some(JValue::Ref(Some(self.class_object(internal))))
             }
             "findLoadedClass" => {
+                let name_str = args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
                 if matches!(self.classes.get(&internal), Some(LazyClass::Ready(_))) {
                     Some(JValue::Ref(Some(self.class_object(internal))))
@@ -229,6 +234,7 @@ impl super::Vm {
             }
             "defineClass" => {
                 // Dynamic bytecode injection is not supported; return null.
+                // Per JDK spec, the name argument may be null — no NPE check here.
                 Some(JValue::Ref(None))
             }
             _ => None,
