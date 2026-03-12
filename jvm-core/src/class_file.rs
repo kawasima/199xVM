@@ -257,6 +257,112 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Extract only the internal class name from raw `.class` bytes without a full parse.
+///
+/// Reads: magic(4) + minor(2) + major(2) + cp_count(2), scans the constant pool,
+/// then reads `this_class` to find the `Class` entry whose `name_index` points to
+/// the `Utf8` entry containing the internal class name.
+///
+/// Returns `None` if the bytes are too short or malformed.
+pub fn parse_class_name(data: &[u8]) -> Option<String> {
+    // Helper closures for bounds-checked reads.
+    let read_u8 = |pos: &mut usize| -> Option<u8> {
+        let b = *data.get(*pos)?;
+        *pos += 1;
+        Some(b)
+    };
+    let read_u16 = |pos: &mut usize| -> Option<u16> {
+        let hi = *data.get(*pos)? as u16;
+        let lo = *data.get(*pos + 1)? as u16;
+        *pos += 2;
+        Some((hi << 8) | lo)
+    };
+    let read_u32 = |pos: &mut usize| -> Option<u32> {
+        let a = *data.get(*pos)? as u32;
+        let b = *data.get(*pos + 1)? as u32;
+        let c = *data.get(*pos + 2)? as u32;
+        let d = *data.get(*pos + 3)? as u32;
+        *pos += 4;
+        Some((a << 24) | (b << 16) | (c << 8) | d)
+    };
+
+    let pos = &mut 0usize;
+
+    // magic
+    if read_u32(pos)? != 0xCAFEBABE { return None; }
+    // minor + major
+    read_u16(pos)?;
+    read_u16(pos)?;
+    // constant pool count
+    let cp_count = read_u16(pos)? as usize;
+
+    // Scan the constant pool — store only Utf8 and Class entries (by 1-based index).
+    let mut utf8_entries: Vec<Option<String>> = vec![None; cp_count];
+    let mut class_name_indices: Vec<Option<u16>> = vec![None; cp_count];
+    let mut i = 1usize;
+    while i < cp_count {
+        let tag = read_u8(pos)?;
+        match tag {
+            1 => {
+                // Utf8
+                let len = read_u16(pos)? as usize;
+                let end = pos.checked_add(len)?;
+                if end > data.len() { return None; }
+                let s = String::from_utf8_lossy(&data[*pos..end]).into_owned();
+                utf8_entries[i] = Some(s);
+                *pos = end;
+                i += 1;
+            }
+            7 => {
+                // Class — name_index
+                class_name_indices[i] = Some(read_u16(pos)?);
+                i += 1;
+            }
+            8 | 16 | 19 | 20 => {
+                // String, MethodType, Module, Package — 2-byte index
+                read_u16(pos)?;
+                i += 1;
+            }
+            3 | 4 => {
+                // Integer, Float — 4 bytes
+                read_u32(pos)?;
+                i += 1;
+            }
+            5 | 6 => {
+                // Long, Double — 8 bytes; next slot is unusable (JVMS §4.4.5)
+                read_u32(pos)?;
+                read_u32(pos)?;
+                i += 2;
+            }
+            9 | 10 | 11 | 12 => {
+                // Fieldref, Methodref, InterfaceMethodref, NameAndType — 4 bytes
+                read_u32(pos)?;
+                i += 1;
+            }
+            15 => {
+                // MethodHandle — 3 bytes
+                read_u8(pos)?;
+                read_u16(pos)?;
+                i += 1;
+            }
+            17 | 18 => {
+                // Dynamic, InvokeDynamic — 4 bytes
+                read_u32(pos)?;
+                i += 1;
+            }
+            _ => return None,
+        }
+    }
+
+    // access_flags(2) + this_class(2)
+    read_u16(pos)?; // access_flags
+    let this_class = read_u16(pos)? as usize;
+    if this_class >= cp_count { return None; }
+    let name_index = class_name_indices[this_class]? as usize;
+    if name_index >= cp_count { return None; }
+    utf8_entries[name_index].take()
+}
+
 /// Parse a `.class` file from raw bytes.
 pub fn parse(data: &[u8]) -> Result<ClassFile, String> {
     let mut r = Reader::new(data);

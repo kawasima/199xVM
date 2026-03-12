@@ -1068,24 +1068,34 @@ impl Vm {
     }
 
     /// Walk the class hierarchy to find a static field value.
-    fn resolve_static_field_in_hierarchy(&self, class_name: &str, field_name: &str) -> Option<JValue> {
+    fn resolve_static_field_in_hierarchy(&mut self, class_name: &str, field_name: &str) -> Option<JValue> {
         // Check this class first.
         if let Some(v) = self.static_fields.get(class_name).and_then(|m| m.get(field_name)) {
             return Some(v.clone());
         }
         // Check super class and interfaces.
-        if let Some(class) = self.classes.get(class_name) {
-            if class.super_class != 0 {
-                let super_name = class.constant_pool.class_name(class.super_class).to_owned();
-                if let Some(v) = self.resolve_static_field_in_hierarchy(&super_name, field_name) {
-                    return Some(v);
-                }
+        self.ensure_class_ready(class_name);
+        let (super_name, iface_names) = if let Some(class) = self.get_class(class_name) {
+            let sup = if class.super_class != 0 {
+                Some(class.constant_pool.class_name(class.super_class).to_owned())
+            } else {
+                None
+            };
+            let ifaces: Vec<String> = class.interfaces.iter()
+                .map(|&idx| class.constant_pool.class_name(idx).to_owned())
+                .collect();
+            (sup, ifaces)
+        } else {
+            (None, vec![])
+        };
+        if let Some(super_name) = super_name {
+            if let Some(v) = self.resolve_static_field_in_hierarchy(&super_name, field_name) {
+                return Some(v);
             }
-            for &idx in &class.interfaces {
-                let iface_name = class.constant_pool.class_name(idx).to_owned();
-                if let Some(v) = self.resolve_static_field_in_hierarchy(&iface_name, field_name) {
-                    return Some(v);
-                }
+        }
+        for iface_name in iface_names {
+            if let Some(v) = self.resolve_static_field_in_hierarchy(&iface_name, field_name) {
+                return Some(v);
             }
         }
         None

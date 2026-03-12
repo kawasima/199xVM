@@ -10,7 +10,7 @@ mod interpreter;
 
 use wasm_bindgen::prelude::*;
 
-use class_file::parse;
+use class_file::{parse, parse_class_name};
 use heap::JValue;
 use interpreter::Vm;
 
@@ -92,7 +92,11 @@ pub fn run_static_native(
     out
 }
 
-/// Load classes from bundle bytes into a VM.
+/// Load classes from bundle bytes into a VM using lazy parsing.
+///
+/// Each class's raw bytes are registered under its internal class name.
+/// The class is not parsed until it is first accessed during execution,
+/// matching standard ClassLoader lazy-loading semantics.
 pub fn load_bundle(vm: &mut Vm, class_bundle: &[u8]) {
     let mut pos = 0usize;
     while pos + 4 <= class_bundle.len() {
@@ -106,9 +110,9 @@ pub fn load_bundle(vm: &mut Vm, class_bundle: &[u8]) {
         if pos + len > class_bundle.len() { break; }
         let class_bytes = &class_bundle[pos..pos + len];
         pos += len;
-        match parse(class_bytes) {
-            Ok(cf) => vm.load_class(cf),
-            Err(e) => eprintln!("Warning: skipping unparseable class: {e}"),
+        match parse_class_name(class_bytes) {
+            Some(name) => vm.load_lazy(name, class_bytes.to_vec()),
+            None => eprintln!("Warning: skipping class with unreadable name"),
         }
     }
 }
