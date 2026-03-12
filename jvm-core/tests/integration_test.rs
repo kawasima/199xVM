@@ -182,3 +182,39 @@ fn classloader_missing_class_throws_cnfe() {
     );
     assert_eq!(result, "ClassNotFoundException:com.example.NonExistentClass");
 }
+
+// ---------------------------------------------------------------------------
+// JVMS §5.5: ExceptionInInitializerError when <clinit> throws
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clinit_exception_wrapped_in_eiie() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "ClinitExceptionTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    // Caught as ExceptionInInitializerError (or via Throwable fallback showing class name)
+    assert!(
+        result == "ExceptionInInitializerError" || result.contains("ExceptionInInitializerError"),
+        "expected ExceptionInInitializerError, got: {result}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JVMS §5.4.3.3: AbstractMethodError does not fire for concrete implementations
+// ---------------------------------------------------------------------------
+
+#[test]
+fn concrete_interface_method_no_abstract_method_error() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "AbstractMethodTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "hello");
+}

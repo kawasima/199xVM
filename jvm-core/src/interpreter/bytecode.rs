@@ -811,7 +811,12 @@ impl Vm {
                     let new_class = resolve_class_name(cp, idx);
                     // Run <clinit> for the class being instantiated.
                     self.ensure_class_init(&new_class)?;
-                    let obj = if self.classes.contains_key(&new_class) {
+                    // A ParseError entry means the class was registered but malformed.
+                    if matches!(self.classes.get(&new_class), Some(super::LazyClass::ParseError(_))) {
+                        self.throw_no_class_def_found(&new_class);
+                        return Err(format!("NoClassDefFoundError: {new_class}"));
+                    }
+                    let obj = if self.get_class(&new_class).is_some() {
                         // Class is loaded (bytecode available) — use plain object.
                         JObject::new(new_class)
                     } else {
