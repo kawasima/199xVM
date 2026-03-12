@@ -596,7 +596,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     }
   }
 
-  // Accept and skip method/constructor throws clause: `throws A, b.C`
+  // Parse method/constructor throws clause and return resolved type names.
   function parseOptionalThrowsClause(): string[] {
     if (!(at(TokenKind.Ident) && peek().value === "throws")) return [];
     advance(); // throws
