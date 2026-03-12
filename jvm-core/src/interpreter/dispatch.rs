@@ -66,7 +66,7 @@ impl Vm {
                         r.borrow_mut().native = NativePayload::JavaString(s);
                         return Ok(JValue::Void);
                     }
-                    let has_method = self.find_method(&class_name, &method_name, &descriptor).is_some();
+                    let has_method = self.method_exists(&class_name, &method_name, &descriptor);
                     if !has_method {
                         // Constructor not in bundle — no-op fallback.
                         return Ok(JValue::Void);
@@ -94,8 +94,8 @@ impl Vm {
 
         // Static interface methods (e.g. List.of()) have no receiver on the stack.
         // Detect by checking if the method exists as a static method in the interface class.
-        let is_static = self.find_method(&class_name, &method_name, &descriptor)
-            .map(|(_, m)| m.access_flags & 0x0008 != 0)
+        let is_static = self.find_method_flags(&class_name, &method_name, &descriptor)
+            .map(|flags| flags & 0x0008 != 0)
             .unwrap_or(false);
         if is_static {
             return self.invoke_static(&class_name, &method_name, &descriptor, args);

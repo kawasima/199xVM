@@ -225,11 +225,7 @@ impl super::Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let mods = self
-                    .classes
-                    .get(&target)
-                    .map(|cf| i32::from(cf.access_flags))
-                    .unwrap_or(0);
+                let mods = { self.ensure_class_ready(&target); self.get_class(&target).map(|cf| i32::from(cf.access_flags)).unwrap_or(0) };
                 Some(JValue::Int(mods))
             }
             ("java/lang/Class", "isInstance") => {
@@ -264,11 +260,7 @@ impl super::Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let is_iface = self
-                    .classes
-                    .get(&target)
-                    .map(|cf| (cf.access_flags & 0x0200) != 0)
-                    .unwrap_or(false);
+                let is_iface = { self.ensure_class_ready(&target); self.get_class(&target).map(|cf| (cf.access_flags & 0x0200) != 0).unwrap_or(false) };
                 Some(JValue::Int(if is_iface { 1 } else { 0 }))
             }
             ("java/lang/Class", "getComponentType") => {
@@ -300,9 +292,10 @@ impl super::Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
+                self.ensure_class_ready(&target);
                 let super_name = if target.starts_with('[') {
                     Some("java/lang/Object".to_owned())
-                } else if let Some(cf) = self.classes.get(&target) {
+                } else if let Some(cf) = self.get_class(&target) {
                     if cf.super_class == 0 {
                         None
                     } else {
@@ -319,9 +312,10 @@ impl super::Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
+                self.ensure_class_ready(&target);
                 let iface_names: Vec<String> = if target.starts_with('[') {
                     vec!["java/lang/Cloneable".to_owned(), "java/io/Serializable".to_owned()]
-                } else if let Some(cf) = self.classes.get(&target) {
+                } else if let Some(cf) = self.get_class(&target) {
                     cf.interfaces
                         .iter()
                         .map(|idx| cf.constant_pool.class_name(*idx).to_owned())
@@ -363,11 +357,7 @@ impl super::Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let is_record = self
-                    .classes
-                    .get(&target)
-                    .map(|cf| cf.attributes.iter().any(|a| matches!(a, Attribute::Record { .. })))
-                    .unwrap_or(false);
+                let is_record = { self.ensure_class_ready(&target); self.get_class(&target).map(|cf| cf.attributes.iter().any(|a| matches!(a, Attribute::Record { .. }))).unwrap_or(false) };
                 Some(JValue::Int(if is_record { 1 } else { 0 }))
             }
             ("java/lang/Class", "getRecordComponents") => {
@@ -375,7 +365,8 @@ impl super::Vm {
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let mut comps_meta: Vec<(String, String)> = Vec::new();
-                if let Some(cf) = self.classes.get(&target) {
+                self.ensure_class_ready(&target);
+                if let Some(cf) = self.get_class(&target) {
                     for attr in &cf.attributes {
                         if let Attribute::Record { components } = attr {
                             for c in components {
@@ -402,7 +393,8 @@ impl super::Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let anns = if let Some(cf) = self.classes.get(&target) {
+                self.ensure_class_ready(&target);
+                let anns = if let Some(cf) = self.get_class(&target) {
                     let attrs = cf.attributes.clone();
                     let cp_entries = cf.constant_pool.entries.clone();
                     let cp = crate::class_file::ConstantPool { entries: cp_entries };
@@ -419,7 +411,8 @@ impl super::Vm {
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
                 let mut out = Vec::new();
                 let mut members: Vec<(String, String, u16)> = Vec::new();
-                if let Some(cf) = self.classes.get(&target) {
+                self.ensure_class_ready(&target);
+                if let Some(cf) = self.get_class(&target) {
                     for f in &cf.fields {
                         if public_only && (f.access_flags & 0x0001) == 0 {
                             continue;
@@ -444,7 +437,8 @@ impl super::Vm {
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
                 let mut out = Vec::new();
                 let mut members: Vec<(String, String, u16, Vec<String>)> = Vec::new();
-                if let Some(cf) = self.classes.get(&target) {
+                self.ensure_class_ready(&target);
+                if let Some(cf) = self.get_class(&target) {
                     for m in &cf.methods {
                         if public_only && (m.access_flags & 0x0001) == 0 {
                             continue;
@@ -484,7 +478,8 @@ impl super::Vm {
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
                 let mut out = Vec::new();
                 let mut members: Vec<(String, u16, Vec<String>)> = Vec::new();
-                if let Some(cf) = self.classes.get(&target) {
+                self.ensure_class_ready(&target);
+                if let Some(cf) = self.get_class(&target) {
                     for m in &cf.methods {
                         if public_only && (m.access_flags & 0x0001) == 0 {
                             continue;
@@ -562,7 +557,8 @@ impl super::Vm {
                     (owner, "<init>".to_owned(), desc, param_count)
                 };
 
-                let per_param = if let Some(cf) = self.classes.get(&owner) {
+                self.ensure_class_ready(&owner);
+                let per_param = if let Some(cf) = self.get_class(&owner) {
                     if let Some(mi) = cf.methods.iter().find(|m| {
                         cf.constant_pool.utf8(m.name_index) == method_name
                             && cf.constant_pool.utf8(m.descriptor_index) == desc
@@ -656,7 +652,8 @@ impl super::Vm {
                         .unwrap_or_default();
                     (owner, name, desc)
                 };
-                let anns = if let Some(cf) = self.classes.get(&owner) {
+                self.ensure_class_ready(&owner);
+                let anns = if let Some(cf) = self.get_class(&owner) {
                     if let Some(mi) = cf.methods.iter().find(|m| {
                         cf.constant_pool.utf8(m.name_index) == name && cf.constant_pool.utf8(m.descriptor_index) == desc
                     }) {
@@ -713,7 +710,8 @@ impl super::Vm {
                         .unwrap_or_default();
                     (owner, desc)
                 };
-                let anns = if let Some(cf) = self.classes.get(&owner) {
+                self.ensure_class_ready(&owner);
+                let anns = if let Some(cf) = self.get_class(&owner) {
                     if let Some(mi) = cf.methods.iter().find(|m| {
                         cf.constant_pool.utf8(m.name_index) == "<init>" && cf.constant_pool.utf8(m.descriptor_index) == desc
                     }) {
@@ -809,7 +807,8 @@ impl super::Vm {
                         .unwrap_or_default();
                     (owner, name, desc)
                 };
-                let anns = if let Some(cf) = self.classes.get(&owner) {
+                self.ensure_class_ready(&owner);
+                let anns = if let Some(cf) = self.get_class(&owner) {
                     if let Some(fi) = cf.fields.iter().find(|f| {
                         cf.constant_pool.utf8(f.name_index) == name && cf.constant_pool.utf8(f.descriptor_index) == desc
                     }) {
@@ -842,7 +841,8 @@ impl super::Vm {
                         .unwrap_or_default();
                     (owner, name, desc)
                 };
-                let ann_src = self.classes.get(&owner).and_then(|cf| {
+                self.ensure_class_ready(&owner);
+                let ann_src = self.get_class(&owner).and_then(|cf| {
                     for attr in &cf.attributes {
                         if let Attribute::Record { components } = attr {
                             if let Some(c) = components.iter().find(|c| {

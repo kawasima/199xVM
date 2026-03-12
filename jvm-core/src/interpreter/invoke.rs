@@ -15,8 +15,7 @@ impl Vm {
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
         // Resolve descriptor: exact match first, then param-only fallback for generic return types.
-        let method_flags = self.find_method(class_name, method_name, descriptor)
-            .map(|(_, m)| m.access_flags);
+        let method_flags = self.find_method_flags(class_name, method_name, descriptor);
         let resolved_descriptor = if method_flags.is_some() {
             descriptor.to_owned()
         } else {
@@ -27,8 +26,7 @@ impl Vm {
 
         // Re-check with the resolved descriptor if it changed, then try native stubs.
         let method_flags = if method_flags.is_none() {
-            self.find_method(class_name, method_name, descriptor)
-                .map(|(_, m)| m.access_flags)
+            self.find_method_flags(class_name, method_name, descriptor)
         } else {
             method_flags
         };
@@ -116,7 +114,7 @@ impl Vm {
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
         // Resolve descriptor: exact match first, then param-only fallback for generic return types.
-        let resolved_descriptor = if self.find_method(class_name, method_name, descriptor).is_some() {
+        let resolved_descriptor = if self.method_exists(class_name, method_name, descriptor) {
             descriptor.to_owned()
         } else {
             self.find_method_real_descriptor(class_name, method_name, descriptor)
@@ -125,7 +123,7 @@ impl Vm {
         let descriptor = resolved_descriptor.as_str();
 
         // Resolve from the specified class, not the runtime class.
-        if self.find_method(class_name, method_name, descriptor).is_none() {
+        if !self.method_exists(class_name, method_name, descriptor) {
             if let Some(v) = self.native_virtual(&this, class_name, method_name, descriptor, &args) {
                 if let Some(err) = self.pending_exception_err() {
                     return Err(err);
@@ -248,7 +246,7 @@ impl Vm {
         };
 
         // Resolve descriptor: exact match first, then param-only fallback for generic return types.
-        let resolved_descriptor = if self.find_method(&resolve_class, method_name, descriptor).is_some() {
+        let resolved_descriptor = if self.method_exists(&resolve_class, method_name, descriptor) {
             descriptor.to_owned()
         } else {
             self.find_method_real_descriptor(&resolve_class, method_name, descriptor)
@@ -256,7 +254,7 @@ impl Vm {
         };
         let descriptor = resolved_descriptor.as_str();
 
-        if self.find_method(&resolve_class, method_name, descriptor).is_none() {
+        if !self.method_exists(&resolve_class, method_name, descriptor) {
             // Method not in bytecode — try native stubs.
             if let Some(v) = self.native_virtual(&this, &runtime_class, method_name, descriptor, &args) {
                 if let Some(err) = self.pending_exception_err() {
