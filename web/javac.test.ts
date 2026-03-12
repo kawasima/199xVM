@@ -888,6 +888,24 @@ describe("Parser", () => {
     assert.ok(run);
     assert.deepEqual(run.throwsTypes, ["java/io/IOException"]);
   });
+  test("compact source file: parses top-level methods into implicit class", () => {
+    const classes = parseAll(lex(`String run() { return "ok"; }`), "Main");
+    assert.equal(classes.length, 1);
+    const cls = classes[0];
+    assert.equal(cls.name, "Main");
+    assert.equal(cls.isImplicit, true);
+    assert.equal(cls.superClass, "java/lang/Object");
+    assert.equal(cls.methods.length, 1);
+    assert.equal(cls.methods[0].name, "run");
+  });
+  test("compact source file: top-level field and method", () => {
+    const classes = parseAll(lex(`static int x = 42;\nint getX() { return x; }`), "Foo");
+    const cls = classes[0];
+    assert.equal(cls.name, "Foo");
+    assert.equal(cls.isImplicit, true);
+    assert.equal(cls.fields.length, 1);
+    assert.equal(cls.methods.length, 1);
+  });
   test("synchronized method modifier", () => {
     const src = `public class Sync {
       public synchronized void foo() {}
@@ -1235,6 +1253,16 @@ describe("Code generator", () => {
     assert.equal(enumFields.length, 2, "expected two enum constant fields");
     const enumFieldNames = enumFields.map(f => f.name).sort();
     assert.deepEqual(enumFieldNames, ["GREEN", "RED"], "enum constants RED and GREEN present");
+  });
+
+  test("compact source file: compiles with ACC_FINAL and correct class name", () => {
+    const bytes = compile(`static String run() { return "ok"; }`, "CompactTest");
+    assertValidClassFile(bytes);
+    const meta = parseClassMeta(bytes);
+    assert.equal(meta.name, "CompactTest");
+    assert.ok((meta.accessFlags & 0x0010) !== 0, "ACC_FINAL set on implicit class");
+    const run = meta.methods.find(m => m.name === "run");
+    assert.ok(run, "run method exists");
   });
 
   test("compiles ACC_SYNCHRONIZED method flag", () => {

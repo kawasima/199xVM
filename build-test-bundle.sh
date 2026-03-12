@@ -8,8 +8,29 @@ OUT_FILE="$OUT_DIR/bundle.bin"
 
 mkdir -p "$OUT_DIR"
 
-# Compile
-javac "$SRC_DIR"/*.java -d "$OUT_DIR"
+# Separate compact source files (no top-level class/interface/enum/record)
+# from normal Java files and compile accordingly.
+NORMAL_SOURCES=()
+COMPACT_SOURCES=()
+for f in "$SRC_DIR"/*.java; do
+  # Check for a class-like keyword at the top level (ignoring modifiers/imports/comments)
+  if grep -qE '^\s*(public\s+|abstract\s+|final\s+)*(class|interface|enum|record|@interface)\s' "$f"; then
+    NORMAL_SOURCES+=("$f")
+  else
+    COMPACT_SOURCES+=("$f")
+  fi
+done
+
+# Compile normal Java files with javac
+if [ ${#NORMAL_SOURCES[@]} -gt 0 ]; then
+  javac "${NORMAL_SOURCES[@]}" -d "$OUT_DIR"
+fi
+
+# Compile compact source files with 199xVM's web compiler
+for f in "${COMPACT_SOURCES[@]}"; do
+  classname=$(basename "$f" .java)
+  node compile-compact.mjs "$f" "$OUT_DIR/$classname.class"
+done
 
 # Bundle
 : > "$OUT_FILE"

@@ -1,5 +1,5 @@
 import { TokenKind, type Token } from "./lexer.js";
-import type { ClassDecl, Expr, Stmt, Type } from "./ast.js";
+import type { ClassDecl, Expr, FieldDecl, MethodDecl, Stmt, Type } from "./ast.js";
 
 const JAVA_LANG_SIMPLE_NAMES = new Set([
   "Object",
@@ -20,7 +20,7 @@ const JAVA_LANG_SIMPLE_NAMES = new Set([
   "Math",
 ]);
 
-export function parseAll(tokens: Token[]): ClassDecl[] {
+export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl[] {
   let pos = 0;
 
   function peek(): Token { return tokens[pos] ?? tokens[tokens.length - 1]; }
@@ -145,12 +145,56 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     expect(TokenKind.Semi);
   }
 
+  // Detect compact source file: no class/interface/enum/record/annotation at top level
+  function isClassLikeKeyword(): boolean {
+    // skip modifiers to peek at the real keyword
+    let i = pos;
+    while (i < tokens.length && (
+      tokens[i].kind === TokenKind.KwPublic ||
+      tokens[i].kind === TokenKind.KwAbstract ||
+      tokens[i].kind === TokenKind.KwFinal
+    )) i++;
+    const k = tokens[i]?.kind;
+    return k === TokenKind.KwClass || k === TokenKind.KwInterface ||
+           k === TokenKind.KwRecord || k === TokenKind.KwEnum ||
+           (k === TokenKind.At && tokens[i + 1]?.kind === TokenKind.KwInterface);
+  }
+
+  if (!at(TokenKind.EOF) && !isClassLikeKeyword()) {
+    // Compact source file — parse members directly and wrap in an implicit class
+    return [parseCompactSource(implicitClassName ?? "Main")];
+  }
+
   // Parse one or more class/record declarations
   const results: ClassDecl[] = [];
   while (!at(TokenKind.EOF)) {
     results.push(parseOneClass());
   }
   return results;
+
+  /// Parse a compact source file (JEP 463/512): top-level members without a class declaration.
+  /// Wraps all parsed members in a synthetic final class with the given name.
+  function parseCompactSource(className: string): ClassDecl {
+    const fields: FieldDecl[] = [];
+    const methods: MethodDecl[] = [];
+    const nestedClasses: ClassDecl[] = [];
+    while (!at(TokenKind.EOF)) {
+      parseMember(fields, methods, nestedClasses, className, "class");
+    }
+    return {
+      name: className,
+      kind: "class",
+      superClass: "java/lang/Object",
+      interfaces: [],
+      fields,
+      methods,
+      nestedClasses,
+      importMap,
+      packageImports,
+      staticWildcardImports: [],
+      isImplicit: true,
+    };
+  }
 
   function parseOneClass(): ClassDecl {
     // Skip modifiers before class/record
