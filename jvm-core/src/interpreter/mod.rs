@@ -256,6 +256,14 @@ impl Vm {
         self.pending_exception = Some(exc);
     }
 
+    /// Set `pending_exception` to a `BootstrapMethodError` with a detail message.
+    pub(in crate::interpreter) fn throw_bootstrap_method_error(&mut self, detail: &str) {
+        let exc = JObject::new("java/lang/BootstrapMethodError");
+        let msg = self.intern_string(detail.to_owned());
+        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        self.pending_exception = Some(exc);
+    }
+
     /// Set `pending_exception` to a `ClassFormatError` carrying the parse error message.
     /// Used when a class entry exists as `LazyClass::ParseError` (malformed bytecode).
     pub(in crate::interpreter) fn throw_class_format_error(&mut self, parse_msg: &str) {
