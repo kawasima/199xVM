@@ -230,3 +230,19 @@ fn clinit_erroneous_state_throws_ncdfe_on_second_access() {
     );
     assert_eq!(result, "EIIE,NCDFE");
 }
+
+// ---------------------------------------------------------------------------
+// JVMS §6.5: invokeinterface dispatches to interface default method
+// ---------------------------------------------------------------------------
+
+#[test]
+fn interface_default_method_dispatch() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "InterfaceDefaultMethodTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "I am Thing");
+}

@@ -266,6 +266,7 @@ impl Vm {
                 let arg_types = arg_type_chars(&descriptor);
                 let mut result = String::new();
                 let mut arg_idx = 0;
+                let mut const_idx = 0usize;
                 for ch in recipe.chars() {
                     if ch == '\x01' {
                         // Substitute argument — call toString() for objects.
@@ -298,7 +299,25 @@ impl Vm {
                         }
                         arg_idx += 1;
                     } else if ch == '\x02' {
-                        // \u0002 = constant from bootstrap args (skip for now)
+                        // \u0002 = compile-time constant from bootstrap args (index 1+).
+                        // bm.bootstrap_arguments[0] is the recipe; constants start at [1].
+                        let ba_idx = 1 + const_idx;
+                        if let Some(&cp_idx) = bm.bootstrap_arguments.get(ba_idx) {
+                            match cp.get(cp_idx as usize) {
+                                Some(ConstantPoolEntry::String { string_index }) => {
+                                    if let Some(ConstantPoolEntry::Utf8(s)) = cp.get(*string_index as usize) {
+                                        result.push_str(s);
+                                    }
+                                }
+                                Some(ConstantPoolEntry::Integer(v)) => result.push_str(&v.to_string()),
+                                Some(ConstantPoolEntry::Long(v)) => result.push_str(&v.to_string()),
+                                Some(ConstantPoolEntry::Float(v)) => result.push_str(&v.to_string()),
+                                Some(ConstantPoolEntry::Double(v)) => result.push_str(&v.to_string()),
+                                Some(ConstantPoolEntry::Utf8(s)) => result.push_str(s),
+                                _ => {}
+                            }
+                        }
+                        const_idx += 1;
                     } else {
                         result.push(ch);
                     }
@@ -337,8 +356,12 @@ impl Vm {
             }
 
             _ => {
-                // Unknown bootstrap — push null.
-                Ok(JValue::Ref(None))
+                // Unknown bootstrap class — throw BootstrapMethodError per JVMS §6.5.
+                let exc = crate::heap::JObject::new("java/lang/BootstrapMethodError");
+                let msg = self.intern_string(format!("unknown bootstrap class: {bm_class}"));
+                exc.borrow_mut().fields.insert("detailMessage".to_owned(), crate::heap::JValue::Ref(Some(msg)));
+                self.pending_exception = Some(exc);
+                Err(format!("java/lang/BootstrapMethodError: unknown bootstrap class: {bm_class}"))
             }
         }
     }
