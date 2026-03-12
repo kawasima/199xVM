@@ -557,7 +557,10 @@ function resolveClassName(ctx: CompileContext, name: string): string {
 }
 
 function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
-  return ctx.locals.find(l => l.name === name);
+  for (let i = ctx.locals.length - 1; i >= 0; i--) {
+    if (ctx.locals[i].name === name) return ctx.locals[i];
+  }
+  return undefined;
 }
 
 function addLocal(ctx: CompileContext, name: string, type: Type): number {
@@ -861,7 +864,7 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       }
       if (["&", "|", "^"].includes(expr.op)) {
         if (!isIntegralType(leftType) || !isIntegralType(rightType)) {
-          throw new Error(`Operator '${expr.op}' requires integral or boolean operands`);
+          throw new Error(`Operator '${expr.op}' requires integral operands`);
         }
       }
       if (["<<", ">>", ">>>"].includes(expr.op)) {
@@ -1793,6 +1796,7 @@ function collectStmtIdentifiers(stmt: Stmt, out: Set<string>): void {
   switch (stmt.kind) {
     case "varDecl": if (stmt.init) collectExprIdentifiers(stmt.init, out); break;
     case "assign": collectExprIdentifiers(stmt.target, out); collectExprIdentifiers(stmt.value, out); break;
+    case "compoundAssign": collectExprIdentifiers(stmt.target, out); collectExprIdentifiers(stmt.value, out); break;
     case "exprStmt": collectExprIdentifiers(stmt.expr, out); break;
     case "return": if (stmt.value) collectExprIdentifiers(stmt.value, out); break;
     case "yield": collectExprIdentifiers(stmt.value, out); break;
@@ -2338,6 +2342,108 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       }
       break;
     }
+    case "compoundAssign": {
+      const tempName = (p: string) => `${p}${ctx.nextSlot}`;
+      const emitBinaryIntoTarget = (leftExpr: Expr, targetType: Type, targetLabel: string): Type => {
+        const binaryExpr: Expr = { kind: "binary", op: stmt.op, left: leftExpr, right: stmt.value };
+        const resultType = inferType(ctx, binaryExpr);
+        ensureAssignable(ctx, targetType, resultType, targetLabel);
+        compileExpr(ctx, emitter, binaryExpr, targetType);
+        emitWideningConversion(emitter, resultType, targetType);
+        emitNarrowingConversion(emitter, resultType, targetType);
+        return resultType;
+      };
+
+      if (stmt.target.kind === "ident") {
+        const loc = findLocal(ctx, stmt.target.name);
+        if (loc) {
+          emitBinaryIntoTarget({ kind: "ident", name: stmt.target.name }, loc.type, `local '${stmt.target.name}'`);
+          emitStoreLocalByType(emitter, loc.slot, loc.type);
+        } else {
+          const field = ctx.fields.find(f => f.name === stmt.target.name);
+          if (field) {
+            emitBinaryIntoTarget({ kind: "ident", name: stmt.target.name }, field.type, `field '${stmt.target.name}'`);
+            if (field.isStatic) {
+              const fRef = ctx.cp.addFieldref(ctx.className, field.name, typeToDescriptor(field.type));
+              emitter.emit(0xb3); // putstatic
+              emitter.emitU16(fRef);
+            } else {
+              const resultSlot = addLocal(ctx, tempName("$ca_res_"), field.type);
+              if (emitter.maxLocals <= resultSlot) emitter.maxLocals = resultSlot + 1;
+              emitStoreLocalByType(emitter, resultSlot, field.type);
+              emitter.emitAload(0);
+              emitLoadLocalByType(emitter, resultSlot, field.type);
+              const fRef = ctx.cp.addFieldref(ctx.className, field.name, typeToDescriptor(field.type));
+              emitter.emit(0xb5); // putfield
+              emitter.emitU16(fRef);
+            }
+          }
+        }
+      } else if (stmt.target.kind === "fieldAccess") {
+        const targetType = inferType(ctx, stmt.target);
+        const objType = inferType(ctx, stmt.target.object);
+        const ownerClass = typeof objType === "object" && "className" in objType ? objType.className : ctx.className;
+        const fieldRef = ctx.cp.addFieldref(ownerClass, stmt.target.field, typeToDescriptor(targetType));
+        // Evaluate receiver once
+        compileExpr(ctx, emitter, stmt.target.object);
+        const objSlot = addLocal(ctx, tempName("$ca_obj_"), objType);
+        if (emitter.maxLocals <= objSlot) emitter.maxLocals = objSlot + 1;
+        emitter.emitAstore(objSlot);
+        // Load current field value once
+        emitter.emitAload(objSlot);
+        emitter.emit(0xb4); // getfield
+        emitter.emitU16(fieldRef);
+        const leftName = tempName("$ca_left_");
+        const leftSlot = addLocal(ctx, leftName, targetType);
+        if (emitter.maxLocals <= leftSlot) emitter.maxLocals = leftSlot + 1;
+        emitStoreLocalByType(emitter, leftSlot, targetType);
+        emitBinaryIntoTarget({ kind: "ident", name: leftName }, targetType, `field '${stmt.target.field}'`);
+        const resSlot = addLocal(ctx, tempName("$ca_res_"), targetType);
+        if (emitter.maxLocals <= resSlot) emitter.maxLocals = resSlot + 1;
+        emitStoreLocalByType(emitter, resSlot, targetType);
+        emitter.emitAload(objSlot);
+        emitLoadLocalByType(emitter, resSlot, targetType);
+        emitter.emit(0xb5); // putfield
+        emitter.emitU16(fieldRef);
+      } else if (stmt.target.kind === "arrayAccess") {
+        const elemType = inferType(ctx, stmt.target);
+        const arrType = inferType(ctx, stmt.target.array);
+        // Evaluate array and index once
+        compileExpr(ctx, emitter, stmt.target.array);
+        const arrSlot = addLocal(ctx, tempName("$ca_arr_"), arrType);
+        if (emitter.maxLocals <= arrSlot) emitter.maxLocals = arrSlot + 1;
+        emitter.emitAstore(arrSlot);
+        compileExpr(ctx, emitter, stmt.target.index, "int");
+        const idxSlot = addLocal(ctx, tempName("$ca_idx_"), "int");
+        if (emitter.maxLocals <= idxSlot) emitter.maxLocals = idxSlot + 1;
+        emitter.emitIstore(idxSlot);
+        emitter.emitAload(arrSlot);
+        emitter.emitIload(idxSlot);
+        if (elemType === "int" || elemType === "boolean" || elemType === "byte" || elemType === "short" || elemType === "char") {
+          emitter.emit(0x2e); // iaload
+        } else {
+          emitter.emit(0x32); // aaload
+        }
+        emitter.adjustStackForArrayLoad();
+        const leftName = tempName("$ca_left_");
+        const leftSlot = addLocal(ctx, leftName, elemType);
+        if (emitter.maxLocals <= leftSlot) emitter.maxLocals = leftSlot + 1;
+        emitStoreLocalByType(emitter, leftSlot, elemType);
+        emitBinaryIntoTarget({ kind: "ident", name: leftName }, elemType, "array element");
+        const resSlot = addLocal(ctx, tempName("$ca_res_"), elemType);
+        if (emitter.maxLocals <= resSlot) emitter.maxLocals = resSlot + 1;
+        emitStoreLocalByType(emitter, resSlot, elemType);
+        emitter.emitAload(arrSlot);
+        emitter.emitIload(idxSlot);
+        emitLoadLocalByType(emitter, resSlot, elemType);
+        if (elemType === "int" || elemType === "boolean" || elemType === "byte" || elemType === "short" || elemType === "char") {
+          emitter.emit(0x4f); // iastore
+        } else {
+          emitter.emit(0x53); // aastore
+        }
+      }
+      break;
+    }
     case "exprStmt": {
       compileExpr(ctx, emitter, stmt.expr);
       // Pop result if non-void
@@ -2605,7 +2711,15 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       emitter.emitU16(assertionClass);
       emitter.emit(0x59); // dup
       if (stmt.message) {
-        compileExpr(ctx, emitter, stmt.message, { className: "java/lang/Object" });
+        const msgType = inferType(ctx, stmt.message);
+        compileExpr(ctx, emitter, stmt.message);
+        if (isPrimitiveType(msgType)) {
+          const info = BOX_INFO[msgType as string];
+          if (!info) throw new Error("assert message boxing failed");
+          const boxRef = ctx.cp.addMethodref(info.wrapper, "valueOf", info.desc);
+          emitter.emit(0xb8); // invokestatic
+          emitter.emitU16(boxRef);
+        }
         const initRef = ctx.cp.addMethodref("java/lang/AssertionError", "<init>", "(Ljava/lang/Object;)V");
         emitter.emitInvokespecial(initRef, 1, false);
       } else {
@@ -2620,8 +2734,10 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       const monitorType = inferType(ctx, stmt.monitor);
       if (!isRefType(monitorType)) throw new Error("synchronized monitor must be a reference type");
       withScopedLocals(ctx, () => {
+        const syncMonName = `$sync_mon_${ctx.nextSlot}`;
+        const syncExName = `$sync_ex_${ctx.nextSlot}`;
         compileExpr(ctx, emitter, stmt.monitor);
-        const monSlot = addLocal(ctx, "$sync_mon", monitorType);
+        const monSlot = addLocal(ctx, syncMonName, monitorType);
         if (emitter.maxLocals <= monSlot) emitter.maxLocals = monSlot + 1;
         emitter.emitAstore(monSlot);
 
@@ -2638,7 +2754,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
 
         const handlerPc = emitter.pc;
         emitter.adjustStackForCatch();
-        const exSlot = addLocal(ctx, "$sync_ex", { className: "java/lang/Throwable" });
+        const exSlot = addLocal(ctx, syncExName, { className: "java/lang/Throwable" });
         if (emitter.maxLocals <= exSlot) emitter.maxLocals = exSlot + 1;
         emitter.emitAstore(exSlot);
         emitter.emitAload(monSlot);
@@ -2840,6 +2956,7 @@ function stmtHasSuperCall(stmt: Stmt): boolean {
   switch (stmt.kind) {
     case "varDecl": return !!stmt.init && exprHasSuperCall(stmt.init);
     case "assign": return exprHasSuperCall(stmt.target) || exprHasSuperCall(stmt.value);
+    case "compoundAssign": return exprHasSuperCall(stmt.target) || exprHasSuperCall(stmt.value);
     case "exprStmt": return exprHasSuperCall(stmt.expr);
     case "return": return !!stmt.value && exprHasSuperCall(stmt.value);
     case "yield": return exprHasSuperCall(stmt.value);
