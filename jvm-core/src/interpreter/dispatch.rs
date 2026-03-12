@@ -302,8 +302,8 @@ impl Vm {
                         // \u0002 = compile-time constant from bootstrap args (index 1+).
                         // bm.bootstrap_arguments[0] is the recipe; constants start at [1].
                         let ba_idx = 1 + const_idx;
-                        if let Some(&cp_idx) = bm.bootstrap_arguments.get(ba_idx) {
-                            match cp.get(cp_idx as usize) {
+                        match bm.bootstrap_arguments.get(ba_idx) {
+                            Some(&cp_idx) => match cp.get(cp_idx as usize) {
                                 Some(ConstantPoolEntry::String { string_index }) => {
                                     if let Some(ConstantPoolEntry::Utf8(s)) = cp.get(*string_index as usize) {
                                         result.push_str(s);
@@ -311,11 +311,51 @@ impl Vm {
                                 }
                                 Some(ConstantPoolEntry::Integer(v)) => result.push_str(&v.to_string()),
                                 Some(ConstantPoolEntry::Long(v)) => result.push_str(&v.to_string()),
-                                Some(ConstantPoolEntry::Float(v)) => result.push_str(&v.to_string()),
-                                Some(ConstantPoolEntry::Double(v)) => result.push_str(&v.to_string()),
+                                Some(ConstantPoolEntry::Float(v)) => {
+                                    // Use Java-compatible formatting: finite values via Rust,
+                                    // but infinities/NaN must match Java's Float.toString output.
+                                    if v.is_infinite() {
+                                        result.push_str(if *v > 0.0 { "Infinity" } else { "-Infinity" });
+                                    } else if v.is_nan() {
+                                        result.push_str("NaN");
+                                    } else {
+                                        result.push_str(&v.to_string());
+                                    }
+                                }
+                                Some(ConstantPoolEntry::Double(v)) => {
+                                    if v.is_infinite() {
+                                        result.push_str(if *v > 0.0 { "Infinity" } else { "-Infinity" });
+                                    } else if v.is_nan() {
+                                        result.push_str("NaN");
+                                    } else {
+                                        result.push_str(&v.to_string());
+                                    }
+                                }
                                 Some(ConstantPoolEntry::Utf8(s)) => result.push_str(s),
-                                _ => {}
-                            }
+                                Some(ConstantPoolEntry::Class { name_index }) => {
+                                    if let Some(ConstantPoolEntry::Utf8(s)) = cp.get(*name_index as usize) {
+                                        result.push_str(s);
+                                    }
+                                }
+                                Some(ConstantPoolEntry::MethodHandle { .. })
+                                | Some(ConstantPoolEntry::MethodType { .. }) => {
+                                    // Stable debug representation for unsupported handle/type constants.
+                                    if let Some(entry) = cp.get(cp_idx as usize) {
+                                        result.push_str(&format!("{entry:?}"));
+                                    }
+                                }
+                                Some(other) => {
+                                    let detail = format!("unsupported \\x02 constant in StringConcatFactory recipe: {other:?}");
+                                    self.throw_bootstrap_method_error(&detail);
+                                    return Err(format!("java/lang/BootstrapMethodError: {detail}"));
+                                }
+                                None => {
+                                    let detail = format!("invalid CP index {cp_idx} in StringConcatFactory recipe");
+                                    self.throw_bootstrap_method_error(&detail);
+                                    return Err(format!("java/lang/BootstrapMethodError: {detail}"));
+                                }
+                            },
+                            None => {} // no constant at this index — emit nothing
                         }
                         const_idx += 1;
                     } else {
@@ -357,11 +397,9 @@ impl Vm {
 
             _ => {
                 // Unknown bootstrap class — throw BootstrapMethodError per JVMS §6.5.
-                let exc = crate::heap::JObject::new("java/lang/BootstrapMethodError");
-                let msg = self.intern_string(format!("unknown bootstrap class: {bm_class}"));
-                exc.borrow_mut().fields.insert("detailMessage".to_owned(), crate::heap::JValue::Ref(Some(msg)));
-                self.pending_exception = Some(exc);
-                Err(format!("java/lang/BootstrapMethodError: unknown bootstrap class: {bm_class}"))
+                let detail = format!("unknown bootstrap class: {bm_class}");
+                self.throw_bootstrap_method_error(&detail);
+                Err(format!("java/lang/BootstrapMethodError: {detail}"))
             }
         }
     }
