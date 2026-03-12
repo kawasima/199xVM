@@ -170,3 +170,15 @@ fn classloader_api() {
     );
     assert_eq!(result, "cl:ok|forName:ok|loadClass:ok");
 }
+
+#[test]
+fn classloader_missing_class_throws_cnfe() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "ClassLoaderNegativeTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ClassNotFoundException:com.example.NonExistentClass");
+}

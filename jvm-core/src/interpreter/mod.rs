@@ -234,6 +234,14 @@ impl Vm {
         self.pending_exception = Some(exc);
     }
 
+    /// Set `pending_exception` to a `NullPointerException` with an optional detail message.
+    pub(in crate::interpreter) fn throw_null_pointer(&mut self, detail: &str) {
+        let exc = JObject::new("java/lang/NullPointerException");
+        let msg = self.intern_string(detail.to_owned());
+        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        self.pending_exception = Some(exc);
+    }
+
     /// Set `pending_exception` to a `ClassFormatError` carrying the parse error message.
     /// Used when a class entry exists as `LazyClass::ParseError` (malformed bytecode).
     pub(in crate::interpreter) fn throw_class_format_error(&mut self, parse_msg: &str) {
