@@ -30,6 +30,11 @@ const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
     returnType: { className: "java/lang/Class" },
     paramTypes: [],
   },
+  "java/lang/Throwable.addSuppressed(Ljava/lang/Throwable;)": {
+    owner: "java/lang/Throwable",
+    returnType: "void",
+    paramTypes: [{ className: "java/lang/Throwable" }],
+  },
   // StringBuilder
   "java/lang/StringBuilder.<init>()": { owner: "java/lang/StringBuilder", returnType: "void", paramTypes: [] },
   "java/lang/StringBuilder.append(Ljava/lang/String;)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["String"] },

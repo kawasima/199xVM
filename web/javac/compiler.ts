@@ -1740,6 +1740,29 @@ function withScopedLocals(ctx: CompileContext, fn: () => void): void {
   ctx.nextSlot = savedNext;
 }
 
+type ExitAction = { kind: "monitor"; slot: number } | { kind: "finally"; body: Stmt[] };
+
+function getExitActions(ctx: CompileContext): ExitAction[] {
+  const anyCtx = ctx as unknown as { __exitActions?: ExitAction[] };
+  if (!anyCtx.__exitActions) anyCtx.__exitActions = [];
+  return anyCtx.__exitActions;
+}
+
+function emitPendingExitActions(ctx: CompileContext, emitter: BytecodeEmitter, minDepth = 0): void {
+  const actions = getExitActions(ctx);
+  for (let i = actions.length - 1; i >= minDepth; i--) {
+    const action = actions[i];
+    if (action.kind === "monitor") {
+      emitter.emitAload(action.slot);
+      emitter.emitPop(0xc3); // monitorexit
+    } else {
+      withScopedLocals(ctx, () => {
+        for (const s of action.body) compileStmt(ctx, emitter, s);
+      });
+    }
+  }
+}
+
 function ensureAssignable(ctx: CompileContext, target: Type, value: Type, reason: string): void {
   if (!isAssignableInContext(ctx, target, value)) {
     throw new Error(`Type mismatch for ${reason}: cannot assign ${typeToDescriptor(value)} to ${typeToDescriptor(target)}`);
@@ -2377,6 +2400,8 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
               emitter.emit(0xb5); // putfield
               emitter.emitU16(fRef);
             }
+          } else {
+            throw new Error(`compound assignment target not found: '${stmt.target.name}'`);
           }
         }
       } else if (stmt.target.kind === "fieldAccess") {
@@ -2472,6 +2497,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         }
         emitWideningConversion(emitter, retValType, ctx.method.returnType);
       }
+      emitPendingExitActions(ctx, emitter);
       emitter.emitReturn(ctx.method.returnType);
       break;
     }
@@ -2533,8 +2559,8 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
     }
     case "while": {
       if (inferType(ctx, stmt.cond) !== "boolean") throw new Error("while condition must be boolean");
-      const breakInfo = { label: undefined as string | undefined, patches: [] as number[] };
-      const continueInfo = { label: undefined as string | undefined, targets: [] as number[] };
+      const breakInfo = { label: undefined as string | undefined, patches: [] as number[], exitDepth: getExitActions(ctx).length };
+      const continueInfo = { label: undefined as string | undefined, targets: [] as number[], exitDepth: getExitActions(ctx).length };
       ctx.breakPatches.push(breakInfo);
       ctx.continuePatches.push(continueInfo);
       const loopStart = emitter.pc;
@@ -2557,8 +2583,8 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
     case "for": {
       withScopedLocals(ctx, () => {
         if (stmt.init) compileStmt(ctx, emitter, stmt.init);
-        const breakInfo = { label: undefined as string | undefined, patches: [] as number[] };
-        const continueInfo = { label: undefined as string | undefined, targets: [] as number[] };
+        const breakInfo = { label: undefined as string | undefined, patches: [] as number[], exitDepth: getExitActions(ctx).length };
+        const continueInfo = { label: undefined as string | undefined, targets: [] as number[], exitDepth: getExitActions(ctx).length };
         ctx.breakPatches.push(breakInfo);
         ctx.continuePatches.push(continueInfo);
         const loopStart = emitter.pc;
@@ -2589,8 +2615,8 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
     }
     case "doWhile": {
       if (inferType(ctx, stmt.cond) !== "boolean") throw new Error("do-while condition must be boolean");
-      const breakInfo = { label: undefined as string | undefined, patches: [] as number[] };
-      const continueInfo = { label: undefined as string | undefined, targets: [] as number[] };
+      const breakInfo = { label: undefined as string | undefined, patches: [] as number[], exitDepth: getExitActions(ctx).length };
+      const continueInfo = { label: undefined as string | undefined, targets: [] as number[], exitDepth: getExitActions(ctx).length };
       ctx.breakPatches.push(breakInfo);
       ctx.continuePatches.push(continueInfo);
       const loopStart = emitter.pc;
@@ -2611,8 +2637,8 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
     case "forEach": {
       withScopedLocals(ctx, () => {
         const iterableType = inferType(ctx, stmt.iterable);
-        const breakInfo = { label: undefined as string | undefined, patches: [] as number[] };
-        const continueInfo = { label: undefined as string | undefined, targets: [] as number[] };
+        const breakInfo = { label: undefined as string | undefined, patches: [] as number[], exitDepth: getExitActions(ctx).length };
+        const continueInfo = { label: undefined as string | undefined, targets: [] as number[], exitDepth: getExitActions(ctx).length };
         ctx.breakPatches.push(breakInfo);
         ctx.continuePatches.push(continueInfo);
         if (typeof iterableType === "object" && "array" in iterableType) {
@@ -2745,9 +2771,12 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         emitter.emitPop(0xc2); // monitorenter
 
         const syncStart = emitter.pc;
+        const exitActions = getExitActions(ctx);
+        exitActions.push({ kind: "monitor", slot: monSlot });
         withScopedLocals(ctx, () => {
           for (const s of stmt.body) compileStmt(ctx, emitter, s);
         });
+        exitActions.pop();
         emitter.emitAload(monSlot);
         emitter.emitPop(0xc3); // monitorexit
         const patchEnd = emitter.emitBranch(0xa7); // goto end
@@ -2771,6 +2800,8 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       // Exception table entries are not yet supported in the bytecode emitter,
       // so we emit the structure and register exception table entries.
       const tryStart = emitter.pc;
+      const exitActions = getExitActions(ctx);
+      if (stmt.finallyBody) exitActions.push({ kind: "finally", body: stmt.finallyBody });
       withScopedLocals(ctx, () => {
         for (const s of stmt.tryBody) compileStmt(ctx, emitter, s);
       });
@@ -2793,6 +2824,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         });
         catchEndPatches.push(emitter.emitBranch(0xa7)); // goto end
       }
+      if (stmt.finallyBody) exitActions.pop();
       // Finally block (if present) — simplified: inline after try and each catch
       if (stmt.finallyBody) {
         // Patch all catch-end gotos to here, then emit finally
@@ -2814,10 +2846,12 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         // Find the labeled break target
         const info = [...ctx.breakPatches].reverse().find(b => b.label === stmt.label);
         if (!info) throw new Error(`break label '${stmt.label}' not found`);
+        emitPendingExitActions(ctx, emitter, info.exitDepth ?? 0);
         info.patches.push(emitter.emitBranch(0xa7));
       } else {
         const info = ctx.breakPatches[ctx.breakPatches.length - 1];
         if (!info) throw new Error("break outside of loop/switch");
+        emitPendingExitActions(ctx, emitter, info.exitDepth ?? 0);
         info.patches.push(emitter.emitBranch(0xa7));
       }
       break;
@@ -2826,17 +2860,19 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       if (stmt.label) {
         const info = [...ctx.continuePatches].reverse().find(c => c.label === stmt.label);
         if (!info) throw new Error(`continue label '${stmt.label}' not found`);
+        emitPendingExitActions(ctx, emitter, info.exitDepth ?? 0);
         info.targets.push(emitter.emitBranch(0xa7));
       } else {
         const info = ctx.continuePatches[ctx.continuePatches.length - 1];
         if (!info) throw new Error("continue outside of loop");
+        emitPendingExitActions(ctx, emitter, info.exitDepth ?? 0);
         info.targets.push(emitter.emitBranch(0xa7));
       }
       break;
     }
     case "labeled": {
-      const breakInfo = { label: stmt.label, patches: [] as number[] };
-      const continueInfo = { label: stmt.label, targets: [] as number[] };
+      const breakInfo = { label: stmt.label, patches: [] as number[], exitDepth: getExitActions(ctx).length };
+      const continueInfo = { label: stmt.label, targets: [] as number[], exitDepth: getExitActions(ctx).length };
       ctx.breakPatches.push(breakInfo);
       ctx.continuePatches.push(continueInfo);
       compileStmt(ctx, emitter, stmt.stmt);

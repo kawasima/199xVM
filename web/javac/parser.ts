@@ -1089,12 +1089,37 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       for (let i = resources.length - 1; i >= 0; i--) {
         const r = resources[i];
         const exName = `$twr_ex_${i}`;
-        const closeStmt: Stmt = {
+        const closeExName = `$twr_close_ex_${i}`;
+        const closeNormal: Stmt = {
           kind: "if",
           cond: { kind: "binary", op: "!=", left: { kind: "ident", name: r.name }, right: { kind: "nullLit" } },
           then: [{
             kind: "exprStmt",
             expr: { kind: "call", object: { kind: "ident", name: r.name }, method: "close", args: [] },
+          }],
+        };
+        const closeWithSuppressed: Stmt = {
+          kind: "if",
+          cond: { kind: "binary", op: "!=", left: { kind: "ident", name: r.name }, right: { kind: "nullLit" } },
+          then: [{
+            kind: "tryCatch",
+            tryBody: [{
+              kind: "exprStmt",
+              expr: { kind: "call", object: { kind: "ident", name: r.name }, method: "close", args: [] },
+            }],
+            catches: [{
+              exType: "Throwable",
+              varName: closeExName,
+              body: [{
+                kind: "exprStmt",
+                expr: {
+                  kind: "call",
+                  object: { kind: "ident", name: exName },
+                  method: "addSuppressed",
+                  args: [{ kind: "ident", name: closeExName }],
+                },
+              }],
+            }],
           }],
         };
         loweredTryBody = [{
@@ -1106,13 +1131,13 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
               tryBody: [
                 { kind: "assign", target: { kind: "ident", name: r.name }, value: r.init },
                 ...loweredTryBody,
-                closeStmt,
               ],
               catches: [{
                 exType: "Throwable",
                 varName: exName,
-                body: [closeStmt, { kind: "throw", expr: { kind: "ident", name: exName } }],
+                body: [closeWithSuppressed, { kind: "throw", expr: { kind: "ident", name: exName } }],
               }],
+              finallyBody: [closeNormal],
             },
           ],
         }];

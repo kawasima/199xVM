@@ -1511,6 +1511,15 @@ describe("Code generator", () => {
     }`), /Invalid cast/);
   });
 
+  test("compound assignment rejects unresolved identifier target", () => {
+    assert.throws(() => compile(`public class BadCompoundTarget {
+      public static int run() {
+        missing += 1;
+        return 0;
+      }
+    }`), /compound assignment target not found/);
+  });
+
   test("assignment allows subtype to supertype in known hierarchy", () => {
     assert.doesNotThrow(() => compile(`
       public class A {}
@@ -2023,6 +2032,12 @@ describe("Parser – new syntax", () => {
     const innerTry = firstBlock.stmts[1];
     assert.equal(innerTry.kind, "tryCatch");
     assert.equal(innerTry.catches[0].exType, "Throwable");
+    assert.ok(innerTry.finallyBody && innerTry.finallyBody.length > 0);
+    const closeWithSuppressed = innerTry.catches[0].body[0];
+    assert.equal(closeWithSuppressed.kind, "if");
+    const nestedCloseTry = closeWithSuppressed.then[0];
+    assert.equal(nestedCloseTry.kind, "tryCatch");
+    assert.equal(nestedCloseTry.catches[0].body[0].kind, "exprStmt");
     assert.equal(innerTry.catches[0].body[1].kind, "throw");
   });
 
@@ -2209,6 +2224,18 @@ describe("Code generator – new syntax", () => {
           x = 7;
         }
         return "" + x;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles synchronized statement with early return", () => {
+    const bytes = compile(`public class SyncStmtReturn {
+      public static String run() {
+        Object lock = new Object();
+        synchronized (lock) {
+          return "ok";
+        }
       }
     }`);
     assertValidClassFile(bytes);
