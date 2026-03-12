@@ -225,7 +225,8 @@ impl super::Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let mods = { self.ensure_class_ready(&target); self.get_class(&target).map(|cf| i32::from(cf.access_flags)).unwrap_or(0) };
+                self.ensure_class_ready(&target);
+                let mods = self.get_class(&target).map(|cf| i32::from(cf.access_flags)).unwrap_or(0);
                 Some(JValue::Int(mods))
             }
             ("java/lang/Class", "isInstance") => {
@@ -260,7 +261,8 @@ impl super::Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let is_iface = { self.ensure_class_ready(&target); self.get_class(&target).map(|cf| (cf.access_flags & 0x0200) != 0).unwrap_or(false) };
+                self.ensure_class_ready(&target);
+                let is_iface = self.get_class(&target).map(|cf| (cf.access_flags & 0x0200) != 0).unwrap_or(false);
                 Some(JValue::Int(if is_iface { 1 } else { 0 }))
             }
             ("java/lang/Class", "getComponentType") => {
@@ -357,7 +359,8 @@ impl super::Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let is_record = { self.ensure_class_ready(&target); self.get_class(&target).map(|cf| cf.attributes.iter().any(|a| matches!(a, Attribute::Record { .. }))).unwrap_or(false) };
+                self.ensure_class_ready(&target);
+                let is_record = self.get_class(&target).map(|cf| cf.attributes.iter().any(|a| matches!(a, Attribute::Record { .. }))).unwrap_or(false);
                 Some(JValue::Int(if is_record { 1 } else { 0 }))
             }
             ("java/lang/Class", "getRecordComponents") => {

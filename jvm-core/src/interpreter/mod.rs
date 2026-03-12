@@ -50,6 +50,10 @@ pub(in crate::interpreter) enum LazyClass {
     Pending(Vec<u8>),
     /// Fully parsed class file.
     Ready(ClassFile),
+    /// Bytes were present but could not be parsed (malformed class).
+    /// The entry is preserved so callers can distinguish "never registered"
+    /// from "registered but broken", and to avoid repeated parse attempts.
+    ParseError,
 }
 
 mod annotations;
@@ -131,13 +135,18 @@ impl Vm {
 
     /// Ensure the named class is fully parsed (`Ready`).
     /// If the entry is `Pending`, parses it in place and promotes it to `Ready`.
-    /// Does nothing if the class is already `Ready` or not registered.
+    /// On parse failure the entry is set to `ParseError` so the failure is
+    /// diagnosable and repeated parse attempts are avoided.
+    /// Does nothing if the class is already `Ready`, `ParseError`, or not registered.
     pub(in crate::interpreter) fn ensure_class_ready(&mut self, name: &str) {
         if let Some(LazyClass::Pending(_)) = self.classes.get(name) {
             if let Some(LazyClass::Pending(bytes)) = self.classes.remove(name) {
                 match class_file::parse(&bytes) {
                     Ok(cf) => { self.classes.insert(name.to_owned(), LazyClass::Ready(cf)); }
-                    Err(_) => { /* malformed class — leave absent */ }
+                    Err(e) => {
+                        eprintln!("Warning: failed to parse class '{name}': {e}");
+                        self.classes.insert(name.to_owned(), LazyClass::ParseError);
+                    }
                 }
             }
         }
@@ -148,7 +157,7 @@ impl Vm {
     pub(in crate::interpreter) fn get_class(&self, name: &str) -> Option<&ClassFile> {
         match self.classes.get(name)? {
             LazyClass::Ready(cf) => Some(cf),
-            LazyClass::Pending(_) => None,
+            LazyClass::Pending(_) | LazyClass::ParseError => None,
         }
     }
 
@@ -341,8 +350,8 @@ impl Vm {
         None
     }
 
-    /// Like find_method_flags but also returns the resolved descriptor.
-    /// Used to check method existence before dispatch.
+    /// Returns `true` if the named method exists in the class hierarchy.
+    /// Used to check method existence before dispatch without borrowing ClassFile data.
     pub(in crate::interpreter) fn method_exists(
         &mut self,
         class_name: &str,

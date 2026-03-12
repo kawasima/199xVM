@@ -263,9 +263,12 @@ impl<'a> Reader<'a> {
 /// then reads `this_class` to find the `Class` entry whose `name_index` points to
 /// the `Utf8` entry containing the internal class name.
 ///
+/// Utf8 entries are recorded as `(offset, length)` byte-range pointers into `data`
+/// rather than decoded `String`s, so only the single target entry is ever decoded.
+///
 /// Returns `None` if the bytes are too short or malformed.
 pub fn parse_class_name(data: &[u8]) -> Option<String> {
-    // Helper closures for bounds-checked reads.
+    // Bounds-checked read helpers.
     let read_u8 = |pos: &mut usize| -> Option<u8> {
         let b = *data.get(*pos)?;
         *pos += 1;
@@ -296,20 +299,22 @@ pub fn parse_class_name(data: &[u8]) -> Option<String> {
     // constant pool count
     let cp_count = read_u16(pos)? as usize;
 
-    // Scan the constant pool — store only Utf8 and Class entries (by 1-based index).
-    let mut utf8_entries: Vec<Option<String>> = vec![None; cp_count];
+    // Scan the constant pool.
+    // Utf8 entries: record (byte_offset, byte_len) — no String allocation yet.
+    // Class entries: record name_index.
+    let mut utf8_spans: Vec<Option<(usize, usize)>> = vec![None; cp_count];
     let mut class_name_indices: Vec<Option<u16>> = vec![None; cp_count];
     let mut i = 1usize;
     while i < cp_count {
         let tag = read_u8(pos)?;
         match tag {
             1 => {
-                // Utf8
+                // Utf8 — record span, skip bytes
                 let len = read_u16(pos)? as usize;
-                let end = pos.checked_add(len)?;
+                let start = *pos;
+                let end = start.checked_add(len)?;
                 if end > data.len() { return None; }
-                let s = String::from_utf8_lossy(&data[*pos..end]).into_owned();
-                utf8_entries[i] = Some(s);
+                utf8_spans[i] = Some((start, len));
                 *pos = end;
                 i += 1;
             }
@@ -360,7 +365,10 @@ pub fn parse_class_name(data: &[u8]) -> Option<String> {
     if this_class >= cp_count { return None; }
     let name_index = class_name_indices[this_class]? as usize;
     if name_index >= cp_count { return None; }
-    utf8_entries[name_index].take()
+
+    // Decode only the single target Utf8 entry.
+    let (start, len) = utf8_spans[name_index]?;
+    Some(String::from_utf8_lossy(&data[start..start + len]).into_owned())
 }
 
 /// Parse a `.class` file from raw bytes.
