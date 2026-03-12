@@ -565,26 +565,36 @@ interface ResolvedMethodCandidate {
 }
 
 function ownerSearchOrder(ctx: CompileContext, startOwner: string): string[] {
-  const out: string[] = [];
-  const queue: string[] = [startOwner];
-  const seen = new Set<string>();
-  while (queue.length > 0) {
-    const owner = queue.shift()!;
-    if (seen.has(owner)) continue;
-    seen.add(owner);
-    out.push(owner);
-    const decl = ctx.classDecls.get(owner);
-    if (decl) {
-      for (const itf of decl.interfaces ?? []) {
-        queue.push(resolveClassName(ctx, itf));
-      }
-      if (decl.superClass) queue.push(resolveClassName(ctx, decl.superClass));
-    } else {
-      const next = ctx.classSupers.get(owner) ?? BUILTIN_SUPERS[owner];
-      if (next) queue.push(next);
-    }
+  const classChain: string[] = [];
+  const seenClass = new Set<string>();
+  let cur: string | undefined = startOwner;
+  while (cur && !seenClass.has(cur)) {
+    seenClass.add(cur);
+    classChain.push(cur);
+    const decl = ctx.classDecls.get(cur);
+    if (decl) cur = decl.superClass ? resolveClassName(ctx, decl.superClass) : undefined;
+    else cur = ctx.classSupers.get(cur) ?? BUILTIN_SUPERS[cur];
   }
-  return out;
+
+  const interfaces: string[] = [];
+  const seenIface = new Set<string>();
+  const queue: string[] = [];
+  for (const owner of classChain) {
+    const decl = ctx.classDecls.get(owner);
+    if (!decl) continue;
+    for (const itf of decl.interfaces ?? []) queue.push(resolveClassName(ctx, itf));
+  }
+  while (queue.length > 0) {
+    const itf = queue.shift()!;
+    if (seenIface.has(itf)) continue;
+    seenIface.add(itf);
+    interfaces.push(itf);
+    const decl = ctx.classDecls.get(itf);
+    if (!decl) continue;
+    for (const parent of decl.interfaces ?? []) queue.push(resolveClassName(ctx, parent));
+  }
+
+  return [...classChain, ...interfaces];
 }
 
 function resolveMethodCandidate(
@@ -610,8 +620,18 @@ function resolveMethodCandidateByTypes(
   for (const owner of ownerSearchOrder(ctx, ownerClass)) {
     const decl = ctx.classDecls.get(owner);
     if (decl) {
-      const m = decl.methods.find(mm => mm.name === method && mm.isStatic === wantStatic && mm.params.length === argTypes.length);
-      if (!m) continue;
+      const candidates = decl.methods.filter(mm => mm.name === method && mm.isStatic === wantStatic && mm.params.length === argTypes.length);
+      if (candidates.length === 0) continue;
+      const exactMatches = candidates.filter(mm => mm.params.map(p => typeToDescriptor(p.type)).join("") === argDescs);
+      let m: MethodDecl | undefined;
+      if (exactMatches.length === 1) m = exactMatches[0];
+      else if (exactMatches.length > 1) {
+        throw new Error(`Ambiguous method overload: ${owner}.${method}(${argDescs})`);
+      } else if (candidates.length === 1) {
+        m = candidates[0];
+      } else {
+        throw new Error(`Ambiguous method overload: ${owner}.${method}(${argDescs})`);
+      }
       return {
         owner,
         paramTypes: m.params.map(p => p.type),
@@ -3277,18 +3297,42 @@ function findDeclaredMethodByArity(
   arity: number,
   wantStatic: boolean | undefined,
 ): MethodDecl | undefined {
-  const seen = new Set<string>();
+  const classChain: string[] = [];
+  const seenClass = new Set<string>();
   let cur: string | undefined = ownerClass;
-  while (cur && !seen.has(cur)) {
-    seen.add(cur);
-    const decl = classDecls.get(cur);
+  while (cur && !seenClass.has(cur)) {
+    seenClass.add(cur);
+    classChain.push(cur);
+    cur = classSupers.get(cur) ?? BUILTIN_SUPERS[cur];
+  }
+  for (const cls of classChain) {
+    const decl = classDecls.get(cls);
     if (decl) {
       const found = decl.methods.find(m => m.name === methodName
         && m.params.length === arity
         && (wantStatic === undefined || m.isStatic === wantStatic));
       if (found) return found;
     }
-    cur = classSupers.get(cur) ?? BUILTIN_SUPERS[cur];
+  }
+
+  const queue: string[] = [];
+  const seenIface = new Set<string>();
+  for (const cls of classChain) {
+    const decl = classDecls.get(cls);
+    if (!decl) continue;
+    for (const itf of decl.interfaces ?? []) queue.push(itf);
+  }
+  while (queue.length > 0) {
+    const itf = queue.shift()!;
+    if (seenIface.has(itf)) continue;
+    seenIface.add(itf);
+    const decl = classDecls.get(itf);
+    if (!decl) continue;
+    const found = decl.methods.find(m => m.name === methodName
+      && m.params.length === arity
+      && (wantStatic === undefined || m.isStatic === wantStatic));
+    if (found) return found;
+    for (const parent of decl.interfaces ?? []) queue.push(parent);
   }
   return undefined;
 }
@@ -3339,7 +3383,9 @@ function collectExprCheckedExceptions(
           fromMethod(resolveClassNameInDecl(classDecl, classDecls, t.className), expr.method, expr.args.length, false);
         } else {
           const owner = resolveClassNameInDecl(classDecl, classDecls, expr.object.name);
-          if (owner !== expr.object.name) fromMethod(owner, expr.method, expr.args.length, true);
+          const looksLikeClassRef = !localTypes.has(expr.object.name)
+            && (/^[A-Z]/.test(expr.object.name) || classDecl.importMap.has(expr.object.name) || owner !== expr.object.name);
+          if (looksLikeClassRef) fromMethod(owner, expr.method, expr.args.length, true);
         }
       }
       break;
