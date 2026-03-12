@@ -303,6 +303,14 @@ world
     assert.equal(tokens[0].value, "42");
   });
 
+  test("lone CR is treated as line terminator", () => {
+    const tokens = lex("int a = 1;\rint b = 2;");
+    const secondInt = tokens.find((t, i) => i > 0 && t.kind === TokenKind.KwInt);
+    assert.ok(secondInt);
+    assert.equal(secondInt.line, 2);
+    assert.equal(secondInt.col, 1);
+  });
+
   test("block comments are skipped", () => {
     const tokens = lex("/* block\ncomment */42");
     assert.equal(tokens[0].kind, TokenKind.IntLiteral);
