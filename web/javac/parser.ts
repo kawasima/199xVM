@@ -191,7 +191,7 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       nestedClasses,
       importMap,
       packageImports,
-      staticWildcardImports: [],
+      staticWildcardImports,
       isImplicit: true,
     };
   }
