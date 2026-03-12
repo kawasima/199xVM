@@ -27,6 +27,9 @@ pub(crate) struct FrameInfo {
     /// When present, the return value will be adapted (e.g., int → Integer) before
     /// being pushed onto the caller's stack.
     pub lambda_return_adapt: Option<(String, String)>,
+    /// For ACC_SYNCHRONIZED methods: the monitor object to release on method exit.
+    /// Instance methods use `this`, static methods use the class object.
+    pub synchronized_monitor: Option<JRef>,
 }
 
 /// Saved state for a StringConcatFactory recipe interrupted by toString().
@@ -88,6 +91,7 @@ impl Vm {
                 Ok(Some(ret)) => {
                     // Method returned a value — pop frame.
                     let popped = call_stack.pop().unwrap();
+                    self.release_synchronized_monitor(&popped);
                     let ret = self.adapt_lambda_return_if_needed(&popped, ret)?;
                     if call_stack.is_empty() {
                         return Ok(ret);
@@ -168,6 +172,7 @@ impl Vm {
             match result {
                 Ok(Some(ret)) => {
                     let popped = call_stack.pop().unwrap();
+                    self.release_synchronized_monitor(&popped);
                     let ret = self.adapt_lambda_return_if_needed(&popped, ret)?;
                     if call_stack.is_empty() {
                         return Ok(Some(ret));
@@ -376,9 +381,17 @@ impl Vm {
             }
             trace.push_str("\n  at ");
             trace.push_str(&fi.frame_owner);
-            call_stack.pop();
+            let popped = call_stack.pop().unwrap();
+            self.release_synchronized_monitor(&popped);
         }
         Err(if trace.is_empty() { err_msg.to_owned() } else { trace })
+    }
+
+    /// Release the synchronized monitor when a frame is popped (normal return or exception unwind).
+    fn release_synchronized_monitor(&mut self, fi: &FrameInfo) {
+        if let Some(ref monitor) = fi.synchronized_monitor {
+            let _ = self.monitor_exit(monitor);
+        }
     }
 
     /// Apply lambda return-type adaptation (boxing) if the popped frame was a
@@ -570,11 +583,20 @@ impl Vm {
         }
 
         let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+        // ACC_SYNCHRONIZED on static method: lock the class object
+        let synchronized_monitor = if info.access_flags & 0x0020 != 0 {
+            let class_obj = self.class_object(&info.class_name);
+            self.monitor_enter(&class_obj);
+            Some(class_obj)
+        } else {
+            None
+        };
         Ok(Some(FrameInfo {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
             code: info.code, cp: info.cp, frame_owner: fo,
             bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
             push_return, concat_state: None, lambda_return_adapt: None,
+            synchronized_monitor,
         }))
     }
 
@@ -653,11 +675,24 @@ impl Vm {
         }
 
         let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+        // ACC_SYNCHRONIZED on instance method: lock `this`
+        let synchronized_monitor = if info.access_flags & 0x0020 != 0 {
+            if let JValue::Ref(Some(ref this_ref)) = locals[0] {
+                let m = this_ref.clone();
+                self.monitor_enter(&m);
+                Some(m)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         Ok(Some(FrameInfo {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
             code: info.code, cp: info.cp, frame_owner: fo,
             bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
             push_return, concat_state: None, lambda_return_adapt: None,
+            synchronized_monitor,
         }))
     }
 
@@ -709,11 +744,24 @@ impl Vm {
         }
 
         let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+        // ACC_SYNCHRONIZED on instance method: lock `this`
+        let synchronized_monitor = if info.access_flags & 0x0020 != 0 {
+            if let JValue::Ref(Some(ref this_ref)) = locals[0] {
+                let m = this_ref.clone();
+                self.monitor_enter(&m);
+                Some(m)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         Ok(Some(FrameInfo {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
             code: info.code, cp: info.cp, frame_owner: fo,
             bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
             push_return, concat_state: None, lambda_return_adapt: None,
+            synchronized_monitor,
         }))
     }
 }

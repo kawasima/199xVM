@@ -474,6 +474,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     let isStatic = false;
     let isAbstract = ownerKind === "interface" || ownerKind === "annotation";
     let isPrivate = false;
+    let isSynchronized = false;
 
     // Consume modifiers
     while (true) {
@@ -483,6 +484,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       if (at(TokenKind.KwAbstract)) { advance(); isAbstract = true; continue; }
       if (at(TokenKind.KwFinal)) { advance(); continue; }
       if (at(TokenKind.KwDefault)) { advance(); continue; }
+      if (at(TokenKind.KwSynchronized)) { advance(); isSynchronized = true; continue; }
       break;
     }
 
@@ -575,7 +577,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         advance(); // default
         parseExpr(); // ignore default value for now
         expect(TokenKind.Semi);
-        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: true, throwsTypes });
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: true, isSynchronized, throwsTypes });
         return;
       }
       if (match(TokenKind.Semi)) {
@@ -583,12 +585,12 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         if (!inInterfaceLike && !isAbstract) {
           throw new Error("Method declarations in classes, enums, and records must have a body unless declared abstract.");
         }
-        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: inInterfaceLike || isAbstract, throwsTypes });
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: inInterfaceLike || isAbstract, isSynchronized, throwsTypes });
       } else {
         expect(TokenKind.LBrace);
         const body = parseBlock();
         expect(TokenKind.RBrace);
-        methods.push({ name, returnType: retType, params, body, isStatic, isAbstract: false, throwsTypes });
+        methods.push({ name, returnType: retType, params, body, isStatic, isAbstract: false, isSynchronized, throwsTypes });
       }
     } else {
       // Field

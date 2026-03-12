@@ -350,3 +350,19 @@ fn reentrant_wait_restores_count() {
     );
     assert_eq!(result, "ok");
 }
+
+// ---------------------------------------------------------------------------
+// ACC_SYNCHRONIZED methods
+// ---------------------------------------------------------------------------
+
+#[test]
+fn synchronized_methods() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "SynchronizedMethodTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "3,2,200");
+}

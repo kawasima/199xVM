@@ -32,6 +32,7 @@ export interface MethodDecl {
   body: Stmt[];
   isStatic: boolean;
   isAbstract?: boolean;
+  isSynchronized?: boolean;
   throwsTypes?: string[];
 }
 
