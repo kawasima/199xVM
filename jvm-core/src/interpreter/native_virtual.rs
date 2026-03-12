@@ -286,7 +286,7 @@ impl super::Vm {
                             // so that Java code can observe the failure.
                             let msg_ref = self.intern_string(&e);
                             let exc = crate::heap::JObject::new("java/lang/RuntimeException");
-                            exc.borrow_mut().fields.insert("message".to_owned(), JValue::Ref(Some(msg_ref)));
+                            exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg_ref)));
                             *self.pending_exception_mut() = Some(exc);
                         }
                     }

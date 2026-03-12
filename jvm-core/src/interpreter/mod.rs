@@ -235,8 +235,8 @@ impl Scheduler {
 
     /// Check if any Joining threads should be woken because their target terminated.
     pub fn wake_joiners(&mut self) {
-        // Collect terminated thread IDs.
-        let terminated: Vec<ThreadId> = self.threads.iter()
+        // Collect terminated thread IDs into a HashSet for O(1) lookup.
+        let terminated: HashSet<ThreadId> = self.threads.iter()
             .filter(|t| t.state == ThreadState::Terminated)
             .map(|t| t.id)
             .collect();
