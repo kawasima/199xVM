@@ -273,6 +273,31 @@ impl super::Vm {
                 _ => {}
             }
         }
+        // ----- java.lang.Thread native methods -----
+        if this.borrow().class_name == "java/lang/Thread"
+            || self.is_instance_of(&this.borrow().class_name.clone(), "java/lang/Thread")
+        {
+            match (method_name, _descriptor) {
+                ("start", "()V") => {
+                    match self.thread_start(Rc::clone(this)) {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("Thread.start() error: {e}"),
+                    }
+                    return Some(JValue::Void);
+                }
+                ("join", "()V") => {
+                    if let Some(target_id) = self.find_thread_id_by_object(this) {
+                        self.thread_join(target_id);
+                    }
+                    return Some(JValue::Void);
+                }
+                ("isAlive", "()Z") => {
+                    let alive = self.thread_is_alive(this);
+                    return Some(JValue::Int(if alive { 1 } else { 0 }));
+                }
+                _ => {}
+            }
+        }
         // ClassLoader methods must dispatch on the resolved owner (`_class_name`), not the
         // runtime class of `this`, so that subclasses of ClassLoader also hit these stubs.
         // Guard on method name first to avoid super-chain walks on unrelated calls.

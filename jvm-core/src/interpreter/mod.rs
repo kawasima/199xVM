@@ -97,6 +97,10 @@ pub(crate) enum ThreadState {
     WaitingOnMonitor(usize),
     /// Waiting on Object.wait() condition.
     WaitingOnCondition(usize),
+    /// Waiting for another thread to terminate (Thread.join).
+    Joining(ThreadId),
+    /// Sleeping (Thread.sleep).
+    Sleeping,
     /// Terminated — run() method returned or threw.
     Terminated,
 }
@@ -127,6 +131,12 @@ pub(crate) struct ThreadContext {
     pub pending_exception: Option<JRef>,
     /// Pending frame to be pushed by the trampoline after an invoke opcode.
     pub pending_frame: Option<trampoline::FrameInfo>,
+    /// The thread's own call stack (for green thread scheduling).
+    pub call_stack: Vec<trampoline::FrameInfo>,
+    /// The java.lang.Thread object associated with this thread.
+    pub thread_object: Option<JRef>,
+    /// Number of instructions executed in the current time slice.
+    pub instruction_count: usize,
 }
 
 impl ThreadContext {
@@ -136,6 +146,9 @@ impl ThreadContext {
             state: ThreadState::Runnable,
             pending_exception: None,
             pending_frame: None,
+            call_stack: Vec::new(),
+            thread_object: None,
+            instruction_count: 0,
         }
     }
 }
@@ -143,10 +156,13 @@ impl ThreadContext {
 /// Round-robin scheduler managing all green threads.
 #[allow(dead_code)]
 pub(crate) struct Scheduler {
-    threads: Vec<ThreadContext>,
-    current_thread_idx: usize,
+    pub(in crate::interpreter) threads: Vec<ThreadContext>,
+    pub(in crate::interpreter) current_thread_idx: usize,
     next_thread_id: ThreadId,
 }
+
+/// Maximum instructions per thread before yielding to the next runnable thread.
+const TIME_SLICE: usize = 1000;
 
 impl Scheduler {
     fn new() -> Self {
@@ -168,6 +184,72 @@ impl Scheduler {
     #[inline]
     pub fn current_thread(&self) -> &ThreadContext {
         &self.threads[self.current_thread_idx]
+    }
+
+    /// Spawn a new green thread and return its ID.
+    pub fn spawn(&mut self, thread_object: Option<JRef>) -> ThreadId {
+        let id = self.next_thread_id;
+        self.next_thread_id += 1;
+        let mut ctx = ThreadContext::new(id);
+        ctx.thread_object = thread_object;
+        self.threads.push(ctx);
+        id
+    }
+
+    /// Get a mutable reference to a thread by ID.
+    pub fn thread_mut(&mut self, id: ThreadId) -> Option<&mut ThreadContext> {
+        self.threads.iter_mut().find(|t| t.id == id)
+    }
+
+    /// Get an immutable reference to a thread by ID.
+    pub fn thread(&self, id: ThreadId) -> Option<&ThreadContext> {
+        self.threads.iter().find(|t| t.id == id)
+    }
+
+    /// Returns true if all threads are terminated.
+    pub fn all_terminated(&self) -> bool {
+        self.threads.iter().all(|t| t.state == ThreadState::Terminated)
+    }
+
+    /// Returns true if only the main thread (id=0) is alive.
+    pub fn only_main_alive(&self) -> bool {
+        self.threads.iter().all(|t| t.id == 0 || t.state == ThreadState::Terminated)
+    }
+
+    /// Advance to the next runnable thread (round-robin).
+    /// Returns true if a runnable thread was found.
+    pub fn advance(&mut self) -> bool {
+        let n = self.threads.len();
+        for i in 1..=n {
+            let idx = (self.current_thread_idx + i) % n;
+            if self.threads[idx].state == ThreadState::Runnable {
+                self.current_thread_idx = idx;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if any Joining threads should be woken because their target terminated.
+    pub fn wake_joiners(&mut self) {
+        // Collect terminated thread IDs.
+        let terminated: Vec<ThreadId> = self.threads.iter()
+            .filter(|t| t.state == ThreadState::Terminated)
+            .map(|t| t.id)
+            .collect();
+        // Wake any thread that was Joining on a terminated thread.
+        for t in &mut self.threads {
+            if let ThreadState::Joining(target_id) = t.state {
+                if terminated.contains(&target_id) {
+                    t.state = ThreadState::Runnable;
+                }
+            }
+        }
+    }
+
+    /// Return the number of runnable threads.
+    pub fn runnable_count(&self) -> usize {
+        self.threads.iter().filter(|t| t.state == ThreadState::Runnable).count()
     }
 }
 
@@ -199,7 +281,7 @@ pub struct Vm {
     /// Singleton system ClassLoader instance (created on first access).
     pub(in crate::interpreter) system_classloader: Option<JRef>,
     /// Green thread scheduler.
-    scheduler: Scheduler,
+    pub(in crate::interpreter) scheduler: Scheduler,
     /// Object monitors keyed by object identity (Rc pointer address).
     monitors: HashMap<usize, Monitor>,
 }
@@ -255,10 +337,12 @@ impl Vm {
                 monitor.count += 1;
             }
             Some(_) => {
-                // Owned by another thread — enqueue for future scheduler to handle.
-                // In Phase 4+, the scheduler will transition this thread to
-                // WaitingOnMonitor and yield. For now, just enqueue.
+                // Owned by another thread — block until released.
                 monitor.entry_queue.push_back(thread_id);
+                // Transition current thread to WaitingOnMonitor so the
+                // scheduler yields and switches to another thread.
+                let current = &mut self.scheduler.threads[self.scheduler.current_thread_idx];
+                current.state = ThreadState::WaitingOnMonitor(id);
             }
         }
     }
@@ -269,6 +353,7 @@ impl Vm {
         let id = Self::object_id(obj);
         let thread_id = self.scheduler.current_thread().id;
         let mut remove_monitor = false;
+        let mut wake_thread: Option<ThreadId> = None;
         {
             let monitor = match self.monitors.get_mut(&id) {
                 Some(m) => m,
@@ -279,20 +364,30 @@ impl Vm {
             }
             monitor.count -= 1;
             if monitor.count == 0 {
-                monitor.owner = None;
                 let has_waiters = !monitor.entry_queue.is_empty() || !monitor.wait_queue.is_empty();
                 if !has_waiters {
+                    monitor.owner = None;
                     // Fully unlocked with no waiters — remove to avoid unbounded growth
                     // and stale monitor state from address reuse.
                     remove_monitor = true;
                 } else if let Some(waiting_id) = monitor.entry_queue.pop_front() {
-                    // In Phase 4+, set the waiting thread's state to Runnable.
-                    let _ = waiting_id;
+                    // Transfer ownership directly to the next waiter.
+                    monitor.owner = Some(waiting_id);
+                    monitor.count = 1;
+                    wake_thread = Some(waiting_id);
+                } else {
+                    monitor.owner = None;
                 }
             }
         }
         if remove_monitor {
             self.monitors.remove(&id);
+        }
+        // Set the woken thread to Runnable (outside the monitor borrow).
+        if let Some(wid) = wake_thread {
+            if let Some(t) = self.scheduler.thread_mut(wid) {
+                t.state = ThreadState::Runnable;
+            }
         }
         Ok(())
     }
@@ -307,6 +402,84 @@ impl Vm {
     #[inline]
     pub(crate) fn pending_frame_mut(&mut self) -> &mut Option<trampoline::FrameInfo> {
         &mut self.scheduler.current_thread_mut().pending_frame
+    }
+
+    /// Spawn a new green thread that will execute the `run()` method of the
+    /// given java.lang.Thread object. Returns the new thread's ID.
+    pub(in crate::interpreter) fn thread_start(&mut self, thread_obj: JRef) -> Result<ThreadId, String> {
+        let id = self.scheduler.spawn(Some(Rc::clone(&thread_obj)));
+
+        // Build a frame for `run()V` on the Thread object.
+        let class_name = thread_obj.borrow().class_name.clone();
+        let fi = self.build_virtual_frame_inner(
+            thread_obj, &class_name, "run", "()V", vec![], false,
+        )?;
+        match fi {
+            Some(frame_info) => {
+                self.scheduler.thread_mut(id).unwrap().call_stack.push(frame_info);
+            }
+            None => {
+                // run() is not found in bytecode — this shouldn't happen for Thread
+                // subclasses, but handle gracefully by marking terminated.
+                self.scheduler.thread_mut(id).unwrap().state = ThreadState::Terminated;
+            }
+        }
+        Ok(id)
+    }
+
+    /// Block the current thread until the target thread terminates.
+    pub(in crate::interpreter) fn thread_join(&mut self, target_id: ThreadId) {
+        // If target is already terminated, no-op.
+        if let Some(target) = self.scheduler.thread(target_id) {
+            if target.state == ThreadState::Terminated {
+                return;
+            }
+        }
+        let current = self.scheduler.current_thread_mut();
+        current.state = ThreadState::Joining(target_id);
+    }
+
+    /// Get the java.lang.Thread object for the current thread.
+    /// Creates one lazily for the main thread if it doesn't exist.
+    pub(in crate::interpreter) fn current_thread_object(&mut self) -> JRef {
+        if let Some(ref obj) = self.scheduler.current_thread().thread_object {
+            return Rc::clone(obj);
+        }
+        // Main thread — create a Thread object lazily.
+        let obj = JObject::new("java/lang/Thread");
+        {
+            let mut b = obj.borrow_mut();
+            b.fields.insert("tid".to_owned(), JValue::Int(1));
+            b.fields.insert("name".to_owned(), JValue::Ref(Some(self.intern_string("main"))));
+            b.fields.insert("priority".to_owned(), JValue::Int(5));
+            b.fields.insert("daemon".to_owned(), JValue::Int(0));
+        }
+        self.scheduler.current_thread_mut().thread_object = Some(Rc::clone(&obj));
+        obj
+    }
+
+    /// Find the thread ID associated with a java.lang.Thread object.
+    pub(in crate::interpreter) fn find_thread_id_by_object(&self, thread_obj: &JRef) -> Option<ThreadId> {
+        let target_ptr = Rc::as_ptr(thread_obj) as usize;
+        self.scheduler.threads.iter().find_map(|t| {
+            if let Some(ref obj) = t.thread_object {
+                if Rc::as_ptr(obj) as usize == target_ptr {
+                    return Some(t.id);
+                }
+            }
+            None
+        })
+    }
+
+    /// Check if a thread (identified by its java.lang.Thread object) is alive.
+    pub(in crate::interpreter) fn thread_is_alive(&self, thread_obj: &JRef) -> bool {
+        if let Some(id) = self.find_thread_id_by_object(thread_obj) {
+            self.scheduler.thread(id)
+                .map(|t| t.state != ThreadState::Terminated)
+                .unwrap_or(false)
+        } else {
+            false
+        }
     }
 
     /// Register a pre-parsed class file (always stored as `Ready`).

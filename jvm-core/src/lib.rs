@@ -67,7 +67,7 @@ pub fn run_static_native(
 ) -> String {
     let mut vm = Vm::new();
     load_bundle(&mut vm, class_bundle);
-    let out = match vm.invoke_static(main_class, method_name, descriptor, vec![]) {
+    let out = match vm.invoke_static_threaded(main_class, method_name, descriptor, vec![]) {
         Ok(result) => {
             // If the result is a non-String object, call toString() on it.
             if let JValue::Ref(Some(ref r)) = result {

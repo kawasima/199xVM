@@ -32,7 +32,6 @@ public class Thread implements Runnable {
     }
 
     private static int nextId = 1;
-    private static final Thread MAIN = new Thread("main");
 
     private final int tid;
     private String name;
@@ -63,30 +62,38 @@ public class Thread implements Runnable {
         this.target = target;
     }
 
-    public static Thread currentThread() {
-        return MAIN;
+    // --- Native methods (implemented in Rust VM) ---
+
+    public static native Thread currentThread();
+
+    public static native void yield();
+
+    public static native void sleep(long millis) throws InterruptedException;
+
+    public static void sleep(long millis, int nanos) throws InterruptedException {
+        sleep(millis);
     }
 
-    public static void yield() {}
+    public native void start();
 
-    public static void sleep(long millis) throws InterruptedException {}
+    public native void join() throws InterruptedException;
 
-    public static void sleep(long millis, int nanos) throws InterruptedException {}
+    public final void join(long millis) throws InterruptedException {
+        join();
+    }
 
-    public final void join() throws InterruptedException {}
+    public final void join(long millis, int nanos) throws InterruptedException {
+        join();
+    }
 
-    public final void join(long millis) throws InterruptedException {}
+    public native boolean isAlive();
 
-    public final void join(long millis, int nanos) throws InterruptedException {}
+    // --- Java methods ---
 
     public void run() {
         if (target != null) {
             target.run();
         }
-    }
-
-    public synchronized void start() {
-        run();
     }
 
     public final void setName(String name) {
@@ -135,10 +142,6 @@ public class Thread implements Runnable {
     }
 
     public void interrupt() {}
-
-    public boolean isAlive() {
-        return false;
-    }
 
     public final boolean isVirtual() {
         return false;

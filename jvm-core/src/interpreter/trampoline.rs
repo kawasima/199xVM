@@ -116,6 +116,195 @@ impl Vm {
         }
     }
 
+    /// Execute up to `max_steps` instructions on the given call stack.
+    /// Returns:
+    ///  - `Ok(Some(val))` if the call stack completed (all frames returned).
+    ///  - `Ok(None)` if the step limit was reached (thread should yield).
+    ///  - `Err(msg)` if an unhandled exception occurred.
+    pub(crate) fn run_trampoline_steps(
+        &mut self,
+        call_stack: &mut Vec<FrameInfo>,
+        max_steps: usize,
+    ) -> Result<Option<JValue>, String> {
+        use super::ThreadState;
+
+        let mut steps = 0;
+        loop {
+            if call_stack.is_empty() {
+                return Ok(Some(JValue::Void));
+            }
+            if steps >= max_steps {
+                return Ok(None); // yield — time slice exhausted
+            }
+            // If the current thread was blocked (e.g., by join() or sleep()),
+            // yield immediately so the scheduler can switch threads.
+            if self.scheduler.current_thread().state != ThreadState::Runnable {
+                return Ok(None);
+            }
+
+            let fi = call_stack.last_mut().unwrap();
+            if fi.frame.pc >= fi.code.len() {
+                return Err(format!(
+                    "Execution fell off the end of method {}",
+                    fi.frame_owner
+                ));
+            }
+
+            let opcode_pc = fi.frame.pc;
+            let opcode = fi.code[fi.frame.pc];
+            fi.frame.pc += 1;
+            steps += 1;
+
+            let result = self.execute_opcode(
+                &mut fi.frame, &fi.code, &fi.cp, &fi.frame_owner,
+                &fi.bootstrap_methods, &fi.exception_table, opcode,
+            );
+
+            match result {
+                Ok(Some(ret)) => {
+                    let popped = call_stack.pop().unwrap();
+                    if call_stack.is_empty() {
+                        return Ok(Some(ret));
+                    }
+                    let caller = call_stack.last_mut().unwrap();
+                    if popped.push_return && !matches!(ret, JValue::Void) {
+                        if caller.concat_state.is_some() {
+                            feed_concat_return(caller, &ret);
+                            self.try_resume_concat(call_stack)?;
+                        } else {
+                            caller.frame.stack.push(ret);
+                        }
+                    } else if caller.concat_state.is_some() {
+                        self.try_resume_concat(call_stack)?;
+                    }
+                }
+                Ok(None) => {
+                    if let Some(new_fi) = self.pending_frame_mut().take() {
+                        call_stack.push(new_fi);
+                    }
+                }
+                Err(err_msg) => {
+                    match self.unwind_exception(call_stack, opcode_pc, &err_msg) {
+                        Ok(()) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Run all green threads to completion using cooperative scheduling.
+    /// The main thread (id=0) call_stack must already be populated.
+    /// Returns the final return value from the main thread.
+    pub(crate) fn run_all_threads(&mut self) -> Result<JValue, String> {
+        use super::ThreadState;
+        use super::TIME_SLICE;
+
+        loop {
+            let current_id = self.scheduler.current_thread().id;
+            let state = self.scheduler.current_thread().state.clone();
+
+            match state {
+                ThreadState::Runnable => {
+                    // Take the call_stack out of ThreadContext for borrowing.
+                    let mut call_stack = std::mem::take(
+                        &mut self.scheduler.current_thread_mut().call_stack
+                    );
+
+                    let result = self.run_trampoline_steps(&mut call_stack, TIME_SLICE);
+
+                    // Put the call_stack back.
+                    self.scheduler.current_thread_mut().call_stack = call_stack;
+
+                    match result {
+                        Ok(Some(val)) => {
+                            // Thread completed.
+                            self.scheduler.current_thread_mut().state = ThreadState::Terminated;
+                            if current_id == 0 {
+                                // Main thread finished — drain remaining threads
+                                // then return the result.
+                                self.drain_non_main_threads()?;
+                                return Ok(val);
+                            }
+                        }
+                        Ok(None) => {
+                            // Time slice exhausted — yield to next thread.
+                        }
+                        Err(e) => {
+                            // Unhandled exception — terminate thread.
+                            self.scheduler.current_thread_mut().state = ThreadState::Terminated;
+                            if current_id == 0 {
+                                return Err(e);
+                            }
+                            eprintln!("Thread {} terminated with exception: {e}", current_id);
+                        }
+                    }
+                }
+                ThreadState::Terminated => {
+                    // Skip terminated threads.
+                }
+                ThreadState::Joining(_) | ThreadState::Sleeping
+                | ThreadState::WaitingOnMonitor(_) | ThreadState::WaitingOnCondition(_) => {
+                    // Blocked — skip to next thread.
+                }
+            }
+
+            // Wake joiners/sleeping threads before trying to advance.
+            self.scheduler.wake_joiners();
+
+            // Advance to next runnable thread.
+            if !self.scheduler.advance() {
+                // No runnable threads — check for deadlock or all terminated.
+                if self.scheduler.all_terminated() {
+                    return Ok(JValue::Void);
+                }
+                // Check if only blocked threads remain (potential deadlock).
+                if self.scheduler.runnable_count() == 0 {
+                    return Err("Deadlock: no runnable threads".to_owned());
+                }
+            }
+        }
+    }
+
+    /// After the main thread finishes, run remaining non-daemon threads
+    /// to completion (or timeout).
+    fn drain_non_main_threads(&mut self) -> Result<(), String> {
+        use super::ThreadState;
+        use super::TIME_SLICE;
+
+        // Simple bound to prevent infinite drain.
+        let max_iterations = 100_000;
+        let mut iterations = 0;
+
+        while !self.scheduler.only_main_alive() && iterations < max_iterations {
+            iterations += 1;
+            self.scheduler.wake_joiners();
+
+            if !self.scheduler.advance() {
+                break;
+            }
+
+            let state = self.scheduler.current_thread().state.clone();
+            if state != ThreadState::Runnable {
+                continue;
+            }
+
+            let mut call_stack = std::mem::take(
+                &mut self.scheduler.current_thread_mut().call_stack
+            );
+            let result = self.run_trampoline_steps(&mut call_stack, TIME_SLICE);
+            self.scheduler.current_thread_mut().call_stack = call_stack;
+
+            match result {
+                Ok(Some(_)) | Err(_) => {
+                    self.scheduler.current_thread_mut().state = ThreadState::Terminated;
+                }
+                Ok(None) => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Search for an exception handler up the call stack.
     fn unwind_exception(
         &mut self,

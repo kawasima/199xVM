@@ -388,6 +388,21 @@ impl super::Vm {
                 }
                 Some(JValue::Void)
             }
+            // ----- java.lang.Thread -----
+            ("java/lang/Thread", "currentThread", "()Ljava/lang/Thread;") => {
+                let obj = self.current_thread_object();
+                Some(JValue::Ref(Some(obj)))
+            }
+            ("java/lang/Thread", "yield", "()V") => {
+                // Cooperative yield — the scheduler will switch threads at the
+                // next time-slice boundary. No-op in single-thread mode.
+                Some(JValue::Void)
+            }
+            ("java/lang/Thread", "sleep", "(J)V") => {
+                // In our cooperative model, sleep is a no-op yield.
+                // A full implementation would track wake-up time.
+                Some(JValue::Void)
+            }
             _ => None,
         }
     }
