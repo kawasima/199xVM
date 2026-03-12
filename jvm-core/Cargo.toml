@@ -12,6 +12,11 @@ js-sys = "0.3"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "interpreter"
+harness = false
 
 [dependencies.console_error_panic_hook]
 version = "0.1"
