@@ -70,29 +70,29 @@ Status labels:
 
 | ID | Topic | Status | Evidence | Gap / next step |
 | --- | --- | --- | --- | --- |
-| JLS-3 | Lexical structure / tokens / literals | Implemented | `web/javac/lexer.ts`, `web/javac.test.ts` | Keep parity checks for edge lexical forms |
-| JLS-6 | Names, scope, and shadowing | Partial | `web/javac/parser.ts`, `web/javac/compiler.ts` | Tighten complex shadowing and ambiguity diagnostics |
-| JLS-8 | Classes, members, constructors | Partial | `web/javac/parser.ts`, `web/javac/compiler.ts` | Cover remaining declaration constraints and corner cases |
-| JLS-9 | Interfaces and inheritance behavior | Partial | method resolution in `web/javac/compiler.ts` | Expand default/static/interface conflict rules |
-| JLS-11 | Exceptions and checked-exception analysis | Partial | throw/catch analysis + tests in `web/javac.test.ts` | Expand full-path exception typing coverage |
-| JLS-14 | Statements (`if/for/while/switch/try`) | Partial | parser/codegen + tests in `web/javac.test.ts` | Continue strict semantic checks and flow diagnostics |
-| JLS-15 | Expressions, calls, conversions, lambdas | Partial | expression codegen in `web/javac/compiler.ts` | Close gaps in typing/narrowing/inference edge cases |
-| JLS-16 | Definite assignment | Limited | current compiler flow checks | Add full DA/DU data-flow analysis equivalent to `javac` |
-| JLS-7 / JLS-13 | Packages/imports and binary compatibility | Partial | import resolution in compiler modules | Improve compatibility checks and diagnostics |
-| JLS tooling areas | Modules, annotation processing, full toolchain parity | Limited | out of current compiler scope | Track as separate long-term epics |
+| JLS-3 | Lexical structure / tokens / literals | Implemented | `lexer.ts` + lexer tests | Keep parity checks for edge lexical forms |
+| JLS-6 | Names, scope, and shadowing | Partial | `parser.ts` / `compiler.ts` | Tighten complex shadowing and ambiguity diagnostics |
+| JLS-8 | Classes, members, constructors (incl. records/enums) | Partial | parser+codegen tests | Cover remaining declaration constraints and corner cases |
+| JLS-9 | Interfaces and inheritance behavior | Partial | method resolution tests | Expand default/static/interface conflict rules |
+| JLS-11 | Exceptions and checked-exception analysis | Partial | throw/catch analysis tests | Expand full-path exception typing coverage |
+| JLS-14 | Statements (`if/for/while/switch/try/assert/synchronized`) | Partial | parser/codegen/runtime tests | Continue strict semantic checks and flow diagnostics |
+| JLS-15 | Expressions, calls, conversions, lambdas | Partial | expression codegen tests | Close gaps in typing/narrowing/inference edge cases |
+| JLS-16 | Definite assignment | Limited | basic flow checks | Add full DA/DU data-flow analysis equivalent to `javac` |
+| JLS-7 / JLS-13 | Packages/imports and binary compatibility | Partial | import resolution tests | Improve compatibility checks and diagnostics |
+| JLS tooling areas | Modules, annotation processing, full toolchain parity | Limited | out of current scope | Track as separate long-term epics |
 
 ### JVMS (Java Virtual Machine Specification) matrix
 
 | ID | Topic | Status | Evidence | Gap / next step |
 | --- | --- | --- | --- | --- |
-| JVMS-4 | ClassFile format and constant pool | Implemented | `jvm-core/src/class_file.rs` | Add stricter validation where parser is permissive |
-| JVMS-5 | Linking/loading behavior (project scope) | Implemented | ClassLoader API stubs (`getSystemClassLoader`, `findClass`, `findLoadedClass`); `NoClassDefFoundError` / `AbstractMethodError` / `ExceptionInInitializerError` / `ClassFormatError` error surfaces; `this_class`/`super_class` CP validation in `class_file::parse` | Bytecode verifier (§4.10), classloader hierarchy, multi-classloader namespace |
-| JVMS-6 | Instruction set execution | Implemented | `jvm-core/src/interpreter/dispatch.rs` + integration tests | Keep expanding opcode edge-case tests |
-| JVMS-6.5 | Invocation (`invoke*`, `invokedynamic`) | Implemented | all 5 opcodes in `invoke.rs`, `dispatch.rs`; `invokeinterface` default method dispatch; `StringConcatFactory` constant expansion (`\x02`); `BootstrapMethodError` on unknown bootstrap class | CallSite caching not implemented (bootstrap re-invoked each time; idempotent for supported factories); generic/reflection-based bootstrap not supported |
-| JVMS exceptions | Exception table dispatch / `athrow` | Implemented | interpreter runtime paths + tests | Add more mixed `finally`/rethrow regressions |
-| JVMS verification | Bytecode verifier strictness | Limited | current runtime validation only | Implement stricter verifier-like prechecks |
-| JVMS monitors/threads | `monitorenter` / `monitorexit` semantics | Limited | currently non-full monitor semantics | Full monitor/thread model if runtime scope expands |
-| JVMS memory model | GC / object lifecycle behavior | Limited | reference-counted heap in `jvm-core/src/heap.rs` | No cycle collector; keep scope explicit |
+| JVMS-4 | ClassFile format and constant pool | Implemented | `class_file.rs` + parser tests | Add stricter validation where parser is permissive |
+| JVMS-5 | Linking/loading behavior (project scope) | Implemented | ClassLoader paths + linkage error tests | Bytecode verifier (§4.10), classloader hierarchy, multi-classloader namespace |
+| JVMS-6 | Instruction set execution | Implemented | `dispatch.rs` + integration tests | Keep expanding opcode edge-case tests |
+| JVMS-6.5 | Invocation (`invoke*`, `invokedynamic`) | Implemented | `invoke.rs`/`dispatch.rs` + invoke tests | No CallSite caching; bootstrap support is intentionally narrow |
+| JVMS exceptions | Exception table dispatch / `athrow` | Implemented | runtime exception tests | Add more mixed `finally`/rethrow regressions |
+| JVMS verification | Bytecode verifier strictness | Limited | runtime checks only | Implement stricter verifier-like prechecks |
+| JVMS monitors/threads | Monitors + green threads (`Thread.start/join/yield`, `wait/notify/notifyAll`) | Partial | monitor/thread integration tests | Cooperative scheduler only (not OS/preemptive threads); timed wait/join/sleep and interruption semantics are intentionally limited |
+| JVMS memory model | GC / object lifecycle behavior | Limited | `heap.rs` (ref-count) | No cycle collector; keep scope explicit |
 
 ## JDK shim policy
 
@@ -139,7 +139,8 @@ wasm-pack build jvm-core --target web
 ## Known limitations (high level)
 
 - Full Java 25 language/toolchain parity is out of scope today
-- Full JVM verification, threading, and GC semantics are not implemented
+- Full JVM verification and GC semantics are not implemented
+- Threading is cooperative green-thread based (not full HotSpot/OS-thread parity)
 - Some advanced language semantics are intentionally staged and tightened incrementally
 
 ## Contributing
