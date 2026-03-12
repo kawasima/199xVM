@@ -86,7 +86,7 @@ Status labels:
 | ID | Topic | Status | Evidence | Gap / next step |
 | --- | --- | --- | --- | --- |
 | JVMS-4 | ClassFile format and constant pool | Implemented | `jvm-core/src/class_file.rs` | Add stricter validation where parser is permissive |
-| JVMS-5 | Linking/loading behavior (project scope) | Implemented | lazy loading (`LazyClass` + `ensure_class_ready`) in `mod.rs`; `<clinit>` ordering (`ensure_class_init`) per JVMS §5.5; ClassLoader API stubs (`getSystemClassLoader`, `findClass`, `findLoadedClass`); `NoClassDefFoundError` / `AbstractMethodError` / `ExceptionInInitializerError` / `ClassFormatError` error surfaces; `this_class`/`super_class` CP validation in `class_file::parse` | Bytecode verifier (§4.10), classloader hierarchy, multi-classloader namespace |
+| JVMS-5 | Linking/loading behavior (project scope) | Implemented | ClassLoader API stubs (`getSystemClassLoader`, `findClass`, `findLoadedClass`); `NoClassDefFoundError` / `AbstractMethodError` / `ExceptionInInitializerError` / `ClassFormatError` error surfaces; `this_class`/`super_class` CP validation in `class_file::parse` | Bytecode verifier (§4.10), classloader hierarchy, multi-classloader namespace |
 | JVMS-6 | Instruction set execution | Implemented | `jvm-core/src/interpreter/dispatch.rs` + integration tests | Keep expanding opcode edge-case tests |
 | JVMS-6.5 | Invocation (`invoke*`, `invokedynamic`) | Partial | `jvm-core/src/interpreter/invoke.rs` | Broaden bootstrap and resolution corner-case handling |
 | JVMS exceptions | Exception table dispatch / `athrow` | Implemented | interpreter runtime paths + tests | Add more mixed `finally`/rethrow regressions |
