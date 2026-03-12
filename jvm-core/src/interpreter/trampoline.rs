@@ -202,7 +202,7 @@ impl Vm {
 
         loop {
             let current_id = self.scheduler.current_thread().id;
-            let state = self.scheduler.current_thread().state.clone();
+            let state = self.scheduler.current_thread().state;
 
             match state {
                 ThreadState::Runnable => {
@@ -233,7 +233,17 @@ impl Vm {
                             }
                         }
                         Ok(None) => {
-                            // Time slice exhausted — yield to next thread.
+                            // Time slice exhausted or voluntary yield/sleep.
+                            // Normalize Yielded/Sleeping back to Runnable so
+                            // this thread can be scheduled again after other
+                            // threads get a turn.
+                            let thread = self.scheduler.current_thread_mut();
+                            match thread.state {
+                                ThreadState::Yielded | ThreadState::Sleeping => {
+                                    thread.state = ThreadState::Runnable;
+                                }
+                                _ => {}
+                            }
                         }
                         Err(e) => {
                             // Unhandled exception — terminate thread.
@@ -294,7 +304,7 @@ impl Vm {
                 break;
             }
 
-            let state = self.scheduler.current_thread().state.clone();
+            let state = self.scheduler.current_thread().state;
             match state {
                 ThreadState::Yielded | ThreadState::Sleeping => {
                     self.scheduler.current_thread_mut().state = ThreadState::Runnable;

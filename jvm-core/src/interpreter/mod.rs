@@ -88,7 +88,7 @@ extern "C" {
 pub type ThreadId = u64;
 
 /// The execution state of a green thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum ThreadState {
     /// Ready to run (or currently running).
