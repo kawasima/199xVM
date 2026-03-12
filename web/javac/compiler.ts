@@ -12,14 +12,14 @@ import type {
   Type,
 } from "./ast.js";
 import {
-  FUNCTIONAL_IFACES,
+  findKnownFunctionalInterface,
   findKnownMethodByArity,
   hasFunctionalArg,
   hasKnownMethodOwnerPrefix,
   lookupKnownMethod,
   setMethodRegistry,
 } from "./method-registry.js";
-import type { MethodSig } from "./method-registry.js";
+import type { FunctionalSig, MethodSig } from "./method-registry.js";
 export { setMethodRegistry };
 
 // ============================================================================
@@ -1906,9 +1906,39 @@ function functionalSigForType(ctx: CompileContext, t: Type): { ifaceName: string
     throw new Error("Lambda target type must be a functional interface");
   }
   const ifaceName = resolveClassName(ctx, t.className);
-  const sig = FUNCTIONAL_IFACES[ifaceName];
-  if (!sig) throw new Error(`Unsupported functional interface for lambda: ${ifaceName}`);
-  return { ifaceName, sig };
+  const objectMethodNames = new Set(["toString", "hashCode", "equals", "getClass", "notify", "notifyAll", "wait"]);
+  const abstractMethods = new Map<string, FunctionalSig>();
+  const visited = new Set<string>();
+
+  const collectAbstractMethods = (current: string): void => {
+    if (visited.has(current)) return;
+    visited.add(current);
+    const decl = ctx.classDecls.get(current);
+    if (!decl) return;
+    for (const m of decl.methods) {
+      if (m.name === "<init>") continue;
+      if (m.isStatic) continue;
+      if (!m.isAbstract) continue;
+      if (objectMethodNames.has(m.name)) continue;
+      const params = m.params.map(p => p.type);
+      const key = `${m.name}(${params.map(typeToDescriptor).join("")})`;
+      if (!abstractMethods.has(key)) {
+        abstractMethods.set(key, { samMethod: m.name, params, returnType: m.returnType });
+      }
+    }
+    for (const parent of decl.interfaces ?? []) {
+      collectAbstractMethods(resolveClassName(ctx, parent));
+    }
+  };
+
+  collectAbstractMethods(ifaceName);
+  if (abstractMethods.size === 1) {
+    return { ifaceName, sig: Array.from(abstractMethods.values())[0] };
+  }
+
+  const known = findKnownFunctionalInterface(ifaceName);
+  if (known) return { ifaceName, sig: known };
+  throw new Error(`Unsupported functional interface for lambda/method reference: ${ifaceName}`);
 }
 
 const BUILTIN_SUPERS: Record<string, string> = {

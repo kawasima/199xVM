@@ -1290,6 +1290,19 @@ describe("Code generator", () => {
     assertValidClassFile(bytes);
   });
 
+  test("compiles lambda for user-defined functional interface", () => {
+    const bytes = compile(`public interface MyFn {
+        int apply(int x);
+      }
+      public class LambdaUserIface {
+        public static String run() {
+          MyFn f = x -> x + 1;
+          return "" + f.apply(41);
+        }
+      }`);
+    assert.ok(bytes.length > 200, "bundle has content");
+  });
+
   test("compiles switch expression with String labels", () => {
     const bytes = compile(`public class SwitchString {
       public static String run() {
@@ -1638,6 +1651,19 @@ describe("Code generator", () => {
 // ============================================================================
 
 describe("Runtime (WASM)", () => {
+  test("lambda for user-defined functional interface executes", async () => {
+    const result = await runSnippet(`public interface MyFn {
+        int apply(int x);
+      }
+      public class RuntimeLambdaUserIface {
+        public static String run() {
+          MyFn f = x -> x + 1;
+          return "" + f.apply(41);
+        }
+      }`, "RuntimeLambdaUserIface");
+    assert.equal(result, "42");
+  });
+
   test("lambda method reference boxes primitive return for Function.apply", async () => {
     const result = await runSnippet(`import java.util.function.Function;
       public class RuntimeLambdaBoxing {

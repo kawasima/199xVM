@@ -241,18 +241,7 @@ export interface FunctionalSig {
   returnType: Type;
 }
 
-export const FUNCTIONAL_IFACES: Record<string, FunctionalSig> = {
-  "java/lang/Runnable": { samMethod: "run", params: [], returnType: "void" },
-  "java/util/function/Supplier": { samMethod: "get", params: [], returnType: { className: "java/lang/Object" } },
-  "java/util/function/Consumer": { samMethod: "accept", params: [{ className: "java/lang/Object" }], returnType: "void" },
-  "java/util/function/Predicate": { samMethod: "test", params: [{ className: "java/lang/Object" }], returnType: "boolean" },
-  "java/util/function/Function": { samMethod: "apply", params: [{ className: "java/lang/Object" }], returnType: { className: "java/lang/Object" } },
-  "java/util/function/BiFunction": {
-    samMethod: "apply",
-    params: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }],
-    returnType: { className: "java/lang/Object" },
-  },
-};
+const OBJECT_METHOD_NAMES = new Set(["toString", "hashCode", "equals", "getClass", "notify", "notifyAll", "wait"]);
 
 /** Look up a method in knownMethods, falling back to name-only match if exact arg types don't match. */
 export function lookupKnownMethod(owner: string, method: string, argDescs: string): MethodSig | undefined {
@@ -294,6 +283,27 @@ export function findKnownMethodByArity(owner: string, method: string, arity: num
     if (sig.paramTypes.length === arity) return sig;
   }
   return undefined;
+}
+
+export function findKnownFunctionalInterface(owner: string): FunctionalSig | undefined {
+  const prefix = `${owner}.`;
+  const candidates: { name: string; sig: MethodSig }[] = [];
+  for (const key of Object.keys(knownMethods)) {
+    if (!key.startsWith(prefix)) continue;
+    const open = key.indexOf("(", prefix.length);
+    if (open < 0) continue;
+    const methodName = key.slice(prefix.length, open);
+    if (methodName === "<init>" || OBJECT_METHOD_NAMES.has(methodName)) continue;
+    const sig = knownMethods[key];
+    if (!sig.isInterface || sig.isStatic) continue;
+    candidates.push({ name: methodName, sig });
+  }
+  if (candidates.length !== 1) return undefined;
+  return {
+    samMethod: candidates[0].name,
+    params: candidates[0].sig.paramTypes,
+    returnType: candidates[0].sig.returnType,
+  };
 }
 
 function splitDescriptorArgs(descs: string): string[] {
