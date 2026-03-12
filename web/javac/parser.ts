@@ -542,6 +542,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         && at(TokenKind.Ident)
         && tokens[pos + 1]?.kind === TokenKind.LParen
         && (peek().value === ownerName || peek().value === simpleOwnerName)) {
+      if (isSynchronized) throw new Error("'synchronized' is not allowed on constructors");
       advance(); // constructor name
       expect(TokenKind.LParen);
       const params: ParamDecl[] = [];

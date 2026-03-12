@@ -58,15 +58,21 @@ public class SynchronizedMethodTest {
         }
         String r3 = String.valueOf(counter);
 
-        // Test that monitor is released when synchronized method throws
+        // Test that monitor is released when synchronized method throws.
+        // Use a different thread to verify — same-thread would succeed due to reentrancy.
         counter = 0;
         try {
             obj.throwingIncrement();
         } catch (RuntimeException e) {
             // expected
         }
-        // If monitor was NOT released, this would deadlock
-        obj.increment();
+        // If monitor was NOT released, t3 would block forever
+        Thread t3 = new Thread(() -> obj.increment());
+        t3.start();
+        try {
+            t3.join();
+        } catch (InterruptedException e) {
+        }
         String r4 = String.valueOf(counter);
 
         return r1 + "," + r2 + "," + r3 + "," + r4;
