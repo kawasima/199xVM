@@ -270,6 +270,8 @@ const KEYWORDS: Record<string, TokenKind> = {
 
 export function lex(source: string): Token[] {
   source = preprocessUnicodeEscapes(source);
+  // Normalize line terminators to simplify JLS line/column handling.
+  source = source.replace(/\r\n?/g, "\n");
   const tokens: Token[] = [];
   let pos = 0;
   let line = 1;
