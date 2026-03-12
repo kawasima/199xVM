@@ -63,11 +63,18 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     return name;
   }
   function consumeGenericAngleToken(depth: number): number | undefined {
-    if (at(TokenKind.Lt)) { advance(); return depth + 1; }
-    if (at(TokenKind.Gt)) { advance(); return depth - 1; }
-    if (at(TokenKind.ShiftRight)) { advance(); return depth - 2; }
-    if (at(TokenKind.ShiftUnsigned)) { advance(); return depth - 3; }
-    return undefined;
+    let delta: number | undefined;
+    if (at(TokenKind.Lt)) delta = 1;
+    else if (at(TokenKind.Gt)) delta = -1;
+    else if (at(TokenKind.ShiftRight)) delta = -2;
+    else if (at(TokenKind.ShiftUnsigned)) delta = -3;
+    else return undefined;
+    const t = advance();
+    const nextDepth = depth + delta;
+    if (nextDepth < 0) {
+      throw new Error(`Unmatched '>' in generic type at line ${t.line}:${t.col}`);
+    }
+    return nextDepth;
   }
 
   function resolveDeclaredClassName(name: string): string {
@@ -448,7 +455,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     advance();
     while (depth > 0 && !at(TokenKind.EOF)) {
       const nextDepth = consumeGenericAngleToken(depth);
-      if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+      if (nextDepth !== undefined) depth = nextDepth;
       else advance();
     }
   }
@@ -634,7 +641,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         let depth = 1;
         while (depth > 0 && !at(TokenKind.EOF)) {
           const nextDepth = consumeGenericAngleToken(depth);
-          if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+          if (nextDepth !== undefined) depth = nextDepth;
           else advance();
         }
       }
@@ -1314,7 +1321,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           let depth = 1; advance();
           while (depth > 0 && !at(TokenKind.EOF)) {
             const nextDepth = consumeGenericAngleToken(depth);
-            if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+            if (nextDepth !== undefined) depth = nextDepth;
             else advance();
           }
         }
@@ -1357,7 +1364,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           let depth = 1; advance();
           while (depth > 0 && !at(TokenKind.EOF)) {
             const nextDepth = consumeGenericAngleToken(depth);
-            if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+            if (nextDepth !== undefined) depth = nextDepth;
             else advance();
           }
         }
@@ -1531,7 +1538,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
             let depth = 1; advance();
             while (depth > 0 && !at(TokenKind.EOF)) {
               const nextDepth = consumeGenericAngleToken(depth);
-              if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+              if (nextDepth !== undefined) depth = nextDepth;
               else advance();
             }
           }
@@ -1822,7 +1829,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         let depth = 1; advance();
         while (depth > 0 && !at(TokenKind.EOF)) {
           const nextDepth = consumeGenericAngleToken(depth);
-          if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+          if (nextDepth !== undefined) depth = nextDepth;
           else advance();
         }
       }
@@ -1850,7 +1857,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           let depth = 1; advance();
           while (depth > 0 && !at(TokenKind.EOF)) {
             const nextDepth = consumeGenericAngleToken(depth);
-            if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+            if (nextDepth !== undefined) depth = nextDepth;
             else advance();
           }
         }
