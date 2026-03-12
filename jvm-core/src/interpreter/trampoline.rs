@@ -91,7 +91,7 @@ impl Vm {
                 Ok(Some(ret)) => {
                     // Method returned a value — pop frame.
                     let popped = call_stack.pop().unwrap();
-                    self.release_synchronized_monitor(&popped);
+                    self.release_synchronized_monitor(&popped)?;
                     let ret = self.adapt_lambda_return_if_needed(&popped, ret)?;
                     if call_stack.is_empty() {
                         return Ok(ret);
@@ -172,7 +172,7 @@ impl Vm {
             match result {
                 Ok(Some(ret)) => {
                     let popped = call_stack.pop().unwrap();
-                    self.release_synchronized_monitor(&popped);
+                    self.release_synchronized_monitor(&popped)?;
                     let ret = self.adapt_lambda_return_if_needed(&popped, ret)?;
                     if call_stack.is_empty() {
                         return Ok(Some(ret));
@@ -382,16 +382,17 @@ impl Vm {
             trace.push_str("\n  at ");
             trace.push_str(&fi.frame_owner);
             let popped = call_stack.pop().unwrap();
-            self.release_synchronized_monitor(&popped);
+            self.release_synchronized_monitor(&popped)?;
         }
         Err(if trace.is_empty() { err_msg.to_owned() } else { trace })
     }
 
     /// Release the synchronized monitor when a frame is popped (normal return or exception unwind).
-    fn release_synchronized_monitor(&mut self, fi: &FrameInfo) {
+    fn release_synchronized_monitor(&mut self, fi: &FrameInfo) -> Result<(), String> {
         if let Some(ref monitor) = fi.synchronized_monitor {
-            let _ = self.monitor_exit(monitor);
+            self.monitor_exit(monitor)?;
         }
+        Ok(())
     }
 
     /// Apply lambda return-type adaptation (boxing) if the popped frame was a
