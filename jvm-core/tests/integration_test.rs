@@ -171,6 +171,18 @@ fn synchronized_blocks() {
     assert_eq!(result, "13");
 }
 
+#[test]
+fn synchronized_null_monitor_throws_npe() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "SynchronizedNullTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "npe-ok");
+}
+
 // ---------------------------------------------------------------------------
 // ClassLoader API: getSystemClassLoader, Class.forName, loadClass
 // ---------------------------------------------------------------------------
