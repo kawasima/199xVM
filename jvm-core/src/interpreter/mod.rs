@@ -159,8 +159,8 @@ impl ThreadContext {
 /// Round-robin scheduler managing all green threads.
 #[allow(dead_code)]
 pub(crate) struct Scheduler {
-    pub(in crate::interpreter) threads: Vec<ThreadContext>,
-    pub(in crate::interpreter) current_thread_idx: usize,
+    threads: Vec<ThreadContext>,
+    current_thread_idx: usize,
     next_thread_id: ThreadId,
 }
 
@@ -254,6 +254,38 @@ impl Scheduler {
     pub fn runnable_count(&self) -> usize {
         self.threads.iter().filter(|t| t.state == ThreadState::Runnable).count()
     }
+
+    /// Return the total number of threads.
+    pub fn thread_count(&self) -> usize {
+        self.threads.len()
+    }
+
+    /// Reset the current thread index to the main thread (id=0, idx=0).
+    pub fn reset_to_main(&mut self) {
+        self.current_thread_idx = 0;
+    }
+
+    /// Find the thread ID associated with a java.lang.Thread object (by pointer identity).
+    pub fn find_thread_id_by_object(&self, thread_obj: &JRef) -> Option<ThreadId> {
+        let target_ptr = Rc::as_ptr(thread_obj) as usize;
+        self.threads.iter().find_map(|t| {
+            if let Some(ref obj) = t.thread_object {
+                if Rc::as_ptr(obj) as usize == target_ptr {
+                    return Some(t.id);
+                }
+            }
+            None
+        })
+    }
+
+    /// Return a summary of non-terminated thread states (for error diagnostics).
+    pub fn alive_thread_summary(&self) -> String {
+        self.threads.iter()
+            .filter(|t| t.state != ThreadState::Terminated)
+            .map(|t| format!("thread {}={:?}", t.id, t.state))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -344,8 +376,7 @@ impl Vm {
                 monitor.entry_queue.push_back(thread_id);
                 // Transition current thread to WaitingOnMonitor so the
                 // scheduler yields and switches to another thread.
-                let current = &mut self.scheduler.threads[self.scheduler.current_thread_idx];
-                current.state = ThreadState::WaitingOnMonitor(id);
+                self.scheduler.current_thread_mut().state = ThreadState::WaitingOnMonitor(id);
             }
         }
     }
@@ -412,7 +443,7 @@ impl Vm {
     pub(in crate::interpreter) fn thread_start(&mut self, thread_obj: JRef) -> Result<ThreadId, String> {
         // Reject double-start: check if a ThreadContext already exists for this object.
         if self.find_thread_id_by_object(&thread_obj).is_some() {
-            return Err("IllegalThreadStateException: thread already started".to_owned());
+            return Err("java/lang/IllegalThreadStateException: thread already started".to_owned());
         }
 
         let id = self.scheduler.spawn(Some(Rc::clone(&thread_obj)));
@@ -469,15 +500,7 @@ impl Vm {
 
     /// Find the thread ID associated with a java.lang.Thread object.
     pub(in crate::interpreter) fn find_thread_id_by_object(&self, thread_obj: &JRef) -> Option<ThreadId> {
-        let target_ptr = Rc::as_ptr(thread_obj) as usize;
-        self.scheduler.threads.iter().find_map(|t| {
-            if let Some(ref obj) = t.thread_object {
-                if Rc::as_ptr(obj) as usize == target_ptr {
-                    return Some(t.id);
-                }
-            }
-            None
-        })
+        self.scheduler.find_thread_id_by_object(thread_obj)
     }
 
     /// Check if a thread (identified by its java.lang.Thread object) is alive.
