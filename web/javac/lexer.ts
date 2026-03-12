@@ -352,11 +352,23 @@ export function lex(source: string): Token[] {
 
     const matched = best.text;
     const last = matched[matched.length - 1];
+    if (/^0[bB]/.test(rem) && !/^0[bB]/.test(matched)) {
+      throw new Error(`Malformed binary literal at line ${startLine}:${startCol}`);
+    }
+    if (/^0[xX]/.test(rem) && !/^0[xX]/.test(matched)) {
+      throw new Error(`Malformed hexadecimal literal at line ${startLine}:${startCol}`);
+    }
     if (last === "_") {
       throw new Error(`Invalid underscore placement in number literal at line ${startLine}:${startCol}`);
     }
 
     const next = rem[matched.length] ?? "\0";
+    if (/^0[bB]/.test(matched) && isIdentifierPart(next)) {
+      throw new Error(`Malformed binary literal at line ${startLine}:${startCol}`);
+    }
+    if (/^0[xX]/.test(matched) && isIdentifierPart(next)) {
+      throw new Error(`Malformed hexadecimal literal at line ${startLine}:${startCol}`);
+    }
     if (isIdentifierPart(next)) {
       throw new Error(`Malformed number literal at line ${startLine}:${startCol}`);
     }
@@ -485,7 +497,12 @@ export function lex(source: string): Token[] {
     // Number literal
     if (/[0-9]/.test(ch) || (ch === "." && /[0-9]/.test(peekN(1)))) {
       const parsed = parseNumberLiteral(startLine, startCol);
-      if (!parsed) throw new Error(`Malformed number literal at line ${startLine}:${startCol}`);
+      if (!parsed) {
+        const rem = source.slice(pos);
+        if (/^0[xX]/.test(rem)) throw new Error(`Malformed hexadecimal literal at line ${startLine}:${startCol}`);
+        if (/^0[bB]/.test(rem)) throw new Error(`Malformed binary literal at line ${startLine}:${startCol}`);
+        throw new Error(`Malformed number literal at line ${startLine}:${startCol}`);
+      }
       for (let i = 0; i < parsed.len; i++) advance();
       tokens.push({ kind: parsed.kind, value: parsed.value, line: startLine, col: startCol });
       continue;
