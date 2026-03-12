@@ -269,9 +269,9 @@ world
   });
 
   test("malformed prefixed literals are rejected", () => {
-    assert.throws(() => lex("0b102"), /Malformed number literal/);
+    assert.throws(() => lex("0b102"), /Malformed binary literal/);
     assert.throws(() => lex("08"), /Malformed/);
-    assert.throws(() => lex("0x"), /Malformed number literal/);
+    assert.throws(() => lex("0x"), /Malformed hexadecimal literal/);
   });
 
   test("valid underscored numerics are accepted", () => {
@@ -286,8 +286,8 @@ world
   test("invalid underscore placement around exponent/suffix is rejected", () => {
     assert.throws(() => lex("1e_1"), /Malformed number literal/);
     assert.throws(() => lex("1e1_"), /Malformed number literal/);
-    assert.throws(() => lex("0x1p_1"), /Malformed number literal/);
-    assert.throws(() => lex("0x1p1_"), /Malformed number literal/);
+    assert.throws(() => lex("0x1p_1"), /Malformed hexadecimal literal|Malformed number literal/);
+    assert.throws(() => lex("0x1p1_"), /Malformed hexadecimal literal|Malformed number literal/);
     assert.throws(() => lex("0x1."), /Malformed hexadecimal floating-point literal/);
     assert.throws(() => lex("0x1._p1"), /Malformed hexadecimal floating-point literal/);
   });
@@ -297,6 +297,38 @@ world
     assert.equal(tokens[0].kind, TokenKind.IntLiteral);
     assert.equal(tokens[1].kind, TokenKind.Dot);
     assert.equal(tokens[2].kind, TokenKind.KwClass);
+  });
+
+  test("numeric prefix diagnostics are specific", () => {
+    assert.throws(() => lex("0b"), /Malformed binary literal/);
+    assert.throws(() => lex("0b2"), /Malformed binary literal/);
+    assert.throws(() => lex("0x"), /Malformed hexadecimal literal/);
+    assert.throws(() => lex("0x_1"), /Malformed hexadecimal literal/);
+  });
+
+  test("separator token conformance set", () => {
+    const tokens = lex("( ) { } [ ] ; , . ... @ ::");
+    const kinds = tokens.slice(0, -1).map(t => t.kind);
+    assert.deepEqual(kinds, [
+      TokenKind.LParen, TokenKind.RParen,
+      TokenKind.LBrace, TokenKind.RBrace,
+      TokenKind.LBracket, TokenKind.RBracket,
+      TokenKind.Semi, TokenKind.Comma, TokenKind.Dot, TokenKind.Ellipsis, TokenKind.At, TokenKind.ColonColon,
+    ]);
+  });
+
+  test("operator token conformance set", () => {
+    const tokens = lex("= == != < > <= >= + - * / % ! ~ && || & | ^ << >> >>> += -= *= /= %= &= |= ^= <<= >>= >>>= ++ -- ? : ->");
+    const kinds = tokens.slice(0, -1).map(t => t.kind);
+    assert.deepEqual(kinds, [
+      TokenKind.Assign, TokenKind.Eq, TokenKind.Ne, TokenKind.Lt, TokenKind.Gt, TokenKind.Le, TokenKind.Ge,
+      TokenKind.Plus, TokenKind.Minus, TokenKind.Star, TokenKind.Slash, TokenKind.Percent, TokenKind.Not, TokenKind.BitNot,
+      TokenKind.And, TokenKind.Or, TokenKind.BitAnd, TokenKind.BitOr, TokenKind.BitXor,
+      TokenKind.ShiftLeft, TokenKind.ShiftRight, TokenKind.ShiftUnsigned,
+      TokenKind.PlusAssign, TokenKind.MinusAssign, TokenKind.StarAssign, TokenKind.SlashAssign, TokenKind.PercentAssign,
+      TokenKind.AndAssign, TokenKind.OrAssign, TokenKind.XorAssign, TokenKind.ShiftLeftAssign, TokenKind.ShiftRightAssign, TokenKind.ShiftUnsignedAssign,
+      TokenKind.PlusPlus, TokenKind.MinusMinus, TokenKind.Question, TokenKind.Colon, TokenKind.Arrow,
+    ]);
   });
 
   test("char literal supports octal escape", () => {
