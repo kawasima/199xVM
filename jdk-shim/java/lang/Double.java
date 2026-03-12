@@ -32,6 +32,8 @@ public final class Double extends Number implements Comparable<Double> {
     public static final int MAX_EXPONENT = 1023;
     public static final int MIN_EXPONENT = -1022;
     public static final int SIZE = 64;
+    public static final double MAX_VALUE = 0x1.fffffffffffffP+1023; // 1.7976931348623157E308
+    public static final double MIN_VALUE = 0x0.0000000000001P-1022; // 4.9E-324
     public static final int BYTES = 8;
     public static final int PRECISION = 53;
     @SuppressWarnings("unchecked")
@@ -82,6 +84,12 @@ public final class Double extends Number implements Comparable<Double> {
         return !isInfinite(v) && !isNaN(v);
     }
 
+    public static int hashCode(double value) {
+        long bits = doubleToLongBits(value);
+        return (int)(bits ^ (bits >>> 32));
+    }
+
     public static native long doubleToLongBits(double value);
+    public static long doubleToRawLongBits(double value) { return doubleToLongBits(value); }
     public static native double longBitsToDouble(long bits);
 }

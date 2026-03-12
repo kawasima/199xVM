@@ -32,6 +32,8 @@ public final class Float extends Number implements Comparable<Float> {
     public static final int MAX_EXPONENT = 127;
     public static final int MIN_EXPONENT = -126;
     public static final int SIZE = 32;
+    public static final float MAX_VALUE = 0x1.fffffeP+127f; // 3.4028235E38f
+    public static final float MIN_VALUE = 0x0.000002P-126f; // 1.4E-45f
     public static final int BYTES = 4;
     public static final int PRECISION = 24;
     @SuppressWarnings("unchecked")
@@ -82,6 +84,11 @@ public final class Float extends Number implements Comparable<Float> {
         return !isInfinite(v) && !isNaN(v);
     }
 
+    public static int hashCode(float value) {
+        return floatToIntBits(value);
+    }
+
     public static native int floatToIntBits(float value);
+    public static int floatToRawIntBits(float value) { return floatToIntBits(value); }
     public static native float intBitsToFloat(int bits);
 }

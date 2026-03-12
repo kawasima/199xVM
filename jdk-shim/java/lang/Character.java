@@ -156,6 +156,10 @@ public final class Character implements Serializable, Comparable<Character> {
         return c1;
     }
 
+    public static int compare(char x, char y) {
+        return x - y;
+    }
+
     public static int codePointCount(CharSequence seq, int beginIndex, int endIndex) {
         int count = 0;
         for (int i = beginIndex; i < endIndex; count++) {

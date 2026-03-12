@@ -40,4 +40,16 @@ public final class Byte extends Number implements Comparable<Byte> {
     @Override public double doubleValue() { return value; }
     @Override public int compareTo(Byte another) { return value - another.value; }
     @Override public String toString() { return Integer.toString(value); }
+
+    public static int compare(byte x, byte y) {
+        return x - y;
+    }
+
+    public static int toUnsignedInt(byte x) {
+        return ((int) x) & 0xff;
+    }
+
+    public static int compareUnsigned(byte x, byte y) {
+        return Byte.toUnsignedInt(x) - Byte.toUnsignedInt(y);
+    }
 }
