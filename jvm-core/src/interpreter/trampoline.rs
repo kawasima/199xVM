@@ -261,15 +261,16 @@ impl Vm {
     // Returns None if the method is native (caller must handle).
     // -----------------------------------------------------------------------
 
-    /// Build a FrameInfo for a static invocation. Returns None if native.
-    pub(crate) fn build_static_frame(
+    /// Resolve descriptor and apply varargs synthesis for a static call.
+    /// Returns `(resolved_descriptor, adjusted_args)`, or `None` if the method
+    /// cannot be found at all (no flags).
+    pub(crate) fn prepare_static_args(
         &mut self,
         class_name: &str,
         method_name: &str,
         descriptor: &str,
         args: Vec<JValue>,
-        push_return: bool,
-    ) -> Result<Option<FrameInfo>, String> {
+    ) -> Option<(String, Vec<JValue>)> {
         let method_flags = self.find_method_flags(class_name, method_name, descriptor);
         let resolved_descriptor = if method_flags.is_some() {
             descriptor.to_owned()
@@ -284,7 +285,7 @@ impl Vm {
             method_flags
         };
         if method_flags.is_none() {
-            return Ok(None);
+            return None;
         }
 
         let mut args = args;
@@ -294,12 +295,24 @@ impl Vm {
                 args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
             }
         }
+        Some((resolved_descriptor, args))
+    }
 
-        let info = self.resolve_method_exec_info(class_name, method_name, descriptor_r)
-            .ok_or_else(|| format!("Method not found: {class_name}.{method_name}{descriptor_r}"))?;
+    /// Build a FrameInfo for a static invocation. Returns None if native.
+    /// Caller should use `prepare_static_args` first to normalize descriptor/args.
+    pub(crate) fn build_static_frame(
+        &mut self,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+        args: Vec<JValue>,
+        push_return: bool,
+    ) -> Result<Option<FrameInfo>, String> {
+        let info = self.resolve_method_exec_info(class_name, method_name, descriptor)
+            .ok_or_else(|| format!("Method not found: {class_name}.{method_name}{descriptor}"))?;
         if !info.has_code { return Ok(None); }
 
-        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor_r);
+        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
         let req: usize = param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum();
         let mut locals = vec![JValue::Void; info.max_locals.max(req)];
         let mut li = 0usize;
