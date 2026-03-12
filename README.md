@@ -4,218 +4,151 @@ A minimal Java bytecode interpreter compiled to WebAssembly, with an in-browser 
 
 ## Concept
 
-**"Write, compile, and run Java in the browser — no server required."**
+**"Write, compile, and run Java in the browser - no server required."**
 
 199xVM consists of two parts:
 
-1. **JVM interpreter** — Rust compiled to WebAssembly, interprets `.class` bytecode directly
-2. **Java compiler** — TypeScript (`web/javac.ts`), compiles a subset of Java to `.class` bytecode in the browser
+1. **JVM interpreter** - Rust compiled to WebAssembly, interprets `.class` bytecode directly
+2. **Java compiler** - TypeScript compiler that emits `.class` bytecode in the browser
 
-No transpilation, no server round-trip — write Java in the editor, compile to bytecode, and execute it, all client-side.
+No transpilation and no server round-trip. Java source is compiled and executed fully client-side.
 
-### Design goals
+## Scope and claim
 
-- **Browser-first** — the only runtime is a `.wasm` module + JS, served as static files
-- **Zero server dependency** — compile and run Java entirely in the browser
-- **JDK shims in pure Java** — standard library classes are implemented as Java source compiled to bytecode, not as native Rust stubs
-- **Hackable** — the interpreter is ~4,500 lines of Rust; the compiler is ~5,600 lines of TypeScript
+199xVM targets **progressive Java 25 compatibility** for practical in-browser execution.
 
----
+It is **not** a full implementation of `javac` or HotSpot, and it should not currently be advertised as "fully JLS/JVMS compliant". The conformance matrix below is the source of truth for implementation status.
 
 ## Architecture
 
 ```text
 199xvm/
-├── jvm-core/               # Rust crate — compiled to jvm_core.wasm
+├── jvm-core/                    # Rust crate, built to jvm_core.wasm
 │   └── src/
-│       ├── class_file.rs   # .class binary parser (JVMS §4)
-│       ├── heap.rs         # reference-counted heap (JValue / JObject)
-│       ├── interpreter.rs  # opcode dispatch loop + native stubs
-│       └── lib.rs          # wasm-bindgen public API
+│       ├── class_file.rs        # classfile parser (JVMS §4)
+│       ├── heap.rs              # heap/object model
+│       ├── interpreter/
+│       │   ├── mod.rs           # interpreter entry + module wiring
+│       │   ├── dispatch.rs      # opcode dispatch
+│       │   ├── invoke.rs        # method invocation path
+│       │   ├── native_static.rs # static native hooks
+│       │   └── native_virtual.rs# virtual native hooks
+│       └── lib.rs               # wasm-bindgen API
 ├── web/
-│   ├── index.html          # playground UI (CodeMirror editor + output)
-│   ├── javac.ts            # in-browser Java subset compiler
-│   ├── class-reader.ts     # .class / JAR parser for method registry
-│   └── javac.test.ts       # compiler test suite (146 tests)
-├── jdk-shim/               # JDK standard library shims (pure Java, 249 classes)
-│   ├── java/lang/          # String, StringBuilder, Integer, Record, ...
-│   ├── java/util/          # ArrayList, HashMap, Optional, stream, ...
-│   ├── java/math/          # BigInteger, BigDecimal, MathContext, ...
-│   ├── java/time/          # Month, ZoneId, temporal, format, ...
-│   ├── java/io/            # InputStream, OutputStream, Serializable, ...
-│   ├── java/text/          # DateFormat, SimpleDateFormat, Formatter, ...
-│   └── bundle.bin          # compiled shim classes (length-prefixed bundle)
-├── raoh-classes/            # Pre-compiled Raoh decoder library (66 classes)
-├── build-shim.sh           # compile shim sources → bundle.bin
-├── build-test-bundle.sh    # compile test classes → test-classes/bundle.bin
-└── build-dist.sh           # build all artifacts and deploy to GCS
+│   ├── index.html               # playground UI
+│   ├── class-reader.ts          # class/JAR reader for method registry
+│   ├── javac.ts                 # compiler entrypoint
+│   ├── javac/                   # modularized compiler core
+│   │   ├── lexer.ts
+│   │   ├── parser.ts
+│   │   ├── ast.ts
+│   │   ├── compiler.ts
+│   │   └── method-registry.ts
+│   └── javac.test.ts            # compiler tests
+├── jdk-shim/                    # Java standard library shims (pure Java)
+│   └── bundle.bin               # compiled shim class bundle
+├── build-shim.sh
+├── build-test-bundle.sh
+└── build-dist.sh
 ```
 
-### Class bundle format
+## JLS/JVMS conformance matrix
 
-Classes are shipped as a single binary blob:
+Status labels:
 
-```
-[ u32 length (big-endian) ][ raw .class bytes ]  ×  N classes
-```
+- **Implemented**: feature is broadly available in this project scope
+- **Partial**: significant subset works, but edge cases or strict checks are incomplete
+- **Limited**: intentionally narrow support
 
-The browser fetches shim `bundle.bin`, the compiler produces user class bytes, and both are concatenated before passing to the VM.
+### How to maintain this matrix
 
----
+- Add or update a row whenever language/runtime behavior changes.
+- Keep each row tied to concrete evidence (`tests` or implementation path).
+- If a row is Partial/Limited, keep `Gap / next step` actionable.
+
+### JLS (Java Language Specification) matrix
+
+| ID | Topic | Status | Evidence | Gap / next step |
+| --- | --- | --- | --- | --- |
+| JLS-3 | Lexical structure / tokens / literals | Implemented | `web/javac/lexer.ts`, `web/javac.test.ts` | Keep parity checks for edge lexical forms |
+| JLS-6 | Names, scope, and shadowing | Partial | `web/javac/parser.ts`, `web/javac/compiler.ts` | Tighten complex shadowing and ambiguity diagnostics |
+| JLS-8 | Classes, members, constructors | Partial | `web/javac/parser.ts`, `web/javac/compiler.ts` | Cover remaining declaration constraints and corner cases |
+| JLS-9 | Interfaces and inheritance behavior | Partial | method resolution in `web/javac/compiler.ts` | Expand default/static/interface conflict rules |
+| JLS-11 | Exceptions and checked-exception analysis | Partial | throw/catch analysis + tests in `web/javac.test.ts` | Expand full-path exception typing coverage |
+| JLS-14 | Statements (`if/for/while/switch/try`) | Partial | parser/codegen + tests in `web/javac.test.ts` | Continue strict semantic checks and flow diagnostics |
+| JLS-15 | Expressions, calls, conversions, lambdas | Partial | expression codegen in `web/javac/compiler.ts` | Close gaps in typing/narrowing/inference edge cases |
+| JLS-16 | Definite assignment | Limited | current compiler flow checks | Add full DA/DU data-flow analysis equivalent to `javac` |
+| JLS-7 / JLS-13 | Packages/imports and binary compatibility | Partial | import resolution in compiler modules | Improve compatibility checks and diagnostics |
+| JLS tooling areas | Modules, annotation processing, full toolchain parity | Limited | out of current compiler scope | Track as separate long-term epics |
+
+### JVMS (Java Virtual Machine Specification) matrix
+
+| ID | Topic | Status | Evidence | Gap / next step |
+| --- | --- | --- | --- | --- |
+| JVMS-4 | ClassFile format and constant pool | Implemented | `jvm-core/src/class_file.rs` | Add stricter validation where parser is permissive |
+| JVMS-5 | Linking/loading behavior (project scope) | Partial | runtime loading paths in `jvm-core/src/interpreter` | Extend compatibility checks and error surfaces |
+| JVMS-6 | Instruction set execution | Implemented | `jvm-core/src/interpreter/dispatch.rs` + integration tests | Keep expanding opcode edge-case tests |
+| JVMS-6.5 | Invocation (`invoke*`, `invokedynamic`) | Partial | `jvm-core/src/interpreter/invoke.rs` | Broaden bootstrap and resolution corner-case handling |
+| JVMS exceptions | Exception table dispatch / `athrow` | Implemented | interpreter runtime paths + tests | Add more mixed `finally`/rethrow regressions |
+| JVMS verification | Bytecode verifier strictness | Limited | current runtime validation only | Implement stricter verifier-like prechecks |
+| JVMS monitors/threads | `monitorenter` / `monitorexit` semantics | Limited | currently non-full monitor semantics | Full monitor/thread model if runtime scope expands |
+| JVMS memory model | GC / object lifecycle behavior | Limited | reference-counted heap in `jvm-core/src/heap.rs` | No cycle collector; keep scope explicit |
+
+## JDK shim policy
+
+JDK APIs are provided primarily as **pure Java shims** under `jdk-shim/` and compiled to bytecode.
+
+- Target is Java 25 API compatibility where practical
+- Prefer Java shim implementations over Rust native stubs
+- Keep Rust natives only for runtime-boundary functionality (for example output/time/string bridging)
 
 ## Quick start
 
-### 1. Build the WASM module
-
 ```sh
+# 1) Build wasm VM
 cargo install wasm-pack
 wasm-pack build jvm-core --target web
-```
 
-### 2. Build JDK shims
-
-```sh
+# 2) Build JDK shims
 ./build-shim.sh
-# → jdk-shim/bundle.bin (249 shim classes)
-```
 
-### 3. Build the compiler
-
-```sh
+# 3) Build compiler
 npm install
 npm run build:javac
-# → web/javac.js
-```
 
-### 4. Serve and open
-
-```sh
+# 4) Serve
 npx serve .
 # open http://localhost:3000/web/
 ```
 
----
-
-## In-browser compiler (`web/javac.ts`)
-
-The compiler supports a substantial subset of Java:
-
-- Class declarations with fields, constructors, instance/static methods
-- Inheritance (`extends`) with `super()` calls
-- Record types (with `Record` class attribute emission)
-- Control flow: `if`/`else`, `while`, `do-while`, `for`, enhanced `for`, `break`, `continue`, labeled `break`
-- Switch statements and switch expressions (including pattern matching, guards, record patterns)
-- Expressions: arithmetic, comparisons, logical `&&`/`||`/`!`, string concatenation, ternary `? :`
-- `new`, method calls (static, virtual, interface), field access
-- Arrays: `new int[n]`, `arr[i]`, `arr.length`
-- Lambda expressions and method references (`invokedynamic` + `LambdaMetafactory`)
-- `instanceof` with type patterns and record patterns
-- Unboxing / boxing casts (e.g., `(int) someObject`)
-- `try`/`catch`/`finally`, `throw`
-- `import` resolution for JDK classes (named, wildcard, static)
-- Multi-class source files (compiled to length-prefixed bundle)
-
-### Example snippets (playground)
-
-| Category | Snippets |
-| --- | --- |
-| Basics | Hello World, Arithmetic, String ops, String.formatted(), Loops, Conditionals |
-| OOP | Class with fields, Inheritance, Record type, Static methods |
-| Algorithms | Fibonacci (recursive/iterative), Factorial, GCD, Bubble sort, Binary search |
-| Collections | ArrayList, List operations |
-| Modern Java | Lambda & method ref, Switch expression, Pattern matching, Record |
-| Raoh | ObjectDecoders, MapDecoders, JsonDecoders (string, int/decimal, field, combine) |
-| JVM Showcase | Reflection + Record, BigDecimal, CompletableFuture, ForkJoin, Pattern + Switch + Record |
-
----
-
-## JDK shim classes
-
-Standard library classes are implemented as **pure Java** in `jdk-shim/`, compiled to bytecode with `javac --patch-module`. Shims target **Java 25 API compatibility** — implementations start from JDK 25 source, replacing only internal API dependencies (`jdk.internal.*`, `sun.*`).
-
-Currently shimmed (249 classes across 15 packages):
-
-- `java.lang`: Object, String, StringBuilder, Integer, Long, Float, Double, Boolean, Character, Math, System, Class, Record, Enum, 30+ exception types
-- `java.lang.reflect`: Field, Method, Constructor, Array, RecordComponent, Modifier, ...
-- `java.lang.annotation`: Annotation, Target, Retention, ...
-- `java.util`: ArrayList, HashMap, HashSet, LinkedHashMap, ArrayDeque, BitSet, Optional, Arrays, Collections, Formatter, ...
-- `java.util.stream`: Stream, StreamImpl, Collector, Collectors
-- `java.util.function`: Function, BiFunction, Predicate, Consumer, BiConsumer, Supplier
-- `java.util.regex`: Pattern, Matcher
-- `java.util.concurrent`: ForkJoinPool, CompletableFuture, ExecutorService, CountDownLatch, ConcurrentHashMap, RecursiveTask, ...
-- `java.util.concurrent.atomic`: AtomicReference, AtomicLong, ...
-- `java.util.concurrent.locks`: Lock, ReentrantLock, Condition
-- `java.math`: BigInteger, BigDecimal, MathContext, RoundingMode
-- `java.time`: Month, ZoneId, temporal (ChronoField, ChronoUnit), format (DateTimeFormatter)
-- `java.text`: DateFormat, SimpleDateFormat
-- `java.io`: InputStream, OutputStream, PrintStream, Serializable, ...
-- `java.beans`: ConstructorProperties, Transient
-
-Native stubs (Rust) are only used for operations requiring host access:
-
-- `String` methods (backed by Rust `NativePayload::JavaString`)
-- `PrintStream.println` / `System.out` (output capture)
-- `System.currentTimeMillis` (via `js_sys::Date::now()` on WASM)
-- `System.identityHashCode`
-
----
-
-## Supported bytecode
-
-The interpreter covers:
-
-- Load/store: `aload`, `iload`, `lload`, `fload`, `dload`, `astore`, `istore`, `lstore`, ...
-- Constants: `iconst`, `lconst`, `fconst`, `dconst`, `bipush`, `sipush`, `ldc`, `ldc_w`, `ldc2_w`
-- Arithmetic: `iadd`, `isub`, `imul`, `idiv`, `irem`, `ineg`, `ladd`, `lsub`, `lmul`, `ldiv`, `fadd`, `fsub`, `fmul`, `fdiv`, `dadd`, `dsub`, `dmul`, `ddiv`, ...
-- Type conversion: `i2l`, `i2f`, `i2d`, `l2i`, `l2f`, `l2d`, `f2i`, `f2d`, `d2i`, `d2f`, `i2b`, `i2c`, `i2s`
-- Comparisons: `if_icmp*`, `if_acmp*`, `ifle`, `ifeq`, `ifne`, `ifnull`, `ifnonnull`, `lcmp`, `fcmpl`, `fcmpg`, `dcmpl`, `dcmpg`
-- Control flow: `goto`, `tableswitch`, `lookupswitch`
-- Objects: `new`, `newarray`, `anewarray`, `multianewarray`, `arraylength`
-- Arrays: `iaload`, `iastore`, `aaload`, `aastore`, `baload`, `bastore`, `caload`, `castore`, `laload`, `lastore`, `faload`, `fastore`, `daload`, `dastore`
-- Fields: `getfield`, `putfield`, `getstatic`, `putstatic`
-- Methods: `invokestatic`, `invokevirtual`, `invokespecial`, `invokeinterface`
-- `invokedynamic`: LambdaMetafactory, StringConcatFactory, SwitchBootstraps
-- Type checks: `instanceof`, `checkcast`
-- Exceptions: `athrow`, try/catch dispatch via exception table
-- Stack: `dup`, `dup_x1`, `dup_x2`, `dup2`, `swap`, `pop`, `pop2`
-- `wide` prefix, `iinc`, `monitorenter`/`monitorexit` (no-op)
-
----
-
-## Known limitations
-
-| Area | Status |
-| --- | --- |
-| Lambda / Stream | `invokedynamic` lambda capture works; stream operations cover `map`, `filter`, `reduce`, `collect`, `forEach`, `findAny`, `min`, `toList` |
-| Threads / `synchronized` | Not supported (`monitorenter`/`monitorexit` are no-ops) |
-| GC | Reference-counting; no cycle collection |
-| Reflection | Basic support: `getRecordComponents`, `getClass`, `getSimpleName`, `forName` |
-| `java.net` | Not supported |
-| `float` / `double` | Arithmetic works; `Math.*` transcendentals are partially stubbed |
-
----
-
 ## Development
 
 ```sh
-# Run compiler tests (146 tests)
+# Compiler tests
 npm test
 
-# Run VM integration tests (8 tests)
+# VM integration tests
 cargo test --package jvm-core
 
-# Rebuild everything
-./build-shim.sh && npm run build:javac && wasm-pack build jvm-core --target web
-
-# Deploy (incremental upload to GCS)
-./build-dist.sh
+# Rebuild core artifacts
+./build-shim.sh
+npm run build:javac
+wasm-pack build jvm-core --target web
 ```
 
----
+## Known limitations (high level)
+
+- Full Java 25 language/toolchain parity is out of scope today
+- Full JVM verification, threading, and GC semantics are not implemented
+- Some advanced language semantics are intentionally staged and tightened incrementally
 
 ## Contributing
 
-- **Interpreter**: [jvm-core/src/interpreter.rs](jvm-core/src/interpreter.rs) — each opcode is a `match` arm
-- **Compiler**: [web/javac.ts](web/javac.ts) — lexer, parser, code generator
-- **Class reader**: [web/class-reader.ts](web/class-reader.ts) — `.class` / JAR parser for method registry
-- **JDK shims**: [jdk-shim/](jdk-shim/) — pure Java implementations of standard library classes
+- Interpreter entry: `jvm-core/src/interpreter/mod.rs`
+- Interpreter dispatch/runtime pieces: `jvm-core/src/interpreter/dispatch.rs`, `invoke.rs`, `native_static.rs`, `native_virtual.rs`
+- Compiler entry: `web/javac.ts`
+- Compiler modules: `web/javac/lexer.ts`, `parser.ts`, `ast.ts`, `compiler.ts`, `method-registry.ts`
+- Compiler tests: `web/javac.test.ts`
+- JDK shims: `jdk-shim/`
+
+PRs for feature work should target `develop`.
