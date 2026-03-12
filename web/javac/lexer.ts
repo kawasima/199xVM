@@ -360,6 +360,12 @@ export function lex(source: string): Token[] {
     if (isIdentifierPart(next)) {
       throw new Error(`Malformed number literal at line ${startLine}:${startCol}`);
     }
+    if (/^0[xX]/.test(matched) && next === ".") {
+      const afterDot = rem[matched.length + 1] ?? "\0";
+      if (afterDot === "_" || afterDot === "\0" || /\s/.test(afterDot) || /[0-9]/.test(afterDot)) {
+        throw new Error(`Malformed hexadecimal floating-point literal at line ${startLine}:${startCol}`);
+      }
+    }
     if (rem.startsWith("0") && matched === "0" && /[0-9_]/.test(next)) {
       throw new Error(`Malformed octal literal at line ${startLine}:${startCol}`);
     }

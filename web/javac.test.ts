@@ -288,6 +288,15 @@ world
     assert.throws(() => lex("1e1_"), /Malformed number literal/);
     assert.throws(() => lex("0x1p_1"), /Malformed number literal/);
     assert.throws(() => lex("0x1p1_"), /Malformed number literal/);
+    assert.throws(() => lex("0x1."), /Malformed hexadecimal floating-point literal/);
+    assert.throws(() => lex("0x1._p1"), /Malformed hexadecimal floating-point literal/);
+  });
+
+  test("hex int followed by class literal separator is tokenized", () => {
+    const tokens = lex("0x1.class");
+    assert.equal(tokens[0].kind, TokenKind.IntLiteral);
+    assert.equal(tokens[1].kind, TokenKind.Dot);
+    assert.equal(tokens[2].kind, TokenKind.KwClass);
   });
 
   test("char literal supports octal escape", () => {
