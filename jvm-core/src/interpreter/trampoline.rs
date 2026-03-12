@@ -1,0 +1,499 @@
+use std::rc::Rc;
+
+use crate::class_file::{BootstrapMethod, ConstantPoolEntry, ExceptionTableEntry};
+use crate::heap::{JObject, JRef, JValue};
+
+use super::descriptors::*;
+use super::frame::*;
+use super::Vm;
+
+// ---------------------------------------------------------------------------
+// Data types
+// ---------------------------------------------------------------------------
+
+/// All data needed to execute or resume a method frame.
+pub(crate) struct FrameInfo {
+    pub frame: Frame,
+    pub code: Vec<u8>,
+    pub cp: Rc<Vec<ConstantPoolEntry>>,
+    pub class_name: String,
+    pub bootstrap_methods: Vec<BootstrapMethod>,
+    pub exception_table: Vec<ExceptionTableEntry>,
+    /// Whether to push the return value onto the caller's operand stack.
+    pub push_return: bool,
+    /// Pending concat recipe state (for StringConcatFactory toString() calls).
+    pub concat_state: Option<ConcatState>,
+}
+
+/// Saved state for a StringConcatFactory recipe interrupted by toString().
+pub(crate) struct ConcatState {
+    pub recipe_chars: Vec<char>,
+    pub args: Vec<JValue>,
+    pub arg_types: Vec<char>,
+    pub result: String,
+    pub char_idx: usize,
+    pub arg_idx: usize,
+    pub const_idx: usize,
+    pub bootstrap_arguments: Vec<u16>,
+    pub cp: Rc<Vec<ConstantPoolEntry>>,
+}
+
+// ---------------------------------------------------------------------------
+// Trampoline loop
+// ---------------------------------------------------------------------------
+
+impl Vm {
+    /// Run an explicit call stack using a trampoline loop.
+    /// Returns the final return value of the bottom-most frame.
+    pub(crate) fn run_trampoline(
+        &mut self,
+        call_stack: &mut Vec<FrameInfo>,
+    ) -> Result<JValue, String> {
+        loop {
+            if call_stack.is_empty() {
+                return Ok(JValue::Void);
+            }
+
+            let fi = call_stack.last_mut().unwrap();
+            if fi.frame.pc >= fi.code.len() {
+                // Fell off the end — implicit void return.
+                call_stack.pop();
+                if call_stack.is_empty() {
+                    return Ok(JValue::Void);
+                }
+                continue;
+            }
+
+            let opcode_pc = fi.frame.pc;
+            let opcode = fi.code[fi.frame.pc];
+            fi.frame.pc += 1;
+
+            let result = self.execute_opcode(
+                &mut fi.frame, &fi.code, &fi.cp, &fi.class_name,
+                &fi.bootstrap_methods, &fi.exception_table, opcode,
+            );
+
+            match result {
+                Ok(Some(ret)) => {
+                    // Method returned a value — pop frame.
+                    let popped = call_stack.pop().unwrap();
+                    if call_stack.is_empty() {
+                        return Ok(ret);
+                    }
+                    let caller = call_stack.last_mut().unwrap();
+                    if popped.push_return && !matches!(ret, JValue::Void) {
+                        if caller.concat_state.is_some() {
+                            // Return from toString() during concat.
+                            feed_concat_return(caller, &ret);
+                            self.try_resume_concat(call_stack)?;
+                        } else {
+                            caller.frame.stack.push(ret);
+                        }
+                    } else if caller.concat_state.is_some() {
+                        self.try_resume_concat(call_stack)?;
+                    }
+                }
+                Ok(None) => {
+                    // Check if a new frame was posted by an invoke opcode.
+                    if let Some(new_fi) = self.pending_frame.take() {
+                        call_stack.push(new_fi);
+                    }
+                }
+                Err(err_msg) => {
+                    match self.unwind_exception(call_stack, opcode_pc, &err_msg) {
+                        Ok(()) => {} // handler found
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Search for an exception handler up the call stack.
+    fn unwind_exception(
+        &mut self,
+        call_stack: &mut Vec<FrameInfo>,
+        initial_opcode_pc: usize,
+        err_msg: &str,
+    ) -> Result<(), String> {
+        let mut first = true;
+        let mut trace = String::new();
+        while let Some(fi) = call_stack.last_mut() {
+            fi.concat_state = None;
+            let pc = if first { initial_opcode_pc } else { fi.frame.pc.saturating_sub(1) };
+            first = false;
+
+            if let Some((handler_pc, exc_obj)) = self.find_exception_handler(
+                &fi.frame, &fi.exception_table, &fi.cp, pc, err_msg,
+            ) {
+                fi.frame.stack.clear();
+                fi.frame.stack.push(exc_obj);
+                fi.frame.pc = handler_pc;
+                return Ok(());
+            }
+            trace = format!("{err_msg}\n  at {}", fi.class_name);
+            call_stack.pop();
+        }
+        Err(if trace.is_empty() { err_msg.to_owned() } else { trace })
+    }
+
+    /// Continue a StringConcatFactory recipe. May push new frames for toString().
+    fn try_resume_concat(
+        &mut self,
+        call_stack: &mut Vec<FrameInfo>,
+    ) -> Result<(), String> {
+        loop {
+            // Check if there's a concat state to process.
+            {
+                let fi = call_stack.last().unwrap();
+                if fi.concat_state.is_none() {
+                    return Ok(());
+                }
+            }
+
+            // Process one character at a time, breaking out when we need to yield.
+            enum Action {
+                Continue,
+                NativeToString(JRef, String),
+                Finished(String),
+            }
+
+            let action = {
+                let fi = call_stack.last_mut().unwrap();
+                let cs = fi.concat_state.as_mut().unwrap();
+
+                if cs.char_idx >= cs.recipe_chars.len() {
+                    // Recipe finished.
+                    Action::Finished(std::mem::take(&mut cs.result))
+                } else {
+                    let ch = cs.recipe_chars[cs.char_idx];
+                    cs.char_idx += 1;
+
+                    if ch == '\x01' {
+                        let mut need_tostring: Option<(JRef, String)> = None;
+                        if let Some(a) = cs.args.get(cs.arg_idx) {
+                            let is_bool = cs.arg_types.get(cs.arg_idx) == Some(&'Z');
+                            match a {
+                                JValue::Int(v) if is_bool => cs.result.push_str(if *v != 0 { "true" } else { "false" }),
+                                JValue::Int(v) => cs.result.push_str(&v.to_string()),
+                                JValue::Long(v) => cs.result.push_str(&v.to_string()),
+                                JValue::Float(v) => cs.result.push_str(&v.to_string()),
+                                JValue::Double(v) => cs.result.push_str(&v.to_string()),
+                                JValue::Ref(Some(r)) => {
+                                    if let Some(s) = r.borrow().as_java_string() {
+                                        cs.result.push_str(s);
+                                    } else {
+                                        need_tostring = Some((r.clone(), r.borrow().class_name.clone()));
+                                    }
+                                }
+                                JValue::Ref(None) => cs.result.push_str("null"),
+                                _ => {}
+                            }
+                        }
+                        cs.arg_idx += 1;
+                        if let Some((r, cn)) = need_tostring {
+                            Action::NativeToString(r, cn)
+                        } else {
+                            Action::Continue
+                        }
+                    } else if ch == '\x02' {
+                        expand_concat_const(cs);
+                        cs.const_idx += 1;
+                        Action::Continue
+                    } else {
+                        cs.result.push(ch);
+                        Action::Continue
+                    }
+                }
+            }; // borrows dropped here
+
+            match action {
+                Action::Continue => continue,
+                Action::NativeToString(r, cn) => {
+                    // Try bytecode frame first.
+                    let frame_opt = self.build_virtual_frame_inner(
+                        r.clone(), &cn, "toString",
+                        "()Ljava/lang/String;", vec![], true,
+                    )?;
+                    if let Some(frame_info) = frame_opt {
+                        call_stack.push(frame_info);
+                        return Ok(());
+                    }
+                    // Native toString.
+                    let s = if let Some(v) = self.native_virtual(
+                        &r, &cn, "toString", "()Ljava/lang/String;", &[],
+                    ) {
+                        if let JValue::Ref(Some(sr)) = v {
+                            sr.borrow().as_java_string().unwrap_or("").to_owned()
+                        } else {
+                            cn.clone()
+                        }
+                    } else {
+                        cn.clone()
+                    };
+                    let fi = call_stack.last_mut().unwrap();
+                    let cs = fi.concat_state.as_mut().unwrap();
+                    cs.result.push_str(&s);
+                }
+                Action::Finished(result_str) => {
+                    let fi = call_stack.last_mut().unwrap();
+                    fi.concat_state = None;
+                    fi.frame.stack.push(JValue::Ref(Some(JObject::new_string(result_str))));
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Frame builders — resolve method, build locals, return FrameInfo.
+    // Returns None if the method is native (caller must handle).
+    // -----------------------------------------------------------------------
+
+    /// Build a FrameInfo for a static invocation. Returns None if native.
+    pub(crate) fn build_static_frame(
+        &mut self,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+        args: Vec<JValue>,
+        push_return: bool,
+    ) -> Result<Option<FrameInfo>, String> {
+        let method_flags = self.find_method_flags(class_name, method_name, descriptor);
+        let resolved_descriptor = if method_flags.is_some() {
+            descriptor.to_owned()
+        } else {
+            self.find_method_real_descriptor(class_name, method_name, descriptor)
+                .unwrap_or_else(|| descriptor.to_owned())
+        };
+        let descriptor_r = resolved_descriptor.as_str();
+        let method_flags = if method_flags.is_none() {
+            self.find_method_flags(class_name, method_name, descriptor_r)
+        } else {
+            method_flags
+        };
+        if method_flags.is_none() {
+            return Ok(None);
+        }
+
+        let mut args = args;
+        let expected = count_args(descriptor_r);
+        if args.len() < expected {
+            if method_flags.map(|f| f & 0x0080 != 0).unwrap_or(false) && expected - args.len() == 1 {
+                args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
+            }
+        }
+
+        let info = self.resolve_method_exec_info(class_name, method_name, descriptor_r)
+            .ok_or_else(|| format!("Method not found: {class_name}.{method_name}{descriptor_r}"))?;
+        if !info.has_code { return Ok(None); }
+
+        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor_r);
+        let req: usize = param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum();
+        let mut locals = vec![JValue::Void; info.max_locals.max(req)];
+        let mut li = 0usize;
+        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
+            if li >= locals.len() { break; }
+            locals[li] = self.adapt_value_for_descriptor(t, a);
+            li += if t == "J" || t == "D" { 2 } else { 1 };
+        }
+
+        let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+        Ok(Some(FrameInfo {
+            frame: Frame { locals, stack: Vec::new(), pc: 0 },
+            code: info.code, cp: info.cp, class_name: fo,
+            bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
+            push_return, concat_state: None,
+        }))
+    }
+
+    /// Inner helper for building a virtual frame (no lambda handling).
+    /// Returns None if the method is native, a lambda, or not found in bytecode.
+    pub(crate) fn build_virtual_frame_inner(
+        &mut self,
+        this: JRef,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+        args: Vec<JValue>,
+        push_return: bool,
+    ) -> Result<Option<FrameInfo>, String> {
+        // Pure Rust lambda closures are handled inline — not via frames.
+        let is_bytecode_lambda;
+        {
+            let borrow = this.borrow();
+            if matches!(borrow.native, crate::heap::NativePayload::Lambda(_)) {
+                return Ok(None);
+            }
+            is_bytecode_lambda = matches!(borrow.native, crate::heap::NativePayload::BytecodeLambda { .. });
+        }
+
+        let runtime_class = this.borrow().class_name.clone();
+        // For bytecode lambdas, resolve on the interface class (class_name) so that
+        // default methods are found.  For normal objects, use the runtime class.
+        let resolve_class = if is_bytecode_lambda {
+            class_name.to_owned()
+        } else if self.classes.contains_key(&runtime_class) {
+            runtime_class.clone()
+        } else {
+            class_name.to_owned()
+        };
+
+        let resolved = if self.method_exists(&resolve_class, method_name, descriptor) {
+            descriptor.to_owned()
+        } else {
+            self.find_method_real_descriptor(&resolve_class, method_name, descriptor)
+                .unwrap_or_else(|| descriptor.to_owned())
+        };
+        let desc = resolved.as_str();
+
+        if !self.method_exists(&resolve_class, method_name, desc) {
+            return Ok(None);
+        }
+
+        let info = self.resolve_method_exec_info(&resolve_class, method_name, desc).unwrap();
+
+        if info.access_flags & 0x0400 != 0 {
+            // For bytecode lambdas, abstract methods (the SAM) should be handled
+            // by invoke_virtual's SAM dispatch, not as an error.
+            if is_bytecode_lambda {
+                return Ok(None);
+            }
+            let exc = JObject::new("java/lang/AbstractMethodError");
+            let ms = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+            let msg = self.intern_string(ms.clone());
+            exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+            self.pending_exception = Some(exc);
+            return Err(format!("java/lang/AbstractMethodError: {ms}"));
+        }
+
+        if !info.has_code { return Ok(None); }
+
+        let (param_tokens, _) = Self::parse_method_descriptor_tokens(desc);
+        let req = 1 + param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum::<usize>();
+        let total = info.max_locals.max(req);
+        let mut locals = vec![JValue::Void; total];
+        locals[0] = JValue::Ref(Some(this));
+        let mut li = 1usize;
+        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
+            if li >= locals.len() { break; }
+            locals[li] = self.adapt_value_for_descriptor(t, a);
+            li += if t == "J" || t == "D" { 2 } else { 1 };
+        }
+
+        let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+        Ok(Some(FrameInfo {
+            frame: Frame { locals, stack: Vec::new(), pc: 0 },
+            code: info.code, cp: info.cp, class_name: fo,
+            bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
+            push_return, concat_state: None,
+        }))
+    }
+
+    /// Inner helper for building an invokespecial frame.
+    pub(crate) fn build_special_frame_inner(
+        &mut self,
+        this: JRef,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+        args: Vec<JValue>,
+        push_return: bool,
+    ) -> Result<Option<FrameInfo>, String> {
+        let resolved = if self.method_exists(class_name, method_name, descriptor) {
+            descriptor.to_owned()
+        } else {
+            self.find_method_real_descriptor(class_name, method_name, descriptor)
+                .unwrap_or_else(|| descriptor.to_owned())
+        };
+        let desc = resolved.as_str();
+
+        if !self.method_exists(class_name, method_name, desc) {
+            return Ok(None);
+        }
+
+        let info = self.resolve_method_exec_info(class_name, method_name, desc).unwrap();
+
+        if info.access_flags & 0x0400 != 0 {
+            let exc = JObject::new("java/lang/AbstractMethodError");
+            let ms = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+            let msg = self.intern_string(ms.clone());
+            exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+            self.pending_exception = Some(exc);
+            return Err(format!("java/lang/AbstractMethodError: {ms}"));
+        }
+
+        if !info.has_code { return Ok(None); }
+
+        let (param_tokens, _) = Self::parse_method_descriptor_tokens(desc);
+        let req = 1 + param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum::<usize>();
+        let total = info.max_locals.max(req);
+        let mut locals = vec![JValue::Void; total];
+        locals[0] = JValue::Ref(Some(this));
+        let mut li = 1usize;
+        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
+            if li >= locals.len() { break; }
+            locals[li] = self.adapt_value_for_descriptor(t, a);
+            li += if t == "J" || t == "D" { 2 } else { 1 };
+        }
+
+        let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+        Ok(Some(FrameInfo {
+            frame: Frame { locals, stack: Vec::new(), pc: 0 },
+            code: info.code, cp: info.cp, class_name: fo,
+            bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
+            push_return, concat_state: None,
+        }))
+    }
+}
+
+fn feed_concat_return(fi: &mut FrameInfo, ret: &JValue) {
+    if let Some(ref mut cs) = fi.concat_state {
+        if let JValue::Ref(Some(sr)) = ret {
+            if let Some(s) = sr.borrow().as_java_string() {
+                cs.result.push_str(s);
+            }
+        }
+    }
+}
+
+fn expand_concat_const(cs: &mut ConcatState) {
+    use crate::class_file::ConstantPoolEntry;
+    let ba_idx = 1 + cs.const_idx;
+    if let Some(&cp_idx) = cs.bootstrap_arguments.get(ba_idx) {
+        match cs.cp.get(cp_idx as usize) {
+            Some(ConstantPoolEntry::String { string_index }) => {
+                if let Some(ConstantPoolEntry::Utf8(s)) = cs.cp.get(*string_index as usize) {
+                    cs.result.push_str(s);
+                }
+            }
+            Some(ConstantPoolEntry::Integer(v)) => cs.result.push_str(&v.to_string()),
+            Some(ConstantPoolEntry::Long(v)) => cs.result.push_str(&v.to_string()),
+            Some(ConstantPoolEntry::Float(v)) => {
+                if v.is_infinite() {
+                    cs.result.push_str(if *v > 0.0 { "Infinity" } else { "-Infinity" });
+                } else if v.is_nan() {
+                    cs.result.push_str("NaN");
+                } else {
+                    cs.result.push_str(&v.to_string());
+                }
+            }
+            Some(ConstantPoolEntry::Double(v)) => {
+                if v.is_infinite() {
+                    cs.result.push_str(if *v > 0.0 { "Infinity" } else { "-Infinity" });
+                } else if v.is_nan() {
+                    cs.result.push_str("NaN");
+                } else {
+                    cs.result.push_str(&v.to_string());
+                }
+            }
+            Some(ConstantPoolEntry::Utf8(s)) => cs.result.push_str(s),
+            Some(ConstantPoolEntry::Class { name_index }) => {
+                if let Some(ConstantPoolEntry::Utf8(s)) = cs.cp.get(*name_index as usize) {
+                    cs.result.push_str(s);
+                }
+            }
+            _ => {}
+        }
+    }
+}

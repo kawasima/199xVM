@@ -7,47 +7,9 @@ use super::descriptors::*;
 use super::frame::*;
 
 impl Vm {
-    pub(super) fn run_frame(
-        &mut self,
-        frame: &mut Frame,
-        code: &[u8],
-        cp: &[ConstantPoolEntry],
-        class_name: &str,
-        bootstrap_methods: &[BootstrapMethod],
-        exception_table: &[ExceptionTableEntry],
-    ) -> Result<JValue, String> {
-        loop {
-            if frame.pc >= code.len() {
-                return Err(format!("Execution fell off end of method in {class_name}"));
-            }
-            let opcode_pc = frame.pc; // PC of the current instruction (for exception table lookup)
-            let opcode = code[frame.pc];
-            frame.pc += 1;
-
-            // Wrap opcode execution to catch exceptions and search exception_table.
-            let result = self.execute_opcode(frame, code, cp, class_name, bootstrap_methods, exception_table, opcode);
-            match result {
-                Ok(Some(ret)) => return Ok(ret),  // method returned a value
-                Ok(None) => continue,              // opcode executed, continue loop
-                Err(err_msg) => {
-                    // Try to find an exception handler in the exception_table.
-                    if let Some((handler_pc, exc_obj)) = self.find_exception_handler(
-                        frame, exception_table, cp, opcode_pc, &err_msg,
-                    ) {
-                        frame.stack.clear();
-                        frame.stack.push(exc_obj);
-                        frame.pc = handler_pc;
-                        continue;
-                    }
-                    return Err(err_msg);
-                }
-            }
-        }
-    }
-
     /// Search exception_table for a matching handler.
     /// Returns (handler_pc, exception_object) if found.
-    fn find_exception_handler(
+    pub(crate) fn find_exception_handler(
         &mut self,
         _frame: &Frame,
         exception_table: &[ExceptionTableEntry],
@@ -130,7 +92,7 @@ impl Vm {
     /// - Ok(Some(value)) if the method returns
     /// - Ok(None) if execution should continue
     /// - Err(msg) if an exception was thrown
-    fn execute_opcode(
+    pub(crate) fn execute_opcode(
         &mut self,
         frame: &mut Frame,
         code: &[u8],
@@ -756,51 +718,35 @@ impl Vm {
                 }
 
                 // ---- Method invocation ----
+                // dispatch_* methods now return Ok(None) always. They either:
+                //   (a) store a FrameInfo in self.pending_frame for the trampoline, or
+                //   (b) execute native inline and push the result onto frame.stack.
                 0xb6 => { // invokevirtual
                     let idx = read_u16(code, &mut frame.pc);
-                    let result = self.dispatch_virtual(cp, idx, frame).map_err(|e| {
-                        if e.starts_with("NullPointerException") {
-                            format!("{e} in {class_name}")
-                        } else {
-                            e
-                        }
+                    self.dispatch_virtual(cp, idx, frame).map_err(|e| {
+                        if e.starts_with("NullPointerException") { format!("{e} in {class_name}") } else { e }
                     })?;
-                    if !matches!(result, JValue::Void) { frame.stack.push(result); }
                 }
                 0xb7 => { // invokespecial
                     let idx = read_u16(code, &mut frame.pc);
-                    let result = self.dispatch_special(cp, idx, frame).map_err(|e| {
-                        if e.starts_with("NullPointerException") {
-                            format!("{e} in {class_name}")
-                        } else {
-                            e
-                        }
+                    self.dispatch_special(cp, idx, frame).map_err(|e| {
+                        if e.starts_with("NullPointerException") { format!("{e} in {class_name}") } else { e }
                     })?;
-                    if !matches!(result, JValue::Void) { frame.stack.push(result); }
                 }
                 0xb8 => { // invokestatic
                     let idx = read_u16(code, &mut frame.pc);
-                    let result = self.dispatch_static(cp, idx, frame)?;
-                    if !matches!(result, JValue::Void) { frame.stack.push(result); }
+                    self.dispatch_static(cp, idx, frame)?;
                 }
                 0xb9 => { // invokeinterface
                     let idx = read_u16(code, &mut frame.pc);
                     frame.pc += 2; // count + 0
-                    let result = self.dispatch_interface(cp, idx, frame).map_err(|e| {
-                        if e.starts_with("NullPointerException") {
-                            format!("{e} in {class_name}")
-                        } else {
-                            e
-                        }
+                    self.dispatch_interface(cp, idx, frame).map_err(|e| {
+                        if e.starts_with("NullPointerException") { format!("{e} in {class_name}") } else { e }
                     })?;
-                    if !matches!(result, JValue::Void) { frame.stack.push(result); }
                 }
                 0xba => { // invokedynamic
                     let idx = read_u16(code, &mut frame.pc);
                     frame.pc += 2; // reserved bytes
-                    // NOTE: JVMS §6.5.invokedynamic says CallSite should be cached per instruction.
-                    // Our VM doesn't use CallSite indirection, so caching isn't applicable here.
-                    // This is a performance concern only; correctness is unaffected.
                     let result = self.dispatch_invokedynamic(cp, idx, frame, class_name, bootstrap_methods)?;
                     if !matches!(result, JValue::Void) { frame.stack.push(result); }
                 }

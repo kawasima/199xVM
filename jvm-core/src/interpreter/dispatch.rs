@@ -2,25 +2,49 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::class_file::{BootstrapMethod, ConstantPoolEntry};
-use crate::heap::{JObject, JValue, NativePayload};
+use crate::heap::{JObject, JRef, JValue, NativePayload};
 
 use super::Vm;
 use super::descriptors::*;
 use super::frame::*;
 
+
 impl Vm {
+    // -----------------------------------------------------------------------
+    // Trampoline-compatible dispatch methods.
+    // These pop args from the operand stack, then either:
+    //   - Build a FrameInfo and store it in self.pending_frame (bytecode method)
+    //   - Call native inline and push the result onto the frame's stack
+    // Returns Ok(None) always (the result is either pushed inline or deferred).
+    // -----------------------------------------------------------------------
+
     pub(super) fn dispatch_static(
         &mut self,
         cp: &[ConstantPoolEntry],
         idx: u16,
         frame: &mut Frame,
-    ) -> Result<JValue, String> {
+    ) -> Result<Option<JValue>, String> {
         let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
-        // Per JVMS §5.5: invokestatic triggers class initialization.
         self.ensure_class_init(&class_name)?;
         let n_args = count_args(&descriptor);
         let args = pop_args(frame, n_args);
-        self.invoke_static(&class_name, &method_name, &descriptor, args)
+
+        // Try to build a bytecode frame.
+        let push_return = !descriptor.ends_with(")V");
+        match self.build_static_frame(&class_name, &method_name, &descriptor, args.clone(), push_return)? {
+            Some(fi) => {
+                self.pending_frame = Some(fi);
+                Ok(None)
+            }
+            None => {
+                // Native fallback.
+                let result = self.invoke_static(&class_name, &method_name, &descriptor, args)?;
+                if !matches!(result, JValue::Void) {
+                    frame.stack.push(result);
+                }
+                Ok(None)
+            }
+        }
     }
 
     pub(super) fn dispatch_virtual(
@@ -28,18 +52,46 @@ impl Vm {
         cp: &[ConstantPoolEntry],
         idx: u16,
         frame: &mut Frame,
-    ) -> Result<JValue, String> {
+    ) -> Result<Option<JValue>, String> {
         let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
         let n_args = count_args(&descriptor);
         let args = pop_args(frame, n_args);
         let this_val = frame.stack.pop().unwrap();
         match this_val {
-            JValue::Ref(Some(r)) => self.invoke_virtual(r, &class_name, &method_name, &descriptor, args),
+            JValue::Ref(Some(r)) => {
+                let push_return = !descriptor.ends_with(")V");
+                self.dispatch_virtual_on_ref(r, &class_name, &method_name, &descriptor, args, push_return, frame)
+            }
             JValue::Ref(None) => Err(format!("NullPointerException: invokevirtual {class_name}.{method_name}{descriptor}")),
-            other => {
-                Err(format!(
-                    "Expected reference for invokevirtual {class_name}.{method_name}{descriptor}, got {other:?}"
-                ))
+            other => Err(format!(
+                "Expected reference for invokevirtual {class_name}.{method_name}{descriptor}, got {other:?}"
+            )),
+        }
+    }
+
+    /// Shared logic for virtual dispatch (used by dispatch_virtual and dispatch_interface).
+    fn dispatch_virtual_on_ref(
+        &mut self,
+        r: JRef,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+        args: Vec<JValue>,
+        push_return: bool,
+        frame: &mut Frame,
+    ) -> Result<Option<JValue>, String> {
+        match self.build_virtual_frame_inner(r.clone(), class_name, method_name, descriptor, args.clone(), push_return)? {
+            Some(fi) => {
+                self.pending_frame = Some(fi);
+                Ok(None)
+            }
+            None => {
+                // Native or lambda — fall back to recursive invoke_virtual.
+                let result = self.invoke_virtual(r, class_name, method_name, descriptor, args)?;
+                if !matches!(result, JValue::Void) {
+                    frame.stack.push(result);
+                }
+                Ok(None)
             }
         }
     }
@@ -49,31 +101,38 @@ impl Vm {
         cp: &[ConstantPoolEntry],
         idx: u16,
         frame: &mut Frame,
-    ) -> Result<JValue, String> {
+    ) -> Result<Option<JValue>, String> {
         let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
         let n_args = count_args(&descriptor);
         let args = pop_args(frame, n_args);
         let this_val = frame.stack.pop().unwrap();
         match this_val {
             JValue::Ref(Some(r)) => {
-                // invokespecial does NOT do virtual dispatch — it calls the exact class
-                // specified in the constant pool. This is critical for super.<init>() calls.
                 if method_name == "<init>" {
-                    // String constructors must be handled natively since String
-                    // content is managed by NativePayload::JavaString.
                     if class_name == "java/lang/String" {
                         let s = self.string_from_init_args(&descriptor, &args, &r);
                         r.borrow_mut().native = NativePayload::JavaString(s);
-                        return Ok(JValue::Void);
+                        return Ok(None); // void
                     }
                     let has_method = self.method_exists(&class_name, &method_name, &descriptor);
                     if !has_method {
-                        // Constructor not in bundle — no-op fallback.
-                        return Ok(JValue::Void);
+                        return Ok(None); // no-op
                     }
                 }
-                // Use invoke_special (non-virtual) instead of invoke_virtual.
-                self.invoke_special(r, &class_name, &method_name, &descriptor, args)
+                let push_return = !descriptor.ends_with(")V");
+                match self.build_special_frame_inner(r.clone(), &class_name, &method_name, &descriptor, args.clone(), push_return)? {
+                    Some(fi) => {
+                        self.pending_frame = Some(fi);
+                        Ok(None)
+                    }
+                    None => {
+                        let result = self.invoke_special(r, &class_name, &method_name, &descriptor, args)?;
+                        if !matches!(result, JValue::Void) {
+                            frame.stack.push(result);
+                        }
+                        Ok(None)
+                    }
+                }
             }
             JValue::Ref(None) => Err(format!("NullPointerException: invokespecial {class_name}.{method_name}{descriptor}")),
             other => Err(format!(
@@ -87,23 +146,37 @@ impl Vm {
         cp: &[ConstantPoolEntry],
         idx: u16,
         frame: &mut Frame,
-    ) -> Result<JValue, String> {
+    ) -> Result<Option<JValue>, String> {
         let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
         let n_args = count_args(&descriptor);
         let args = pop_args(frame, n_args);
 
-        // Static interface methods (e.g. List.of()) have no receiver on the stack.
-        // Detect by checking if the method exists as a static method in the interface class.
         let is_static = self.find_method_flags(&class_name, &method_name, &descriptor)
             .map(|flags| flags & 0x0008 != 0)
             .unwrap_or(false);
         if is_static {
-            return self.invoke_static(&class_name, &method_name, &descriptor, args);
+            let push_return = !descriptor.ends_with(")V");
+            match self.build_static_frame(&class_name, &method_name, &descriptor, args.clone(), push_return)? {
+                Some(fi) => {
+                    self.pending_frame = Some(fi);
+                    return Ok(None);
+                }
+                None => {
+                    let result = self.invoke_static(&class_name, &method_name, &descriptor, args)?;
+                    if !matches!(result, JValue::Void) {
+                        frame.stack.push(result);
+                    }
+                    return Ok(None);
+                }
+            }
         }
 
         let this_val = frame.stack.pop().unwrap();
         match this_val {
-            JValue::Ref(Some(r)) => self.invoke_virtual(r, &class_name, &method_name, &descriptor, args),
+            JValue::Ref(Some(r)) => {
+                let push_return = !descriptor.ends_with(")V");
+                self.dispatch_virtual_on_ref(r, &class_name, &method_name, &descriptor, args, push_return, frame)
+            }
             JValue::Ref(None) => Err(format!("NullPointerException: invokeinterface {class_name}.{method_name}{descriptor}")),
             other => Err(format!(
                 "Expected reference for invokeinterface {class_name}.{method_name}{descriptor}, got {other:?}"
