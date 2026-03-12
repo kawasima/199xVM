@@ -1373,8 +1373,21 @@ describe("Code generator", () => {
           MyFn f = x -> x + 1;
           return "" + f.apply(41);
         }
-      }`);
+    }`);
     assert.ok(bytes.length > 200, "bundle has content");
+  });
+
+  test("lambda rejects non-Object overload of equals in functional interface detection", () => {
+    assert.throws(() => compile(`public interface BadSam {
+      int apply(int x);
+      boolean equals(String s);
+    }
+    public class BadSamUse {
+      public static String run() {
+        BadSam f = x -> x + 1;
+        return "" + f.apply(1);
+      }
+    }`), /Unsupported functional interface/);
   });
 
   test("compiles switch expression with String labels", () => {
@@ -1750,6 +1763,18 @@ describe("Code generator", () => {
       }`));
   });
 
+  test("checked exception analysis picks constructor overload by argument types", () => {
+    assert.doesNotThrow(() => compile(`import java.io.IOException;
+      public class CheckedCtorOverload {
+        public CheckedCtorOverload(String s) throws IOException { throw new IOException(); }
+        public CheckedCtorOverload(int x) {}
+        public static String run() {
+          new CheckedCtorOverload(1);
+          return "ok";
+        }
+      }`));
+  });
+
   test("checked exception analysis does not predeclare later local names", () => {
     assert.throws(() => compile(`import java.io.IOException;
       public class UtilShadow {
@@ -1760,6 +1785,16 @@ describe("Code generator", () => {
           UtilShadow.fail();
           int UtilShadow = 1;
           return "" + UtilShadow;
+        }
+      }`), /Unhandled checked exception/);
+  });
+
+  test("checked exception throw infers type from non-new expression", () => {
+    assert.throws(() => compile(`import java.io.IOException;
+      public class CheckedThrowExpr {
+        public static IOException makeEx() { return new IOException(); }
+        public static String run() {
+          throw makeEx();
         }
       }`), /Unhandled checked exception/);
   });

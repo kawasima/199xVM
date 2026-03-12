@@ -655,24 +655,6 @@ function resolveMethodCandidateByTypes(
   return undefined;
 }
 
-function resolveDeclaredMethodInOwnerByTypes(
-  ctx: CompileContext,
-  ownerClass: string,
-  method: string,
-  argTypes: Type[],
-): MethodDecl | undefined {
-  const decl = ctx.classDecls.get(ownerClass);
-  if (!decl) return undefined;
-  const argDescs = argTypes.map(typeToDescriptor).join("");
-  const candidates = decl.methods.filter(mm => mm.name === method && mm.params.length === argTypes.length);
-  if (candidates.length === 0) return undefined;
-  const exactMatches = candidates.filter(mm => mm.params.map(p => typeToDescriptor(p.type)).join("") === argDescs);
-  if (exactMatches.length === 1) return exactMatches[0];
-  if (exactMatches.length > 1) throw new Error(`Ambiguous method overload: ${ownerClass}.${method}(${argDescs})`);
-  if (candidates.length === 1) return candidates[0];
-  throw new Error(`Ambiguous method overload: ${ownerClass}.${method}(${argDescs})`);
-}
-
 function resolveUnqualifiedMethodCandidate(
   ctx: CompileContext,
   method: string,
@@ -2023,12 +2005,23 @@ function descriptorToType(desc: string): Type {
   return { className: "java/lang/Object" };
 }
 
+const OBJECT_PUBLIC_INSTANCE_METHODS = new Set([
+  "toString()",
+  "hashCode()",
+  "equals(Ljava/lang/Object;)",
+  "getClass()",
+  "notify()",
+  "notifyAll()",
+  "wait()",
+  "wait(J)",
+  "wait(JI)",
+]);
+
 function functionalSigForType(ctx: CompileContext, t: Type): { ifaceName: string; sig: FunctionalSig } {
   if (!(typeof t === "object" && "className" in t)) {
     throw new Error("Lambda target type must be a functional interface");
   }
   const ifaceName = resolveClassName(ctx, t.className);
-  const objectMethodNames = new Set(["toString", "hashCode", "equals", "getClass", "notify", "notifyAll", "wait"]);
   const abstractMethods = new Map<string, FunctionalSig>();
   const visited = new Set<string>();
 
@@ -2041,9 +2034,9 @@ function functionalSigForType(ctx: CompileContext, t: Type): { ifaceName: string
       if (m.name === "<init>") continue;
       if (m.isStatic) continue;
       if (!m.isAbstract) continue;
-      if (objectMethodNames.has(m.name)) continue;
       const params = m.params.map(p => p.type);
       const key = `${m.name}(${params.map(typeToDescriptor).join("")})`;
+      if (OBJECT_PUBLIC_INSTANCE_METHODS.has(key)) continue;
       if (!abstractMethods.has(key)) {
         abstractMethods.set(key, { samMethod: m.name, params, returnType: m.returnType });
       }
@@ -3276,52 +3269,13 @@ function isClassSupertypeInMaps(
 }
 
 function isCheckedExceptionType(classSupers: Map<string, string>, exClass: string): boolean {
-  if (!isClassSupertypeInMaps(classSupers, "java/lang/Throwable", exClass)) return false;
-  if (isClassSupertypeInMaps(classSupers, "java/lang/RuntimeException", exClass)) return false;
-  if (isClassSupertypeInMaps(classSupers, "java/lang/Error", exClass)) return false;
+  const isThrowable = isClassSupertypeInMaps(classSupers, "java/lang/Throwable", exClass);
+  const isRuntime = isClassSupertypeInMaps(classSupers, "java/lang/RuntimeException", exClass);
+  const isError = isClassSupertypeInMaps(classSupers, "java/lang/Error", exClass);
+  // Fail closed for unknown refs: unless proven RuntimeException/Error, treat as checked.
+  if (!isThrowable) return true;
+  if (isRuntime || isError) return false;
   return true;
-}
-
-function collectLocalTypes(stmts: Stmt[], out: Map<string, Type>): void {
-  for (const s of stmts) {
-    switch (s.kind) {
-      case "varDecl":
-        out.set(s.name, s.type);
-        break;
-      case "if":
-        collectLocalTypes(s.then, out);
-        if (s.else_) collectLocalTypes(s.else_, out);
-        break;
-      case "while":
-      case "doWhile":
-      case "forEach":
-        collectLocalTypes(s.body, out);
-        break;
-      case "for":
-        if (s.init) collectLocalTypes([s.init], out);
-        collectLocalTypes(s.body, out);
-        if (s.update) collectLocalTypes([s.update], out);
-        break;
-      case "switch":
-        for (const c of s.cases) {
-          if (c.stmts) collectLocalTypes(c.stmts, out);
-        }
-        break;
-      case "tryCatch":
-        collectLocalTypes(s.tryBody, out);
-        for (const c of s.catches) collectLocalTypes(c.body, out);
-        if (s.finallyBody) collectLocalTypes(s.finallyBody, out);
-        break;
-      case "labeled":
-        collectLocalTypes([s.stmt], out);
-        break;
-      case "block":
-        collectLocalTypes(s.stmts, out);
-        break;
-      default:
-        break;
-    }
-  }
 }
 
 function findDeclaredMethodByArity(
@@ -3388,6 +3342,7 @@ function collectExprCheckedExceptions(
   classSupers: Map<string, string>,
   expr: Expr,
   localTypes: Map<string, Type>,
+  ownerIsStatic: boolean,
 ): Set<string> {
   const inferArgTypesForChecks = (args: Expr[]): Type[] => {
     const inferCtx = {
@@ -3402,7 +3357,7 @@ function collectExprCheckedExceptions(
       classSupers,
       classDecls,
       allMethods: classDecl.methods,
-      ownerIsStatic: true,
+      ownerIsStatic,
     } as unknown as CompileContext;
     return args.map(a => inferType(inferCtx, a));
   };
@@ -3424,15 +3379,15 @@ function collectExprCheckedExceptions(
 
   switch (expr.kind) {
     case "binary":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.left, localTypes));
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.right, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.left, localTypes, ownerIsStatic));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.right, localTypes, ownerIsStatic));
       break;
     case "unary":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.operand, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.operand, localTypes, ownerIsStatic));
       break;
     case "call":
-      if (expr.object) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.object, localTypes));
-      for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes));
+      if (expr.object) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.object, localTypes, ownerIsStatic));
+      for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes, ownerIsStatic));
       const callArgTypes = inferArgTypesForChecks(expr.args);
       if (!expr.object) {
         fromMethod(classDecl.name, expr.method, callArgTypes, undefined);
@@ -3454,7 +3409,7 @@ function collectExprCheckedExceptions(
       }
       break;
     case "staticCall":
-      for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes));
+      for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes, ownerIsStatic));
       fromMethod(
         resolveClassNameInDecl(classDecl, classDecls, expr.className),
         expr.method,
@@ -3463,50 +3418,51 @@ function collectExprCheckedExceptions(
       );
       break;
     case "fieldAccess":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.object, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.object, localTypes, ownerIsStatic));
       break;
     case "newExpr": {
-      for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes));
+      for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes, ownerIsStatic));
       const owner = resolveClassNameInDecl(classDecl, classDecls, expr.className);
-      const ctor = classDecls.get(owner)?.methods.find(m => m.name === "<init>" && m.params.length === expr.args.length);
+      const ctorArgTypes = inferArgTypesForChecks(expr.args);
+      const ctor = findDeclaredMethodByArity(classDecls, classSupers, owner, "<init>", ctorArgTypes, false);
       for (const t of ctor?.throwsTypes ?? []) addThrown(resolveClassNameInDecl(classDecl, classDecls, t));
       break;
     }
     case "cast":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.expr, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.expr, localTypes, ownerIsStatic));
       break;
     case "postIncrement":
     case "preIncrement":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.operand, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.operand, localTypes, ownerIsStatic));
       break;
     case "instanceof":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.expr, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.expr, localTypes, ownerIsStatic));
       break;
     case "arrayAccess":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.array, localTypes));
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.index, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.array, localTypes, ownerIsStatic));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.index, localTypes, ownerIsStatic));
       break;
     case "arrayLit":
-      for (const e of expr.elements) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, e, localTypes));
+      for (const e of expr.elements) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, e, localTypes, ownerIsStatic));
       break;
     case "newArray":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.size, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.size, localTypes, ownerIsStatic));
       break;
     case "ternary":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.cond, localTypes));
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.thenExpr, localTypes));
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.elseExpr, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.cond, localTypes, ownerIsStatic));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.thenExpr, localTypes, ownerIsStatic));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.elseExpr, localTypes, ownerIsStatic));
       break;
     case "switchExpr":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.selector, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.selector, localTypes, ownerIsStatic));
       for (const c of expr.cases) {
-        if (c.guard) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.guard, localTypes));
-        if (c.expr) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.expr, localTypes));
-        if (c.stmts) merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, c.stmts, new Map(localTypes)));
+        if (c.guard) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.guard, localTypes, ownerIsStatic));
+        if (c.expr) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.expr, localTypes, ownerIsStatic));
+        if (c.stmts) merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, c.stmts, new Map(localTypes), ownerIsStatic));
       }
       break;
     case "methodRef":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.target, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.target, localTypes, ownerIsStatic));
       break;
     default:
       break;
@@ -3520,11 +3476,12 @@ function collectStmtListCheckedExceptions(
   classSupers: Map<string, string>,
   stmts: Stmt[],
   localTypes: Map<string, Type>,
+  ownerIsStatic: boolean,
 ): Set<string> {
   const out = new Set<string>();
   const merge = (s: Set<string>) => { for (const e of s) out.add(e); };
   for (const s of stmts) {
-    merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, s, localTypes));
+    merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, s, localTypes, ownerIsStatic));
   }
   return out;
 }
@@ -3535,6 +3492,7 @@ function collectStmtCheckedExceptions(
   classSupers: Map<string, string>,
   stmt: Stmt,
   localTypes: Map<string, Type>,
+  ownerIsStatic: boolean,
 ): Set<string> {
   const out = new Set<string>();
   const merge = (s: Set<string>) => { for (const e of s) out.add(e); };
@@ -3543,71 +3501,88 @@ function collectStmtCheckedExceptions(
     if (!isCheckedExceptionType(classSupers, name)) return;
     out.add(name);
   };
+  const inferExprTypeForChecks = (expr: Expr): Type => {
+    const inferCtx = {
+      className: classDecl.name,
+      superClass: classDecl.superClass,
+      fields: classDecl.fields,
+      inheritedFields: [],
+      locals: Array.from(localTypes, ([name, type], idx) => ({ name, type, slot: idx })),
+      importMap: classDecl.importMap,
+      packageImports: classDecl.packageImports,
+      staticWildcardImports: classDecl.staticWildcardImports,
+      classSupers,
+      classDecls,
+      allMethods: classDecl.methods,
+      ownerIsStatic,
+    } as unknown as CompileContext;
+    return inferType(inferCtx, expr);
+  };
   switch (stmt.kind) {
     case "varDecl":
-      if (stmt.init) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.init, localTypes));
+      if (stmt.init) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.init, localTypes, ownerIsStatic));
       localTypes.set(stmt.name, stmt.type);
       break;
     case "assign":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.target, localTypes));
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.target, localTypes, ownerIsStatic));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes, ownerIsStatic));
       break;
     case "compoundAssign":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.target, localTypes));
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.target, localTypes, ownerIsStatic));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes, ownerIsStatic));
       break;
     case "exprStmt":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.expr, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.expr, localTypes, ownerIsStatic));
       break;
     case "return":
-      if (stmt.value) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes));
+      if (stmt.value) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes, ownerIsStatic));
       break;
     case "yield":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes, ownerIsStatic));
       break;
     case "if":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes));
-      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.then, new Map(localTypes)));
-      if (stmt.else_) merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.else_, new Map(localTypes)));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes, ownerIsStatic));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.then, new Map(localTypes), ownerIsStatic));
+      if (stmt.else_) merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.else_, new Map(localTypes), ownerIsStatic));
       break;
     case "while":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes));
-      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes)));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes, ownerIsStatic));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes), ownerIsStatic));
       break;
     case "for": {
       const scoped = new Map(localTypes);
-      if (stmt.init) merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, stmt.init, scoped));
-      if (stmt.cond) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, scoped));
-      if (stmt.update) merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, stmt.update, scoped));
-      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, scoped));
+      if (stmt.init) merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, stmt.init, scoped, ownerIsStatic));
+      if (stmt.cond) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, scoped, ownerIsStatic));
+      if (stmt.update) merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, stmt.update, scoped, ownerIsStatic));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, scoped, ownerIsStatic));
       break;
     }
     case "switch":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.selector, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.selector, localTypes, ownerIsStatic));
       for (const c of stmt.cases) {
-        if (c.guard) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.guard, localTypes));
-        if (c.expr) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.expr, localTypes));
-        if (c.stmts) merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, c.stmts, new Map(localTypes)));
+        if (c.guard) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.guard, localTypes, ownerIsStatic));
+        if (c.expr) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.expr, localTypes, ownerIsStatic));
+        if (c.stmts) merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, c.stmts, new Map(localTypes), ownerIsStatic));
       }
       break;
     case "doWhile":
-      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes)));
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes), ownerIsStatic));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes, ownerIsStatic));
       break;
     case "forEach":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.iterable, localTypes));
-      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes)));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.iterable, localTypes, ownerIsStatic));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes), ownerIsStatic));
       break;
     case "assert":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes));
-      if (stmt.message) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.message, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes, ownerIsStatic));
+      if (stmt.message) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.message, localTypes, ownerIsStatic));
       break;
     case "synchronized":
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.monitor, localTypes));
-      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes)));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.monitor, localTypes, ownerIsStatic));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes), ownerIsStatic));
       break;
     case "throw": {
-      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.expr, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.expr, localTypes, ownerIsStatic));
       if (stmt.expr.kind === "newExpr") {
         addThrown(resolveClassNameInDecl(classDecl, classDecls, stmt.expr.className));
       } else if (stmt.expr.kind === "ident") {
@@ -3616,11 +3591,16 @@ function collectStmtCheckedExceptions(
         if (t && typeof t === "object" && "className" in t) {
           addThrown(resolveClassNameInDecl(classDecl, classDecls, t.className));
         }
+      } else {
+        const exprType = (stmt.expr as any).staticType ?? (stmt.expr as any).type ?? inferExprTypeForChecks(stmt.expr);
+        if (exprType && typeof exprType === "object" && "className" in exprType) {
+          addThrown(resolveClassNameInDecl(classDecl, classDecls, exprType.className));
+        }
       }
       break;
     }
     case "tryCatch": {
-      const thrownTry = collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.tryBody, new Map(localTypes));
+      const thrownTry = collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.tryBody, new Map(localTypes), ownerIsStatic);
       for (const c of stmt.catches) {
         const catchType = resolveClassNameInDecl(classDecl, classDecls, c.exType);
         for (const e of Array.from(thrownTry)) {
@@ -3631,18 +3611,18 @@ function collectStmtCheckedExceptions(
       for (const c of stmt.catches) {
         const catchScope = new Map(localTypes);
         catchScope.set(c.varName, { className: resolveClassNameInDecl(classDecl, classDecls, c.exType) });
-        merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, c.body, catchScope));
+        merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, c.body, catchScope, ownerIsStatic));
       }
       if (stmt.finallyBody) {
-        merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.finallyBody, new Map(localTypes)));
+        merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.finallyBody, new Map(localTypes), ownerIsStatic));
       }
       break;
     }
     case "labeled":
-      merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, stmt.stmt, new Map(localTypes)));
+      merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, stmt.stmt, new Map(localTypes), ownerIsStatic));
       break;
     case "block":
-      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.stmts, new Map(localTypes)));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.stmts, new Map(localTypes), ownerIsStatic));
       break;
     default:
       break;
@@ -3660,7 +3640,7 @@ function validateCheckedExceptions(
   const localTypes = new Map<string, Type>();
   if (!method.isStatic) localTypes.set("this", { className: classDecl.name });
   for (const p of method.params) localTypes.set(p.name, p.type);
-  const uncaught = collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, method.body, localTypes);
+  const uncaught = collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, method.body, localTypes, method.isStatic);
   const declared = (method.throwsTypes ?? []).map(t => resolveClassNameInDecl(classDecl, classDecls, t));
   for (const ex of uncaught) {
     const covered = declared.some(d => isClassSupertypeInMaps(classSupers, d, ex));

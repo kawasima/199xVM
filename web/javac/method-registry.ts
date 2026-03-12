@@ -241,7 +241,17 @@ export interface FunctionalSig {
   returnType: Type;
 }
 
-const OBJECT_METHOD_NAMES = new Set(["toString", "hashCode", "equals", "getClass", "notify", "notifyAll", "wait"]);
+const OBJECT_PUBLIC_INSTANCE_METHODS = new Set([
+  "toString()",
+  "hashCode()",
+  "equals(Ljava/lang/Object;)",
+  "getClass()",
+  "notify()",
+  "notifyAll()",
+  "wait()",
+  "wait(J)",
+  "wait(JI)",
+]);
 
 /** Look up a method in knownMethods, falling back to name-only match if exact arg types don't match. */
 export function lookupKnownMethod(owner: string, method: string, argDescs: string): MethodSig | undefined {
@@ -291,9 +301,12 @@ export function findKnownFunctionalInterface(owner: string): FunctionalSig | und
   for (const key of Object.keys(knownMethods)) {
     if (!key.startsWith(prefix)) continue;
     const open = key.indexOf("(", prefix.length);
+    const end = key.indexOf(")", open + 1);
     if (open < 0) continue;
+    if (end < 0) continue;
     const methodName = key.slice(prefix.length, open);
-    if (methodName === "<init>" || OBJECT_METHOD_NAMES.has(methodName)) continue;
+    const signatureKey = `${methodName}(${key.slice(open + 1, end)})`;
+    if (methodName === "<init>" || OBJECT_PUBLIC_INSTANCE_METHODS.has(signatureKey)) continue;
     const sig = knownMethods[key];
     if (!sig.isInterface || sig.isStatic) continue;
     candidates.push({ name: methodName, sig });
