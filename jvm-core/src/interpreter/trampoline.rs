@@ -316,6 +316,9 @@ impl Vm {
                 Ok(None) => {}
             }
         }
+        if !self.scheduler.only_main_alive() {
+            return Err("Thread drain timeout: non-main threads still alive after main returned".to_owned());
+        }
         Ok(())
     }
 

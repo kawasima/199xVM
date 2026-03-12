@@ -233,7 +233,10 @@ impl Vm {
     ) -> Result<JValue, String> {
         // Reset scheduler to a clean single-main-thread state so that
         // invoke_static_threaded can be called multiple times on the same Vm.
+        // Also clear monitor/lock state tied to previous threads to avoid
+        // stale owners/waiters referring to dead thread IDs between runs.
         self.scheduler = super::Scheduler::new();
+        self.monitors.clear();
 
         let orig_args = args;
         let (resolved_desc, args) = match self.prepare_static_args(class_name, method_name, descriptor, orig_args.clone()) {
