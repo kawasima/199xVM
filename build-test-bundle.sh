@@ -8,13 +8,21 @@ OUT_FILE="$OUT_DIR/bundle.bin"
 
 mkdir -p "$OUT_DIR"
 
+# Ensure web/javac.js exists for compact source compilation
+if [ ! -f "web/javac.js" ]; then
+  echo "web/javac.js not found — building..."
+  npm run build:javac
+fi
+
 # Separate compact source files (no top-level class/interface/enum/record)
-# from normal Java files and compile accordingly.
+# from normal Java files. A file is "normal" if any non-import/package/comment
+# line contains a class-like declaration keyword.
 NORMAL_SOURCES=()
 COMPACT_SOURCES=()
 for f in "$SRC_DIR"/*.java; do
-  # Check for a class-like keyword at the top level (ignoring modifiers/imports/comments)
-  if grep -qE '^\s*(public\s+|abstract\s+|final\s+)*(class|interface|enum|record|@interface)\s' "$f"; then
+  # Strip package, import, blank, and single-line comment lines, then check for class keyword
+  if sed -E '/^\s*$/d; /^\s*\/\//d; /^\s*package\s/d; /^\s*import\s/d; /^\s*\/?\*/d' "$f" \
+     | grep -qE '^\s*(public\s+|abstract\s+|final\s+)*(class|interface|enum|record|@interface)\s'; then
     NORMAL_SOURCES+=("$f")
   else
     COMPACT_SOURCES+=("$f")
