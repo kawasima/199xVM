@@ -647,6 +647,16 @@ describe("Parser", () => {
     }`;
     assert.throws(() => parse(lex(src)));
   });
+
+  test("method throws clause is captured", () => {
+    const src = `public class ThrowsDecl {
+      public static void run() throws java.io.IOException {}
+    }`;
+    const cls = parse(lex(src));
+    const run = cls.methods.find(m => m.name === "run");
+    assert.ok(run);
+    assert.deepEqual(run.throwsTypes, ["java/io/IOException"]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1580,6 +1590,56 @@ describe("Code generator", () => {
         }
       }
     `), /Type mismatch/);
+  });
+
+  test("checked exception throw requires catch or throws", () => {
+    assert.throws(() => compile(`import java.io.IOException;
+    public class CheckedThrowBad {
+      public static String run() {
+        throw new IOException();
+      }
+    }`), /Unhandled checked exception/);
+  });
+
+  test("checked exception throw is allowed when declared", () => {
+    const bytes = compile(`import java.io.IOException;
+    public class CheckedThrowDecl {
+      public static String run() throws IOException {
+        throw new IOException();
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("checked exception from callee must be declared or caught", () => {
+    assert.throws(() => compile(`import java.io.IOException;
+    public class CheckedCallBad {
+      public static void mayThrow() throws IOException {
+        throw new IOException();
+      }
+      public static String run() {
+        mayThrow();
+        return "ng";
+      }
+    }`), /Unhandled checked exception/);
+  });
+
+  test("checked exception from callee can be caught", () => {
+    const bytes = compile(`import java.io.IOException;
+    public class CheckedCallCatch {
+      public static void mayThrow() throws IOException {
+        throw new IOException();
+      }
+      public static String run() {
+        try {
+          mayThrow();
+        } catch (IOException e) {
+          return "ok";
+        }
+        return "ng";
+      }
+    }`);
+    assertValidClassFile(bytes);
   });
 
   test("switch expression with null + total pattern is exhaustive for reference selector", () => {

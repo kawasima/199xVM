@@ -32,6 +32,7 @@ export interface MethodDecl {
   body: Stmt[];
   isStatic: boolean;
   isAbstract?: boolean;
+  throwsTypes?: string[];
 }
 
 export interface ParamDecl {

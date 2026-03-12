@@ -1947,6 +1947,11 @@ const BUILTIN_SUPERS: Record<string, string> = {
   "java/lang/StringBuilder": "java/lang/Object",
   "java/util/ArrayList": "java/lang/Object",
   "java/io/PrintStream": "java/lang/Object",
+  "java/lang/Throwable": "java/lang/Object",
+  "java/lang/Exception": "java/lang/Throwable",
+  "java/lang/RuntimeException": "java/lang/Exception",
+  "java/lang/Error": "java/lang/Throwable",
+  "java/io/IOException": "java/lang/Exception",
 };
 
 function toInternalClassName(ctx: CompileContext, t: Type): string | undefined {
@@ -3114,6 +3119,376 @@ function validateConstructorBody(method: MethodDecl): void {
   }
 }
 
+function resolveClassNameInDecl(classDecl: ClassDecl, classDecls: Map<string, ClassDecl>, name: string): string {
+  if (name.includes("/")) return name;
+  if (name.includes(".")) return name.replace(/\./g, "/");
+  const explicit = classDecl.importMap.get(name);
+  if (explicit) return explicit;
+  if (classDecls.has(name)) return name;
+  if (/^[A-Z]/.test(name) && classDecl.packageImports.length > 0) {
+    for (const pkg of classDecl.packageImports) {
+      const candidate = `${pkg}/${name}`;
+      if (hasKnownMethodOwnerPrefix(candidate)) return candidate;
+    }
+    return `${classDecl.packageImports[0]}/${name}`;
+  }
+  return name;
+}
+
+function isClassSupertypeInMaps(
+  classSupers: Map<string, string>,
+  maybeSuper: string,
+  maybeSub: string,
+): boolean {
+  if (maybeSuper === maybeSub) return true;
+  let cur = maybeSub;
+  const seen = new Set<string>();
+  while (!seen.has(cur)) {
+    seen.add(cur);
+    const next = classSupers.get(cur) ?? BUILTIN_SUPERS[cur];
+    if (!next) return false;
+    if (next === maybeSuper) return true;
+    cur = next;
+  }
+  return false;
+}
+
+function isCheckedExceptionType(classSupers: Map<string, string>, exClass: string): boolean {
+  if (!isClassSupertypeInMaps(classSupers, "java/lang/Throwable", exClass)) return false;
+  if (isClassSupertypeInMaps(classSupers, "java/lang/RuntimeException", exClass)) return false;
+  if (isClassSupertypeInMaps(classSupers, "java/lang/Error", exClass)) return false;
+  return true;
+}
+
+function collectLocalTypes(stmts: Stmt[], out: Map<string, Type>): void {
+  for (const s of stmts) {
+    switch (s.kind) {
+      case "varDecl":
+        out.set(s.name, s.type);
+        break;
+      case "if":
+        collectLocalTypes(s.then, out);
+        if (s.else_) collectLocalTypes(s.else_, out);
+        break;
+      case "while":
+      case "doWhile":
+      case "forEach":
+        collectLocalTypes(s.body, out);
+        break;
+      case "for":
+        if (s.init) collectLocalTypes([s.init], out);
+        collectLocalTypes(s.body, out);
+        if (s.update) collectLocalTypes([s.update], out);
+        break;
+      case "switch":
+        for (const c of s.cases) {
+          if (c.stmts) collectLocalTypes(c.stmts, out);
+        }
+        break;
+      case "tryCatch":
+        collectLocalTypes(s.tryBody, out);
+        for (const c of s.catches) collectLocalTypes(c.body, out);
+        if (s.finallyBody) collectLocalTypes(s.finallyBody, out);
+        break;
+      case "labeled":
+        collectLocalTypes([s.stmt], out);
+        break;
+      case "block":
+        collectLocalTypes(s.stmts, out);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+function findDeclaredMethodByArity(
+  classDecls: Map<string, ClassDecl>,
+  classSupers: Map<string, string>,
+  ownerClass: string,
+  methodName: string,
+  arity: number,
+  wantStatic: boolean | undefined,
+): MethodDecl | undefined {
+  const seen = new Set<string>();
+  let cur: string | undefined = ownerClass;
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    const decl = classDecls.get(cur);
+    if (decl) {
+      const found = decl.methods.find(m => m.name === methodName
+        && m.params.length === arity
+        && (wantStatic === undefined || m.isStatic === wantStatic));
+      if (found) return found;
+    }
+    cur = classSupers.get(cur) ?? BUILTIN_SUPERS[cur];
+  }
+  return undefined;
+}
+
+function collectExprCheckedExceptions(
+  classDecl: ClassDecl,
+  classDecls: Map<string, ClassDecl>,
+  classSupers: Map<string, string>,
+  expr: Expr,
+  localTypes: Map<string, Type>,
+): Set<string> {
+  const out = new Set<string>();
+  const merge = (s: Set<string>) => { for (const e of s) out.add(e); };
+  const addThrown = (name: string | undefined) => {
+    if (!name) return;
+    if (!isCheckedExceptionType(classSupers, name)) return;
+    out.add(name);
+  };
+  const fromMethod = (owner: string, name: string, arity: number, wantStatic: boolean | undefined) => {
+    const m = findDeclaredMethodByArity(classDecls, classSupers, owner, name, arity, wantStatic);
+    for (const t of m?.throwsTypes ?? []) {
+      const resolved = resolveClassNameInDecl(classDecl, classDecls, t);
+      addThrown(resolved);
+    }
+  };
+
+  switch (expr.kind) {
+    case "binary":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.left, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.right, localTypes));
+      break;
+    case "unary":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.operand, localTypes));
+      break;
+    case "call":
+      if (expr.object) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.object, localTypes));
+      for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes));
+      if (!expr.object) {
+        fromMethod(classDecl.name, expr.method, expr.args.length, undefined);
+      } else if (expr.object.kind === "this") {
+        fromMethod(classDecl.name, expr.method, expr.args.length, false);
+      } else if (expr.object.kind === "newExpr") {
+        const owner = resolveClassNameInDecl(classDecl, classDecls, expr.object.className);
+        fromMethod(owner, expr.method, expr.args.length, false);
+      } else if (expr.object.kind === "ident") {
+        const t = localTypes.get(expr.object.name);
+        if (t && typeof t === "object" && "className" in t) {
+          fromMethod(resolveClassNameInDecl(classDecl, classDecls, t.className), expr.method, expr.args.length, false);
+        } else {
+          const owner = resolveClassNameInDecl(classDecl, classDecls, expr.object.name);
+          if (owner !== expr.object.name) fromMethod(owner, expr.method, expr.args.length, true);
+        }
+      }
+      break;
+    case "staticCall":
+      for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes));
+      fromMethod(resolveClassNameInDecl(classDecl, classDecls, expr.className), expr.method, expr.args.length, true);
+      break;
+    case "fieldAccess":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.object, localTypes));
+      break;
+    case "newExpr": {
+      for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes));
+      const owner = resolveClassNameInDecl(classDecl, classDecls, expr.className);
+      const ctor = classDecls.get(owner)?.methods.find(m => m.name === "<init>" && m.params.length === expr.args.length);
+      for (const t of ctor?.throwsTypes ?? []) addThrown(resolveClassNameInDecl(classDecl, classDecls, t));
+      break;
+    }
+    case "cast":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.expr, localTypes));
+      break;
+    case "postIncrement":
+    case "preIncrement":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.operand, localTypes));
+      break;
+    case "instanceof":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.expr, localTypes));
+      break;
+    case "arrayAccess":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.array, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.index, localTypes));
+      break;
+    case "arrayLit":
+      for (const e of expr.elements) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, e, localTypes));
+      break;
+    case "newArray":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.size, localTypes));
+      break;
+    case "ternary":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.cond, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.thenExpr, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.elseExpr, localTypes));
+      break;
+    case "switchExpr":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.selector, localTypes));
+      for (const c of expr.cases) {
+        if (c.guard) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.guard, localTypes));
+        if (c.expr) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.expr, localTypes));
+        if (c.stmts) merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, c.stmts, new Map(localTypes)));
+      }
+      break;
+    case "methodRef":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.target, localTypes));
+      break;
+    default:
+      break;
+  }
+  return out;
+}
+
+function collectStmtListCheckedExceptions(
+  classDecl: ClassDecl,
+  classDecls: Map<string, ClassDecl>,
+  classSupers: Map<string, string>,
+  stmts: Stmt[],
+  localTypes: Map<string, Type>,
+): Set<string> {
+  const out = new Set<string>();
+  const merge = (s: Set<string>) => { for (const e of s) out.add(e); };
+  for (const s of stmts) {
+    merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, s, localTypes));
+  }
+  return out;
+}
+
+function collectStmtCheckedExceptions(
+  classDecl: ClassDecl,
+  classDecls: Map<string, ClassDecl>,
+  classSupers: Map<string, string>,
+  stmt: Stmt,
+  localTypes: Map<string, Type>,
+): Set<string> {
+  const out = new Set<string>();
+  const merge = (s: Set<string>) => { for (const e of s) out.add(e); };
+  const addThrown = (name: string | undefined) => {
+    if (!name) return;
+    if (!isCheckedExceptionType(classSupers, name)) return;
+    out.add(name);
+  };
+  switch (stmt.kind) {
+    case "varDecl":
+      if (stmt.init) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.init, localTypes));
+      localTypes.set(stmt.name, stmt.type);
+      break;
+    case "assign":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.target, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes));
+      break;
+    case "compoundAssign":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.target, localTypes));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes));
+      break;
+    case "exprStmt":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.expr, localTypes));
+      break;
+    case "return":
+      if (stmt.value) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes));
+      break;
+    case "yield":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.value, localTypes));
+      break;
+    case "if":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.then, new Map(localTypes)));
+      if (stmt.else_) merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.else_, new Map(localTypes)));
+      break;
+    case "while":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes)));
+      break;
+    case "for": {
+      const scoped = new Map(localTypes);
+      if (stmt.init) merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, stmt.init, scoped));
+      if (stmt.cond) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, scoped));
+      if (stmt.update) merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, stmt.update, scoped));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, scoped));
+      break;
+    }
+    case "switch":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.selector, localTypes));
+      for (const c of stmt.cases) {
+        if (c.guard) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.guard, localTypes));
+        if (c.expr) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, c.expr, localTypes));
+        if (c.stmts) merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, c.stmts, new Map(localTypes)));
+      }
+      break;
+    case "doWhile":
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes)));
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes));
+      break;
+    case "forEach":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.iterable, localTypes));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes)));
+      break;
+    case "assert":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.cond, localTypes));
+      if (stmt.message) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.message, localTypes));
+      break;
+    case "synchronized":
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.monitor, localTypes));
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.body, new Map(localTypes)));
+      break;
+    case "throw": {
+      merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, stmt.expr, localTypes));
+      if (stmt.expr.kind === "newExpr") {
+        addThrown(resolveClassNameInDecl(classDecl, classDecls, stmt.expr.className));
+      } else if (stmt.expr.kind === "ident") {
+        if (stmt.expr.name.startsWith("\u0001twr_")) break;
+        const t = localTypes.get(stmt.expr.name);
+        if (t && typeof t === "object" && "className" in t) {
+          addThrown(resolveClassNameInDecl(classDecl, classDecls, t.className));
+        }
+      }
+      break;
+    }
+    case "tryCatch": {
+      const thrownTry = collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.tryBody, new Map(localTypes));
+      for (const c of stmt.catches) {
+        const catchType = resolveClassNameInDecl(classDecl, classDecls, c.exType);
+        for (const e of Array.from(thrownTry)) {
+          if (isClassSupertypeInMaps(classSupers, catchType, e)) thrownTry.delete(e);
+        }
+      }
+      merge(thrownTry);
+      for (const c of stmt.catches) {
+        const catchScope = new Map(localTypes);
+        catchScope.set(c.varName, { className: resolveClassNameInDecl(classDecl, classDecls, c.exType) });
+        merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, c.body, catchScope));
+      }
+      if (stmt.finallyBody) {
+        merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.finallyBody, new Map(localTypes)));
+      }
+      break;
+    }
+    case "labeled":
+      merge(collectStmtCheckedExceptions(classDecl, classDecls, classSupers, stmt.stmt, new Map(localTypes)));
+      break;
+    case "block":
+      merge(collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, stmt.stmts, new Map(localTypes)));
+      break;
+    default:
+      break;
+  }
+  return out;
+}
+
+function validateCheckedExceptions(
+  classDecl: ClassDecl,
+  method: MethodDecl,
+  classDecls: Map<string, ClassDecl>,
+  classSupers: Map<string, string>,
+): void {
+  if (method.name.startsWith("lambda$")) return;
+  const localTypes = new Map<string, Type>();
+  if (!method.isStatic) localTypes.set("this", { className: classDecl.name });
+  for (const p of method.params) localTypes.set(p.name, p.type);
+  collectLocalTypes(method.body, localTypes);
+  const uncaught = collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, method.body, localTypes);
+  const declared = (method.throwsTypes ?? []).map(t => resolveClassNameInDecl(classDecl, classDecls, t));
+  for (const ex of uncaught) {
+    const covered = declared.some(d => isClassSupertypeInMaps(classSupers, d, ex));
+    if (!covered) {
+      throw new Error(`Unhandled checked exception in ${classDecl.name}.${method.name}: ${ex}`);
+    }
+  }
+}
+
 // Produce bundle bytes for all classes in source.
 // Bundle format: for each class, 4-byte big-endian length followed by .class bytes.
 // For a single class, returns just the raw .class bytes (backward compat with index.html).
@@ -3210,6 +3585,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   for (let mi = 0; mi < methodQueue.length; mi++) {
     const method = methodQueue[mi];
     validateConstructorBody(method);
+    validateCheckedExceptions(classDecl, method, classDecls, classSupers);
     const nameIdx = cp.addUtf8(method.name);
     const desc = isEnumClass && method.name === "<init>"
       ? enumConstructorDescriptor(method.params.map(p => p.type))
