@@ -167,10 +167,21 @@ impl super::Vm {
     /// Returns true if `class_name` is `java/lang/ClassLoader` or a subclass of it
     /// (i.e., the resolved owner declared the method as a ClassLoader method).
     fn is_classloader_subtype(&mut self, class_name: &str) -> bool {
+        let mut visited = std::collections::HashSet::new();
+        self.is_classloader_subtype_inner(class_name, &mut visited)
+    }
+
+    fn is_classloader_subtype_inner(
+        &mut self,
+        class_name: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
         if class_name == "java/lang/ClassLoader" {
             return true;
         }
-        // Walk super chain to check if ClassLoader is an ancestor.
+        if !visited.insert(class_name.to_owned()) {
+            return false; // cycle guard
+        }
         self.ensure_class_ready(class_name);
         let super_name = self.get_class(class_name).and_then(|cf| {
             if cf.super_class != 0 {
@@ -180,8 +191,8 @@ impl super::Vm {
             }
         });
         match super_name {
-            Some(s) if s != class_name => self.is_classloader_subtype(&s),
-            _ => false,
+            Some(s) => self.is_classloader_subtype_inner(&s, visited),
+            None => false,
         }
     }
 
