@@ -888,6 +888,20 @@ describe("Parser", () => {
     assert.ok(run);
     assert.deepEqual(run.throwsTypes, ["java/io/IOException"]);
   });
+  test("synchronized method modifier", () => {
+    const src = `public class Sync {
+      public synchronized void foo() {}
+      public static synchronized int bar() { return 1; }
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.methods.length, 2);
+    assert.equal(cls.methods[0].name, "foo");
+    assert.equal(cls.methods[0].isSynchronized, true);
+    assert.equal(cls.methods[0].isStatic, false);
+    assert.equal(cls.methods[1].name, "bar");
+    assert.equal(cls.methods[1].isSynchronized, true);
+    assert.equal(cls.methods[1].isStatic, true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1192,6 +1206,26 @@ describe("Code generator", () => {
     assert.equal(enumFields.length, 2, "expected two enum constant fields");
     const enumFieldNames = enumFields.map(f => f.name).sort();
     assert.deepEqual(enumFieldNames, ["GREEN", "RED"], "enum constants RED and GREEN present");
+  });
+
+  test("compiles ACC_SYNCHRONIZED method flag", () => {
+    const bytes = compile(`public class Sync {
+      public synchronized void foo() {}
+      public static synchronized int bar() { return 1; }
+      public void baz() {}
+    }`);
+    assertValidClassFile(bytes);
+    const meta = parseClassMeta(bytes);
+    const foo = meta.methods.find(m => m.name === "foo");
+    const bar = meta.methods.find(m => m.name === "bar");
+    const baz = meta.methods.find(m => m.name === "baz");
+    assert.ok(foo, "foo method exists");
+    assert.ok((foo!.accessFlags & 0x0020) !== 0, "foo has ACC_SYNCHRONIZED");
+    assert.ok(bar, "bar method exists");
+    assert.ok((bar!.accessFlags & 0x0020) !== 0, "bar has ACC_SYNCHRONIZED");
+    assert.ok((bar!.accessFlags & 0x0008) !== 0, "bar has ACC_STATIC");
+    assert.ok(baz, "baz method exists");
+    assert.ok((baz!.accessFlags & 0x0020) === 0, "baz does NOT have ACC_SYNCHRONIZED");
   });
 
   test("compiles generic class declaration with implements", () => {
