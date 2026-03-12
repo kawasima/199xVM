@@ -1281,8 +1281,33 @@ describe("Code generator", () => {
           Object b = f.apply("z");
           return "" + b;
         }
+    }`);
+    assert.ok(bytes.length > 200, "bundle has content");
+  });
+
+  test("declared method resolution prefers superclass over interface defaults", () => {
+    const bytes = compile(`public interface I {
+        default String m() { return "i"; }
+      }
+      public class A {
+        public String m() { return "a"; }
+      }
+      public class B extends A implements I {
+        public static String run() {
+          B b = new B();
+          return b.m();
+        }
       }`);
     assert.ok(bytes.length > 200, "bundle has content");
+  });
+
+  test("declared method resolution matches exact overload by descriptor", async () => {
+    const result = await runSnippet(`public class OverloadPick {
+        public static String f(int x) { return "int"; }
+        public static String f(String s) { return "str"; }
+        public static String run() { return OverloadPick.f("x"); }
+      }`, "OverloadPick");
+    assert.equal(result, "str");
   });
 
   test("compiles switch statement with int labels", () => {
@@ -1640,6 +1665,38 @@ describe("Code generator", () => {
       }
     }`);
     assertValidClassFile(bytes);
+  });
+
+  test("checked exception propagates from inherited interface method", () => {
+    assert.throws(() => compile(`import java.io.IOException;
+      public interface ParentEx {
+        void boom() throws IOException;
+      }
+      public interface ChildEx extends ParentEx {}
+      public class ImplEx implements ChildEx {
+        public void boom() throws IOException {
+          throw new IOException();
+        }
+        public static String run(ChildEx c) {
+          c.boom();
+          return "ng";
+        }
+      }`), /Unhandled checked exception/);
+  });
+
+  test("checked exception tracks static call to same-unit class ref", () => {
+    assert.throws(() => compile(`import java.io.IOException;
+      public class UtilEx {
+        public static void fail() throws IOException {
+          throw new IOException();
+        }
+      }
+      public class StaticRefEx {
+        public static String run() {
+          UtilEx.fail();
+          return "ng";
+        }
+      }`), /Unhandled checked exception/);
   });
 
   test("switch expression with null + total pattern is exhaustive for reference selector", () => {
