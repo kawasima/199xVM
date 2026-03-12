@@ -229,10 +229,17 @@ impl Vm {
     /// `name` should be the runtime (dot-separated) class name.
     pub(in crate::interpreter) fn throw_class_not_found(&mut self, name: &str) {
         let exc = JObject::new("java/lang/ClassNotFoundException");
-        exc.borrow_mut().fields.insert(
-            "detailMessage".to_owned(),
-            JValue::Ref(Some(self.intern_string(name.to_owned()))),
-        );
+        let msg = self.intern_string(name.to_owned());
+        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        self.pending_exception = Some(exc);
+    }
+
+    /// Set `pending_exception` to a `ClassFormatError` carrying the parse error message.
+    /// Used when a class entry exists as `LazyClass::ParseError` (malformed bytecode).
+    pub(in crate::interpreter) fn throw_class_format_error(&mut self, parse_msg: &str) {
+        let exc = JObject::new("java/lang/ClassFormatError");
+        let msg = self.intern_string(parse_msg.to_owned());
+        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
         self.pending_exception = Some(exc);
     }
 

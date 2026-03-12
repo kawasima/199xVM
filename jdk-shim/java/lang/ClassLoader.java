@@ -9,8 +9,10 @@ public class ClassLoader {
         return loadClass(name, false);
     }
 
+    // Simplified parent-delegation: checks the local registry via native stubs only.
+    // No parent-loader chain and no link-resolution step (the 'resolve' flag is ignored)
+    // — both are intentional simplifications for 199xVM's pre-bundled class model.
     protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
-        // The 'resolve' flag (link resolution) is intentionally ignored — not applicable in 199xVM.
         Class<?> c = findLoadedClass(name);
         if (c == null) {
             c = findClass(name);

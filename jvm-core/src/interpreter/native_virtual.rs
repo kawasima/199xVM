@@ -164,6 +164,69 @@ impl super::Vm {
         }
     }
 
+    /// Returns true if `class_name` is `java/lang/ClassLoader` or a subclass of it
+    /// (i.e., the resolved owner declared the method as a ClassLoader method).
+    fn is_classloader_subtype(&mut self, class_name: &str) -> bool {
+        if class_name == "java/lang/ClassLoader" {
+            return true;
+        }
+        // Walk super chain to check if ClassLoader is an ancestor.
+        self.ensure_class_ready(class_name);
+        let super_name = self.get_class(class_name).and_then(|cf| {
+            if cf.super_class != 0 {
+                Some(cf.constant_pool.class_name(cf.super_class).to_owned())
+            } else {
+                None
+            }
+        });
+        match super_name {
+            Some(s) if s != class_name => self.is_classloader_subtype(&s),
+            _ => false,
+        }
+    }
+
+    /// Handle ClassLoader instance methods that must dispatch by resolved owner, not runtime class.
+    /// Returns `Some(value)` if the method was handled, `None` to fall through.
+    fn native_classloader(&mut self, method_name: &str, args: &[JValue]) -> Option<JValue> {
+        let name_str = args
+            .first()
+            .and_then(|v| v.as_ref())
+            .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+            .unwrap_or_default();
+        match method_name {
+            "loadClass" | "findClass" => {
+                let internal = Self::class_internal_name_from_runtime_name(&name_str);
+                self.ensure_class_ready(&internal);
+                match self.classes.get(&internal) {
+                    Some(LazyClass::Ready(_)) => {}
+                    Some(LazyClass::ParseError(msg)) => {
+                        let msg = msg.clone();
+                        self.throw_class_format_error(&msg);
+                        return Some(JValue::Void);
+                    }
+                    _ => {
+                        self.throw_class_not_found(&name_str);
+                        return Some(JValue::Void);
+                    }
+                }
+                Some(JValue::Ref(Some(self.class_object(internal))))
+            }
+            "findLoadedClass" => {
+                let internal = Self::class_internal_name_from_runtime_name(&name_str);
+                if matches!(self.classes.get(&internal), Some(LazyClass::Ready(_))) {
+                    Some(JValue::Ref(Some(self.class_object(internal))))
+                } else {
+                    Some(JValue::Ref(None))
+                }
+            }
+            "defineClass" => {
+                // Dynamic bytecode injection is not supported; return null.
+                Some(JValue::Ref(None))
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn native_virtual(
         &mut self,
         this: &JRef,
@@ -183,6 +246,13 @@ impl super::Vm {
                     return Some(JValue::Ref(Some(self.class_object(runtime_class))));
                 }
                 _ => {}
+            }
+        }
+        // ClassLoader methods must dispatch on the resolved owner (`_class_name`), not the
+        // runtime class of `this`, so that subclasses of ClassLoader also hit these stubs.
+        if self.is_classloader_subtype(_class_name) {
+            if let Some(v) = self.native_classloader(method_name, _args) {
+                return Some(v);
             }
         }
         let cn = this.borrow().class_name.clone();
@@ -215,51 +285,6 @@ impl super::Vm {
                 };
                 let ok = if regex == ".*" { true } else { regex == input };
                 Some(JValue::Int(if ok { 1 } else { 0 }))
-            }
-            ("java/lang/ClassLoader", "loadClass") => {
-                let name = _args
-                    .first()
-                    .and_then(|v| v.as_ref())
-                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
-                    .unwrap_or_default();
-                let internal = Self::class_internal_name_from_runtime_name(&name);
-                self.ensure_class_ready(&internal);
-                if self.get_class(&internal).is_none() {
-                    self.throw_class_not_found(&name);
-                    return Some(JValue::Void);
-                }
-                Some(JValue::Ref(Some(self.class_object(internal))))
-            }
-            ("java/lang/ClassLoader", "findLoadedClass") => {
-                let name = _args
-                    .first()
-                    .and_then(|v| v.as_ref())
-                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
-                    .unwrap_or_default();
-                let internal = Self::class_internal_name_from_runtime_name(&name);
-                if matches!(self.classes.get(&internal), Some(LazyClass::Ready(_))) {
-                    Some(JValue::Ref(Some(self.class_object(internal))))
-                } else {
-                    Some(JValue::Ref(None))
-                }
-            }
-            ("java/lang/ClassLoader", "findClass") => {
-                let name = _args
-                    .first()
-                    .and_then(|v| v.as_ref())
-                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
-                    .unwrap_or_default();
-                let internal = Self::class_internal_name_from_runtime_name(&name);
-                self.ensure_class_ready(&internal);
-                if self.get_class(&internal).is_none() {
-                    self.throw_class_not_found(&name);
-                    return Some(JValue::Void);
-                }
-                Some(JValue::Ref(Some(self.class_object(internal))))
-            }
-            ("java/lang/ClassLoader", "defineClass") => {
-                // Dynamic bytecode injection is not supported; return null.
-                Some(JValue::Ref(None))
             }
             ("java/lang/Class", "getName") => {
                 let internal = self

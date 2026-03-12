@@ -151,9 +151,17 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))?;
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
                 self.ensure_class_ready(&internal);
-                if self.get_class(&internal).is_none() {
-                    self.throw_class_not_found(&runtime_name);
-                    return Some(JValue::Void);
+                match self.classes.get(&internal) {
+                    Some(super::LazyClass::Ready(_)) => {}
+                    Some(super::LazyClass::ParseError(msg)) => {
+                        let msg = msg.clone();
+                        self.throw_class_format_error(&msg);
+                        return Some(JValue::Void);
+                    }
+                    _ => {
+                        self.throw_class_not_found(&runtime_name);
+                        return Some(JValue::Void);
+                    }
                 }
                 Some(JValue::Ref(Some(self.class_object(internal))))
             }
