@@ -1319,6 +1319,36 @@ describe("Code generator", () => {
     assert.equal(result, "str");
   });
 
+  test("unqualified call resolves inherited instance method", async () => {
+    const result = await runSnippet(`public class ParentCall {
+        public String m() { return "parent"; }
+      }
+      public class ChildCall extends ParentCall {
+        public String runInst() { return m(); }
+        public static String run() { return new ChildCall().runInst(); }
+      }`, "ChildCall");
+    assert.equal(result, "parent");
+  });
+
+  test("unqualified call resolves inherited static method", async () => {
+    const result = await runSnippet(`public class ParentStaticCall {
+        public static String s() { return "ok"; }
+      }
+      public class ChildStaticCall extends ParentStaticCall {
+        public static String run() { return s(); }
+      }`, "ChildStaticCall");
+    assert.equal(result, "ok");
+  });
+
+  test("unqualified unresolved call fails fast at compile-time", () => {
+    assert.throws(() => compile(`public class BadUnqualifiedCall {
+      public static String run() {
+        missing(1);
+        return "ng";
+      }
+    }`), /Cannot resolve unqualified method call/);
+  });
+
   test("compiles switch statement with int labels", () => {
     const bytes = compile(`public class SwitchInt {
       public static String run() {
@@ -1718,6 +1748,20 @@ describe("Code generator", () => {
           return "ok";
         }
       }`));
+  });
+
+  test("checked exception analysis does not predeclare later local names", () => {
+    assert.throws(() => compile(`import java.io.IOException;
+      public class UtilShadow {
+        public static void fail() throws IOException { throw new IOException(); }
+      }
+      public class CheckedLocalScope {
+        public static String run() {
+          UtilShadow.fail();
+          int UtilShadow = 1;
+          return "" + UtilShadow;
+        }
+      }`), /Unhandled checked exception/);
   });
 
   test("switch expression with null + total pattern is exhaustive for reference selector", () => {

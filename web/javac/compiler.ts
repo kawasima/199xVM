@@ -673,6 +673,22 @@ function resolveDeclaredMethodInOwnerByTypes(
   throw new Error(`Ambiguous method overload: ${ownerClass}.${method}(${argDescs})`);
 }
 
+function resolveUnqualifiedMethodCandidate(
+  ctx: CompileContext,
+  method: string,
+  args: Expr[],
+): ResolvedMethodCandidate | undefined {
+  const staticResolved = resolveMethodCandidate(ctx, ctx.className, method, args, true);
+  const instResolved = resolveMethodCandidate(ctx, ctx.className, method, args, false);
+  if (ctx.ownerIsStatic) {
+    if (instResolved && !staticResolved) {
+      throw new Error(`Cannot call instance method '${method}' from static context`);
+    }
+    return staticResolved;
+  }
+  return instResolved ?? staticResolved;
+}
+
 function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
   for (let i = ctx.locals.length - 1; i >= 0; i--) {
     if (ctx.locals[i].name === name) return ctx.locals[i];
@@ -755,13 +771,8 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
         const resolved = resolveMethodCandidate(ctx, ownerClass, expr.method, expr.args, false);
         if (resolved) return resolved.returnType;
       } else {
-        const userMethod = resolveDeclaredMethodInOwnerByTypes(
-          ctx,
-          ctx.className,
-          expr.method,
-          expr.args.map(a => inferType(ctx, a)),
-        );
-        if (userMethod) return userMethod.returnType;
+        const resolved = resolveUnqualifiedMethodCandidate(ctx, expr.method, expr.args);
+        if (resolved) return resolved.returnType;
         // Static import-on-demand method
         if (ctx.staticWildcardImports.length > 0) {
           for (const owner of ctx.staticWildcardImports) {
@@ -1730,29 +1741,25 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     }
   } else {
     // Unqualified method call — call on this or static
-    const userMethod = resolveDeclaredMethodInOwnerByTypes(
-      ctx,
-      ctx.className,
-      expr.method,
-      expr.args.map(a => inferType(ctx, a)),
-    );
-    if (userMethod) {
-      const desc = methodDescriptor(userMethod.params, userMethod.returnType);
-      const ownerDecl = ctx.classDecls.get(ctx.className);
-      const ownerIsInterface = ownerDecl?.kind === "interface" || ownerDecl?.kind === "annotation";
-      if (userMethod.isStatic) {
-        const mRef = ctx.cp.addMethodref(ctx.className, expr.method, desc);
-        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, userMethod.params[i]?.type));
-        emitter.emitInvokestatic(mRef, expr.args.length, userMethod.returnType !== "void");
+    const resolved = resolveUnqualifiedMethodCandidate(ctx, expr.method, expr.args);
+    if (resolved) {
+      const desc = "(" + resolved.paramTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(resolved.returnType);
+      if (resolved.isStatic) {
+        const mRef = ctx.cp.addMethodref(resolved.owner, expr.method, desc);
+        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, resolved.paramTypes[i] ?? { className: "java/lang/Object" }));
+        emitter.emitInvokestatic(mRef, expr.args.length, resolved.returnType !== "void");
       } else {
+        if (ctx.ownerIsStatic) {
+          throw new Error(`Cannot call instance method '${expr.method}' from static context`);
+        }
         emitter.emitAload(0); // this
-        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, userMethod.params[i]?.type));
-        if (ownerIsInterface) {
-          const mRef = ctx.cp.addInterfaceMethodref(ctx.className, expr.method, desc);
-          emitter.emitInvokeinterface(mRef, expr.args.length, userMethod.returnType !== "void");
+        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, resolved.paramTypes[i] ?? { className: "java/lang/Object" }));
+        if (resolved.isInterface) {
+          const mRef = ctx.cp.addInterfaceMethodref(resolved.owner, expr.method, desc);
+          emitter.emitInvokeinterface(mRef, expr.args.length, resolved.returnType !== "void");
         } else {
-          const mRef = ctx.cp.addMethodref(ctx.className, expr.method, desc);
-          emitter.emitInvokevirtual(mRef, expr.args.length, userMethod.returnType !== "void");
+          const mRef = ctx.cp.addMethodref(resolved.owner, expr.method, desc);
+          emitter.emitInvokevirtual(mRef, expr.args.length, resolved.returnType !== "void");
         }
       }
     } else if (ctx.staticWildcardImports.length > 0) {
@@ -1778,6 +1785,8 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
       const desc = "(" + sigArgDescs + ")" + typeToDescriptor(retType);
       const mRef = ctx.cp.addMethodref(ownerClass, expr.method, desc);
       emitter.emitInvokestatic(mRef, expr.args.length, retType !== "void");
+    } else {
+      throw new Error(`Cannot resolve unqualified method call: ${expr.method}/${expr.args.length}`);
     }
   }
 }
@@ -3651,7 +3660,6 @@ function validateCheckedExceptions(
   const localTypes = new Map<string, Type>();
   if (!method.isStatic) localTypes.set("this", { className: classDecl.name });
   for (const p of method.params) localTypes.set(p.name, p.type);
-  collectLocalTypes(method.body, localTypes);
   const uncaught = collectStmtListCheckedExceptions(classDecl, classDecls, classSupers, method.body, localTypes);
   const declared = (method.throwsTypes ?? []).map(t => resolveClassNameInDecl(classDecl, classDecls, t));
   for (const ex of uncaught) {
