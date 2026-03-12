@@ -170,6 +170,42 @@ describe("Lexer", () => {
     assert.equal(tokens[0].value, "line1\nline2\ttab");
   });
 
+  test("unicode escapes are translated before tokenization", () => {
+    const tokens = lex("cl\\u0061ss");
+    assert.equal(tokens[0].kind, TokenKind.KwClass);
+    assert.equal(tokens[0].value, "class");
+  });
+
+  test("unicode identifier is accepted", () => {
+    const tokens = lex("int 名前 = 1;");
+    assert.equal(tokens[0].kind, TokenKind.KwInt);
+    assert.equal(tokens[1].kind, TokenKind.Ident);
+    assert.equal(tokens[1].value, "名前");
+  });
+
+  test("text block literal tokenizes as string literal", () => {
+    const tokens = lex(`"""
+hello
+world
+"""`);
+    assert.equal(tokens[0].kind, TokenKind.StringLiteral);
+    assert.equal(tokens[0].value, "hello\nworld\n");
+  });
+
+  test("malformed underscore in number literal is rejected", () => {
+    assert.throws(() => lex("1_"));
+    assert.throws(() => lex("0x_FF"));
+    assert.throws(() => lex("1__2"));
+  });
+
+  test("floating-point forms with dot/exponent are tokenized", () => {
+    const tokens = lex(".5 1. 1e3 2.5f");
+    assert.equal(tokens[0].kind, TokenKind.DoubleLiteral);
+    assert.equal(tokens[1].kind, TokenKind.DoubleLiteral);
+    assert.equal(tokens[2].kind, TokenKind.DoubleLiteral);
+    assert.equal(tokens[3].kind, TokenKind.FloatLiteral);
+  });
+
   test("operators", () => {
     const tokens = lex("== != <= >= && || ++ -- ::");
     const kinds = tokens.slice(0, -1).map(t => t.kind);
