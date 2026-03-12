@@ -113,6 +113,8 @@ export enum TokenKind {
   BitXor = "^",
   BitNot = "~",
   ShiftLeft = "<<",
+  ShiftRight = ">>",
+  ShiftUnsigned = ">>>",
   Not = "!",
   PlusAssign = "+=",
   MinusAssign = "-=",
@@ -123,6 +125,8 @@ export enum TokenKind {
   OrAssign = "|=",
   XorAssign = "^=",
   ShiftLeftAssign = "<<=",
+  ShiftRightAssign = ">>=",
+  ShiftUnsignedAssign = ">>>=",
   PlusPlus = "++",
   MinusMinus = "--",
   Question = "?",
@@ -489,8 +493,12 @@ export function lex(source: string): Token[] {
     // Multi-char operators
     const two = pos + 1 < source.length ? ch + source[pos + 1] : "";
     const three = pos + 2 < source.length ? ch + source[pos + 1] + source[pos + 2] : "";
+    const four = pos + 3 < source.length ? ch + source[pos + 1] + source[pos + 2] + source[pos + 3] : "";
+    if (four === ">>>=") { advance(); advance(); advance(); advance(); tokens.push({ kind: TokenKind.ShiftUnsignedAssign, value: ">>>=", line: startLine, col: startCol }); continue; }
     if (three === "<<=") { advance(); advance(); advance(); tokens.push({ kind: TokenKind.ShiftLeftAssign, value: "<<=", line: startLine, col: startCol }); continue; }
+    if (three === ">>>") { advance(); advance(); advance(); tokens.push({ kind: TokenKind.ShiftUnsigned, value: ">>>", line: startLine, col: startCol }); continue; }
     if (three === "...") { advance(); advance(); advance(); tokens.push({ kind: TokenKind.Ellipsis, value: "...", line: startLine, col: startCol }); continue; }
+    if (three === ">>=") { advance(); advance(); advance(); tokens.push({ kind: TokenKind.ShiftRightAssign, value: ">>=", line: startLine, col: startCol }); continue; }
     if (two === "==") { advance(); advance(); tokens.push({ kind: TokenKind.Eq, value: "==", line: startLine, col: startCol }); continue; }
     if (two === "!=") { advance(); advance(); tokens.push({ kind: TokenKind.Ne, value: "!=", line: startLine, col: startCol }); continue; }
     if (two === "<=") { advance(); advance(); tokens.push({ kind: TokenKind.Le, value: "<=", line: startLine, col: startCol }); continue; }
@@ -498,6 +506,7 @@ export function lex(source: string): Token[] {
     if (two === "&&") { advance(); advance(); tokens.push({ kind: TokenKind.And, value: "&&", line: startLine, col: startCol }); continue; }
     if (two === "||") { advance(); advance(); tokens.push({ kind: TokenKind.Or, value: "||", line: startLine, col: startCol }); continue; }
     if (two === "<<") { advance(); advance(); tokens.push({ kind: TokenKind.ShiftLeft, value: "<<", line: startLine, col: startCol }); continue; }
+    if (two === ">>") { advance(); advance(); tokens.push({ kind: TokenKind.ShiftRight, value: ">>", line: startLine, col: startCol }); continue; }
     if (two === "+=") { advance(); advance(); tokens.push({ kind: TokenKind.PlusAssign, value: "+=", line: startLine, col: startCol }); continue; }
     if (two === "-=") { advance(); advance(); tokens.push({ kind: TokenKind.MinusAssign, value: "-=", line: startLine, col: startCol }); continue; }
     if (two === "*=") { advance(); advance(); tokens.push({ kind: TokenKind.StarAssign, value: "*=", line: startLine, col: startCol }); continue; }

@@ -281,9 +281,9 @@ world
       TokenKind.ShiftLeft, TokenKind.ShiftLeftAssign,
       TokenKind.StarAssign, TokenKind.SlashAssign, TokenKind.PercentAssign,
       TokenKind.AndAssign, TokenKind.OrAssign, TokenKind.XorAssign,
-      TokenKind.Gt, TokenKind.Ge, // >>=
-      TokenKind.Gt, TokenKind.Gt, TokenKind.Ge, // >>>=
-      TokenKind.Gt, TokenKind.Gt, TokenKind.Gt, // >>>
+      TokenKind.ShiftRightAssign,
+      TokenKind.ShiftUnsignedAssign,
+      TokenKind.ShiftUnsigned,
     ]);
   });
 
@@ -726,6 +726,15 @@ describe("Parser", () => {
     const cls = parse(lex(src));
     assert.equal(cls.name, "Box");
     assert.ok((cls.interfaces ?? []).includes("java/io/Serializable"));
+  });
+
+  test("nested generic type closers with >> are parsed", () => {
+    const src = `public class GenericNest {
+      java.util.Map<String, java.util.List<Integer>> value;
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.name, "GenericNest");
+    assert.equal(cls.fields[0].name, "value");
   });
 
   test("constructor declaration ending with semicolon is rejected", () => {
