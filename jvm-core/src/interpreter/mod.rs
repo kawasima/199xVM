@@ -255,9 +255,10 @@ impl Vm {
                 monitor.count += 1;
             }
             Some(_) => {
-                // Owned by another thread — proper blocking/yielding is not yet implemented.
-                // This should not occur in the current single-threaded mode; fail fast if it does.
-                panic!("monitor_enter: monitor contention is not supported yet (would need to block current thread)");
+                // Owned by another thread — enqueue for future scheduler to handle.
+                // In Phase 4+, the scheduler will transition this thread to
+                // WaitingOnMonitor and yield. For now, just enqueue.
+                monitor.entry_queue.push_back(thread_id);
             }
         }
     }
@@ -267,21 +268,31 @@ impl Vm {
     pub(in crate::interpreter) fn monitor_exit(&mut self, obj: &JRef) -> Result<(), String> {
         let id = Self::object_id(obj);
         let thread_id = self.scheduler.current_thread().id;
-        let monitor = match self.monitors.get_mut(&id) {
-            Some(m) => m,
-            None => return Err("java/lang/IllegalMonitorStateException: monitor not entered".to_owned()),
-        };
-        if monitor.owner != Some(thread_id) {
-            return Err("java/lang/IllegalMonitorStateException: current thread is not owner".to_owned());
-        }
-        monitor.count -= 1;
-        if monitor.count == 0 {
-            monitor.owner = None;
-            // Wake one thread from the entry queue (Phase 4+).
-            if let Some(waiting_id) = monitor.entry_queue.pop_front() {
-                // In Phase 4+, set the waiting thread's state to Runnable.
-                let _ = waiting_id;
+        let mut remove_monitor = false;
+        {
+            let monitor = match self.monitors.get_mut(&id) {
+                Some(m) => m,
+                None => return Err("java/lang/IllegalMonitorStateException: monitor not entered".to_owned()),
+            };
+            if monitor.owner != Some(thread_id) {
+                return Err("java/lang/IllegalMonitorStateException: current thread is not owner".to_owned());
             }
+            monitor.count -= 1;
+            if monitor.count == 0 {
+                monitor.owner = None;
+                let has_waiters = !monitor.entry_queue.is_empty() || !monitor.wait_queue.is_empty();
+                if !has_waiters {
+                    // Fully unlocked with no waiters — remove to avoid unbounded growth
+                    // and stale monitor state from address reuse.
+                    remove_monitor = true;
+                } else if let Some(waiting_id) = monitor.entry_queue.pop_front() {
+                    // In Phase 4+, set the waiting thread's state to Runnable.
+                    let _ = waiting_id;
+                }
+            }
+        }
+        if remove_monitor {
+            self.monitors.remove(&id);
         }
         Ok(())
     }
