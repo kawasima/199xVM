@@ -415,8 +415,11 @@ pub fn parse(data: &[u8]) -> Result<ClassFile, String> {
         .collect::<Result<Vec<_>, _>>()?;
 
     // Lightweight post-parse validation (JVMS §4.1 / §5.4.1):
-    // this_class must be a valid Class entry in the constant pool.
+    // this_class must be a non-zero valid Class entry in the constant pool.
     let cp_len = constant_pool.entries.len();
+    if this_class == 0 {
+        return Err("this_class index is 0 (must be a valid CONSTANT_Class_info index)".to_owned());
+    }
     if this_class as usize >= cp_len {
         return Err(format!("this_class index {this_class} out of CP bounds ({cp_len})"));
     }

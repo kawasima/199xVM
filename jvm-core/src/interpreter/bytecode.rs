@@ -811,10 +811,11 @@ impl Vm {
                     let new_class = resolve_class_name(cp, idx);
                     // Run <clinit> for the class being instantiated.
                     self.ensure_class_init(&new_class)?;
-                    // A ParseError entry means the class was registered but malformed.
+                    // A ParseError entry means the class was registered but malformed —
+                    // surface consistently as ClassFormatError (same as Class.forName0 path).
                     if matches!(self.classes.get(&new_class), Some(super::LazyClass::ParseError(_))) {
-                        self.throw_no_class_def_found(&new_class);
-                        return Err(format!("NoClassDefFoundError: {new_class}"));
+                        self.throw_class_format_error(&new_class);
+                        return Err(format!("java/lang/ClassFormatError: malformed class file for {new_class}"));
                     }
                     let obj = if self.get_class(&new_class).is_some() {
                         // Class is loaded (bytecode available) — use plain object.

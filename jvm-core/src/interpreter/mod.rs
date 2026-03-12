@@ -95,8 +95,10 @@ pub struct Vm {
     /// Static field storage keyed by class name → field name.
     /// Avoids allocating a `"ClassName.fieldName"` string on every getstatic/putstatic.
     pub(in crate::interpreter) static_fields: HashMap<String, HashMap<String, JValue>>,
-    /// Classes whose `<clinit>` has already been run.
+    /// Classes whose `<clinit>` has already been run successfully.
     pub(in crate::interpreter) clinit_done: HashSet<String>,
+    /// Classes whose `<clinit>` threw an exception (erroneous state per JVMS §5.5).
+    pub(in crate::interpreter) clinit_failed: HashSet<String>,
     /// Canonical Class objects keyed by internal class name or descriptor.
     pub(in crate::interpreter) class_pool: HashMap<String, JRef>,
     /// Pending exception object — set by athrow, consumed by exception handler.
@@ -119,6 +121,7 @@ impl Vm {
             string_pool: HashMap::new(),
             static_fields: HashMap::new(),
             clinit_done: HashSet::new(),
+            clinit_failed: HashSet::new(),
             class_pool: HashMap::new(),
             pending_exception: None,
             stdout_buffer: String::new(),
@@ -485,6 +488,12 @@ impl Vm {
         if self.clinit_done.contains(class_name) {
             return Ok(());
         }
+        // JVMS §5.5: if <clinit> previously failed, the class is in an erroneous state;
+        // subsequent uses must throw NoClassDefFoundError.
+        if self.clinit_failed.contains(class_name) {
+            self.throw_no_class_def_found(class_name);
+            return Err(format!("java/lang/NoClassDefFoundError: {class_name}"));
+        }
         // Mark as initialized before running to prevent recursion.
         self.clinit_done.insert(class_name.to_owned());
 
@@ -535,7 +544,12 @@ impl Vm {
                     eiie.borrow_mut().fields.insert("cause".to_owned(), JValue::Ref(Some(c)));
                 }
                 self.pending_exception = Some(eiie);
-                return Err(e);
+                // Remove from clinit_done so subsequent uses hit the clinit_failed path.
+                self.clinit_done.remove(class_name);
+                self.clinit_failed.insert(class_name.to_owned());
+                // Return an error string that encodes the wrapped exception type so that
+                // find_exception_handler sees ExceptionInInitializerError, not the original cause.
+                return Err("java/lang/ExceptionInInitializerError".to_owned());
             }
         }
         Ok(())
