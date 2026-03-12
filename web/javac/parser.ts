@@ -62,6 +62,13 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     }
     return name;
   }
+  function consumeGenericAngleToken(depth: number): number | undefined {
+    if (at(TokenKind.Lt)) { advance(); return depth + 1; }
+    if (at(TokenKind.Gt)) { advance(); return depth - 1; }
+    if (at(TokenKind.ShiftRight)) { advance(); return depth - 2; }
+    if (at(TokenKind.ShiftUnsigned)) { advance(); return depth - 3; }
+    return undefined;
+  }
 
   function resolveDeclaredClassName(name: string): string {
     if (name.includes("/")) return name;
@@ -440,9 +447,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     let depth = 1;
     advance();
     while (depth > 0 && !at(TokenKind.EOF)) {
-      if (at(TokenKind.Lt)) depth++;
-      if (at(TokenKind.Gt)) depth--;
-      advance();
+      const nextDepth = consumeGenericAngleToken(depth);
+      if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+      else advance();
     }
   }
 
@@ -626,9 +633,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         advance();
         let depth = 1;
         while (depth > 0 && !at(TokenKind.EOF)) {
-          if (at(TokenKind.Lt)) depth++;
-          if (at(TokenKind.Gt)) depth--;
-          advance();
+          const nextDepth = consumeGenericAngleToken(depth);
+          if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+          else advance();
         }
       }
       // Resolve imports/java.lang-known types eagerly, but keep unresolved simple
@@ -852,6 +859,8 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     if (match(TokenKind.OrAssign)) return makeCompound("|");
     if (match(TokenKind.XorAssign)) return makeCompound("^");
     if (match(TokenKind.ShiftLeftAssign)) return makeCompound("<<");
+    if (match(TokenKind.ShiftRightAssign)) return makeCompound(">>");
+    if (match(TokenKind.ShiftUnsignedAssign)) return makeCompound(">>>");
     // >>= is tokenized as '>' '>='
     if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Ge) {
       advance();
@@ -1304,9 +1313,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         if (at(TokenKind.Lt)) {
           let depth = 1; advance();
           while (depth > 0 && !at(TokenKind.EOF)) {
-            if (at(TokenKind.Lt)) depth++;
-            if (at(TokenKind.Gt)) depth--;
-            advance();
+            const nextDepth = consumeGenericAngleToken(depth);
+            if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+            else advance();
           }
         }
       } else {
@@ -1347,9 +1356,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         if (at(TokenKind.Lt)) {
           let depth = 1; advance();
           while (depth > 0 && !at(TokenKind.EOF)) {
-            if (at(TokenKind.Lt)) depth++;
-            if (at(TokenKind.Gt)) depth--;
-            advance();
+            const nextDepth = consumeGenericAngleToken(depth);
+            if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+            else advance();
           }
         }
         if (at(TokenKind.LBracket) && tokens[pos + 1]?.kind === TokenKind.RBracket) { advance(); advance(); }
@@ -1521,9 +1530,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           if (at(TokenKind.Lt)) {
             let depth = 1; advance();
             while (depth > 0 && !at(TokenKind.EOF)) {
-              if (at(TokenKind.Lt)) depth++;
-              if (at(TokenKind.Gt)) depth--;
-              advance();
+              const nextDepth = consumeGenericAngleToken(depth);
+              if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+              else advance();
             }
           }
           if (at(TokenKind.LParen)) {
@@ -1553,9 +1562,6 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
   function parseComparison(): Expr {
     let left = parseShift();
     while (at(TokenKind.Lt) || at(TokenKind.Gt) || at(TokenKind.Le) || at(TokenKind.Ge)) {
-      // Do not consume tokens that belong to compound assignments (>>=, >>>=).
-      if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Ge) break;
-      if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Gt && tokens[pos + 2]?.kind === TokenKind.Ge) break;
       const op = advance().value;
       const right = parseShift();
       left = { kind: "binary", op, left, right };
@@ -1571,21 +1577,26 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         left = { kind: "binary", op: "<<", left, right };
         continue;
       }
-      // >> is tokenized as '>' '>'
+      if (match(TokenKind.ShiftRight)) {
+        const right = parseAdditive();
+        left = { kind: "binary", op: ">>", left, right };
+        continue;
+      }
+      if (match(TokenKind.ShiftUnsigned)) {
+        const right = parseAdditive();
+        left = { kind: "binary", op: ">>>", left, right };
+        continue;
+      }
+      // Backward compatibility for older tokenization.
       if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Gt) {
-        // >>>= belongs to compound assignment; leave it to statement parser.
         if (tokens[pos + 2]?.kind === TokenKind.Ge) break;
-        // >>> is tokenized as '>' '>' '>'
         if (tokens[pos + 2]?.kind === TokenKind.Gt) {
-          advance();
-          advance();
-          advance();
+          advance(); advance(); advance();
           const right = parseAdditive();
           left = { kind: "binary", op: ">>>", left, right };
           continue;
         }
-        advance();
-        advance();
+        advance(); advance();
         const right = parseAdditive();
         left = { kind: "binary", op: ">>", left, right };
         continue;
@@ -1810,9 +1821,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       if (at(TokenKind.Lt)) {
         let depth = 1; advance();
         while (depth > 0 && !at(TokenKind.EOF)) {
-          if (at(TokenKind.Lt)) depth++;
-          if (at(TokenKind.Gt)) depth--;
-          advance();
+          const nextDepth = consumeGenericAngleToken(depth);
+          if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+          else advance();
         }
       }
       expect(TokenKind.LParen);
@@ -1838,9 +1849,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         if (at(TokenKind.Lt)) {
           let depth = 1; advance();
           while (depth > 0 && !at(TokenKind.EOF)) {
-            if (at(TokenKind.Lt)) depth++;
-            if (at(TokenKind.Gt)) depth--;
-            advance();
+            const nextDepth = consumeGenericAngleToken(depth);
+            if (nextDepth !== undefined) depth = Math.max(0, nextDepth);
+            else advance();
           }
         }
         if (at(TokenKind.RParen)) {
