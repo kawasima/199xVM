@@ -93,8 +93,29 @@ pub type ThreadId = u64;
 pub(crate) enum ThreadState {
     /// Ready to run (or currently running).
     Runnable,
+    /// Blocked waiting to acquire an object monitor.
+    WaitingOnMonitor(usize),
+    /// Waiting on Object.wait() condition.
+    WaitingOnCondition(usize),
     /// Terminated — run() method returned or threw.
     Terminated,
+}
+
+/// A reentrant object monitor (JVMS §5.4.2.1).
+///
+/// Each Java object has an associated monitor. A thread can lock the monitor
+/// multiple times (reentrant); the monitor is released only when the count
+/// drops to zero.
+#[allow(dead_code)]
+pub(crate) struct Monitor {
+    /// The thread that currently owns this monitor, or `None` if unlocked.
+    pub owner: Option<ThreadId>,
+    /// Reentrant lock count (0 when unlocked).
+    pub count: usize,
+    /// Threads blocked on `monitorenter` waiting to acquire this monitor.
+    pub entry_queue: Vec<ThreadId>,
+    /// Threads blocked on `Object.wait()`.
+    pub wait_queue: Vec<ThreadId>,
 }
 
 /// Per-thread execution context.
@@ -179,6 +200,8 @@ pub struct Vm {
     pub(in crate::interpreter) system_classloader: Option<JRef>,
     /// Green thread scheduler.
     scheduler: Scheduler,
+    /// Object monitors keyed by object identity (Rc pointer address).
+    monitors: HashMap<usize, Monitor>,
 }
 
 impl Vm {
@@ -195,7 +218,69 @@ impl Vm {
             stderr_buffer: String::new(),
             system_classloader: None,
             scheduler: Scheduler::new(),
+            monitors: HashMap::new(),
         }
+    }
+
+    /// Get the object identity key for monitor operations.
+    /// Uses the `Rc` pointer address as a stable identity.
+    fn object_id(obj: &JRef) -> usize {
+        Rc::as_ptr(obj) as *const () as usize
+    }
+
+    /// Acquire the monitor for the given object (monitorenter).
+    /// In a single-threaded context, this always succeeds immediately.
+    /// With multiple threads, the current thread may block.
+    pub(in crate::interpreter) fn monitor_enter(&mut self, obj: &JRef) {
+        let id = Self::object_id(obj);
+        let thread_id = self.scheduler.current_thread().id;
+        let monitor = self.monitors.entry(id).or_insert(Monitor {
+            owner: None,
+            count: 0,
+            entry_queue: Vec::new(),
+            wait_queue: Vec::new(),
+        });
+        match monitor.owner {
+            None => {
+                // Unlocked — acquire.
+                monitor.owner = Some(thread_id);
+                monitor.count = 1;
+            }
+            Some(owner) if owner == thread_id => {
+                // Reentrant — increment count.
+                monitor.count += 1;
+            }
+            Some(_) => {
+                // Owned by another thread — block (Phase 4+).
+                // For now this shouldn't happen in single-threaded mode.
+                monitor.entry_queue.push(thread_id);
+            }
+        }
+    }
+
+    /// Release the monitor for the given object (monitorexit).
+    /// Returns Err if the current thread does not own the monitor.
+    pub(in crate::interpreter) fn monitor_exit(&mut self, obj: &JRef) -> Result<(), String> {
+        let id = Self::object_id(obj);
+        let thread_id = self.scheduler.current_thread().id;
+        let monitor = match self.monitors.get_mut(&id) {
+            Some(m) => m,
+            None => return Err("java/lang/IllegalMonitorStateException: monitor not entered".to_owned()),
+        };
+        if monitor.owner != Some(thread_id) {
+            return Err("java/lang/IllegalMonitorStateException: current thread is not owner".to_owned());
+        }
+        monitor.count -= 1;
+        if monitor.count == 0 {
+            monitor.owner = None;
+            // Wake one thread from the entry queue (Phase 4+).
+            if let Some(waiting_id) = monitor.entry_queue.first().copied() {
+                monitor.entry_queue.remove(0);
+                // In Phase 4+, set the waiting thread's state to Runnable.
+                let _ = waiting_id;
+            }
+        }
+        Ok(())
     }
 
     /// Mutable access to the current thread's pending exception.
