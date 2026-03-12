@@ -154,3 +154,19 @@ fn lambda_overload_arity() {
     );
     assert_eq!(result, "HELLO!|HI?");
 }
+
+// ---------------------------------------------------------------------------
+// ClassLoader API: getSystemClassLoader, Class.forName, loadClass
+// ---------------------------------------------------------------------------
+
+#[test]
+fn classloader_api() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "ClassLoaderTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "cl:ok|forName:ok|loadClass:ok");
+}
