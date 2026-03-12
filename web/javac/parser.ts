@@ -868,13 +868,13 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     if (match(TokenKind.ShiftLeftAssign)) return makeCompound("<<");
     if (match(TokenKind.ShiftRightAssign)) return makeCompound(">>");
     if (match(TokenKind.ShiftUnsignedAssign)) return makeCompound(">>>");
-    // >>= is tokenized as '>' '>='
+    // Backward-compat fallback for older token streams where >>= is split as '>' '>='.
     if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Ge) {
       advance();
       advance();
       return makeCompound(">>");
     }
-    // >>>= is tokenized as '>' '>' '>='
+    // Backward-compat fallback for older token streams where >>>= is split.
     if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Gt && tokens[pos + 2]?.kind === TokenKind.Ge) {
       advance();
       advance();
