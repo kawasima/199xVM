@@ -68,6 +68,7 @@ mod invoke;
 mod native_static;
 mod native_virtual;
 mod reflection;
+pub(crate) mod trampoline;
 
 use descriptors::*;
 
@@ -111,6 +112,8 @@ pub struct Vm {
     pub(in crate::interpreter) stderr_buffer: String,
     /// Singleton system ClassLoader instance (created on first access).
     pub(in crate::interpreter) system_classloader: Option<JRef>,
+    /// Pending frame to be pushed by the trampoline after an invoke opcode.
+    pub(crate) pending_frame: Option<trampoline::FrameInfo>,
 }
 
 impl Vm {
@@ -127,6 +130,7 @@ impl Vm {
             stdout_buffer: String::new(),
             stderr_buffer: String::new(),
             system_classloader: None,
+            pending_frame: None,
         }
     }
 

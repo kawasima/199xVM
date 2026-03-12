@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::heap::JValue;
 
-pub(super) struct Frame {
+pub(crate) struct Frame {
     pub locals: Vec<JValue>,
     pub stack: Vec<JValue>,
     pub pc: usize,

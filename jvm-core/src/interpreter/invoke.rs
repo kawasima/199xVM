@@ -1,12 +1,12 @@
 
-use crate::heap::{JObject, JRef, JValue, NativePayload};
+use crate::heap::{JRef, JValue, NativePayload};
 
 use super::Vm;
 use super::descriptors::*;
-use super::frame::*;
 
 impl Vm {
     /// Execute a static method and return its result.
+    /// Uses the trampoline for bytecode methods, falls back to native for stubs.
     pub fn invoke_static(
         &mut self,
         class_name: &str,
@@ -14,7 +14,28 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        // Resolve descriptor: exact match first, then param-only fallback for generic return types.
+        match self.build_static_frame(class_name, method_name, descriptor, args.clone(), true)? {
+            Some(fi) => {
+                let frame_owner = fi.class_name.clone();
+                let mut call_stack = vec![fi];
+                self.run_trampoline(&mut call_stack)
+                    .map_err(|e| format!("{e}\n  at {frame_owner}"))
+            }
+            None => {
+                // Native fallback — use the old inline path.
+                self.invoke_static_native(class_name, method_name, descriptor, args)
+            }
+        }
+    }
+
+    /// Native-only path for invoke_static (when build_static_frame returns None).
+    fn invoke_static_native(
+        &mut self,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+        args: Vec<JValue>,
+    ) -> Result<JValue, String> {
         let method_flags = self.find_method_flags(class_name, method_name, descriptor);
         let resolved_descriptor = if method_flags.is_some() {
             descriptor.to_owned()
@@ -24,87 +45,44 @@ impl Vm {
         };
         let descriptor = resolved_descriptor.as_str();
 
-        // Re-check with the resolved descriptor if it changed, then try native stubs.
-        let method_flags = if method_flags.is_none() {
-            self.find_method_flags(class_name, method_name, descriptor)
-        } else {
-            method_flags
+        if let Some(v) = self.native_static(class_name, method_name, descriptor, &args) {
+            if let Some(err) = self.pending_exception_err() { return Err(err); }
+            return Ok(v);
+        }
+
+        // Method has code but build_static_frame returned None — this means
+        // method_flags was None (descriptor mismatch). Try resolving method info
+        // for the native path with full locals construction.
+        let info = match self.resolve_method_exec_info(class_name, method_name, descriptor) {
+            Some(info) => info,
+            None => return Err(format!("Method not found: {class_name}.{method_name}{descriptor}")),
         };
-        if method_flags.is_none() {
-            if let Some(v) = self.native_static(class_name, method_name, descriptor, &args) {
-                if let Some(err) = self.pending_exception_err() {
-                    return Err(err);
-                }
-                return Ok(v);
-            }
-            return Err(format!("Method not found: {class_name}.{method_name}{descriptor}"));
-        }
-
-        // If the resolved method is varargs (ACC_VARARGS = 0x0080), synthesize a single
-        // empty array argument when the call site omits the trailing varargs parameter.
-        let mut args = args;
-        let expected_arg_count = count_args(descriptor);
-        if args.len() < expected_arg_count {
-            let is_varargs = method_flags.map(|f| f & 0x0080 != 0).unwrap_or(false);
-            if is_varargs && expected_arg_count - args.len() == 1 {
-                args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
-            }
-        }
-
-        // Resolve method and extract all execution info in one pass.
-        let info = self
-            .resolve_method_exec_info(class_name, method_name, descriptor)
-            .ok_or_else(|| format!("Method not found: {class_name}.{method_name}{descriptor}"))?;
-
-        // Build initial frame.
-        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
-        let required_slots: usize = param_tokens
-            .iter()
-            .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
-            .sum();
-        let mut locals = vec![JValue::Void; info.max_locals.max(required_slots)];
-        let mut local_idx = 0usize;
-        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
-            if local_idx >= locals.len() {
-                break;
-            }
-            locals[local_idx] = self.adapt_value_for_descriptor(t, a);
-            local_idx += if t == "J" || t == "D" { 2 } else { 1 };
-        }
-
-        // If method has no code (native), fall back to native stubs.
         if !info.has_code {
             let (param_tokens, _) = Self::parse_method_descriptor_tokens(&info.descriptor);
             let mut native_args = Vec::with_capacity(param_tokens.len());
+            // Build locals to extract native args correctly.
+            let req: usize = param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum();
+            let mut locals = vec![JValue::Void; info.max_locals.max(req)];
+            let mut li = 0usize;
+            for (a, t) in args.into_iter().zip(param_tokens.iter()) {
+                if li >= locals.len() { break; }
+                locals[li] = self.adapt_value_for_descriptor(t, a);
+                li += if t == "J" || t == "D" { 2 } else { 1 };
+            }
             let mut slot = 0usize;
             for t in &param_tokens {
-                if slot < locals.len() {
-                    native_args.push(locals[slot].clone());
-                }
+                if slot < locals.len() { native_args.push(locals[slot].clone()); }
                 slot += if t == "J" || t == "D" { 2 } else { 1 };
             }
             if let Some(v) = self.native_static(&info.class_name, method_name, &info.descriptor, &native_args) {
-                if let Some(err) = self.pending_exception_err() {
-                    return Err(err);
-                }
+                if let Some(err) = self.pending_exception_err() { return Err(err); }
                 return Ok(v);
             }
-            return Err(format!("No code (native) in {}.{method_name}{}", info.class_name, info.descriptor));
         }
-
-        let mut frame = Frame {
-            locals,
-            stack: Vec::new(),
-            pc: 0,
-        };
-
-        let frame_owner = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-        self.run_frame(&mut frame, &info.code, &*info.cp, &frame_owner, &info.bootstrap_methods, &info.exception_table)
-            .map_err(|e| format!("{e}\n  at {frame_owner}"))
+        Err(format!("Method not found: {class_name}.{method_name}{descriptor}"))
     }
 
     /// Execute an instance method with invokespecial semantics.
-    /// Resolves from the specified class (not the runtime class).
     pub fn invoke_special(
         &mut self,
         this: JRef,
@@ -113,85 +91,32 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        // Resolve descriptor: exact match first, then param-only fallback for generic return types.
-        let resolved_descriptor = if self.method_exists(class_name, method_name, descriptor) {
-            descriptor.to_owned()
-        } else {
-            self.find_method_real_descriptor(class_name, method_name, descriptor)
-                .unwrap_or_else(|| descriptor.to_owned())
-        };
-        let descriptor = resolved_descriptor.as_str();
-
-        // Resolve from the specified class, not the runtime class.
-        if !self.method_exists(class_name, method_name, descriptor) {
-            if let Some(v) = self.native_virtual(&this, class_name, method_name, descriptor, &args) {
-                if let Some(err) = self.pending_exception_err() {
-                    return Err(err);
+        match self.build_special_frame_inner(this.clone(), class_name, method_name, descriptor, args.clone(), true)? {
+            Some(fi) => {
+                let frame_owner = fi.class_name.clone();
+                let mut call_stack = vec![fi];
+                self.run_trampoline(&mut call_stack)
+                    .map_err(|e| format!("{e}\n  at {frame_owner}"))
+            }
+            None => {
+                // Native fallback.
+                let resolved = if self.method_exists(class_name, method_name, descriptor) {
+                    descriptor.to_owned()
+                } else {
+                    self.find_method_real_descriptor(class_name, method_name, descriptor)
+                        .unwrap_or_else(|| descriptor.to_owned())
+                };
+                let desc = resolved.as_str();
+                if let Some(v) = self.native_virtual(&this, class_name, method_name, desc, &args) {
+                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                    return Ok(v);
                 }
-                return Ok(v);
+                Err(format!("Special method not found: {class_name}.{method_name}{desc}"))
             }
-            return Err(format!("Special method not found: {class_name}.{method_name}{descriptor}"));
         }
-
-        // Resolve method and extract all execution info in one pass.
-        let info = self
-            .resolve_method_exec_info(class_name, method_name, descriptor)
-            .unwrap();
-
-        // JVMS §5.4.3.3: invoking an abstract method throws AbstractMethodError.
-        if info.access_flags & 0x0400 != 0 {
-            let exc = crate::heap::JObject::new("java/lang/AbstractMethodError");
-            let msg_str = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-            let msg = self.intern_string(msg_str);
-            exc.borrow_mut().fields.insert("detailMessage".to_owned(), crate::heap::JValue::Ref(Some(msg)));
-            self.pending_exception = Some(exc);
-            return Err(format!("java/lang/AbstractMethodError: {}.{method_name}{}", info.class_name, info.descriptor));
-        }
-
-        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
-        let required_slots = 1 + param_tokens
-            .iter()
-            .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
-            .sum::<usize>();
-        let total = info.max_locals.max(required_slots);
-        let mut locals = vec![JValue::Void; total];
-        locals[0] = JValue::Ref(Some(this.clone()));
-        let mut local_idx = 1usize;
-        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
-            if local_idx >= locals.len() {
-                break;
-            }
-            locals[local_idx] = self.adapt_value_for_descriptor(t, a);
-            local_idx += if t == "J" || t == "D" { 2 } else { 1 };
-        }
-
-        // If method has no code (native), fall back to native stubs.
-        if !info.has_code {
-            let virt_args: Vec<JValue> = locals[1..].iter()
-                .filter(|v| !matches!(v, JValue::Void))
-                .cloned()
-                .collect();
-            if let Some(v) = self.native_virtual(&this, &info.class_name, method_name, &info.descriptor, &virt_args) {
-                if let Some(err) = self.pending_exception_err() {
-                    return Err(err);
-                }
-                return Ok(v);
-            }
-            return Err(format!("No code (native) in {}.{method_name}{}", info.class_name, info.descriptor));
-        }
-
-        let mut frame = Frame {
-            locals,
-            stack: Vec::new(),
-            pc: 0,
-        };
-
-        let frame_owner = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-        self.run_frame(&mut frame, &info.code, &*info.cp, &frame_owner, &info.bootstrap_methods, &info.exception_table)
-            .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 
-    /// Execute an instance method (first local = `this` reference).
+    /// Execute an instance method (virtual dispatch).
     pub fn invoke_virtual(
         &mut self,
         this: JRef,
@@ -200,25 +125,15 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        // Use the actual runtime class of `this` for virtual dispatch.
         let runtime_class = this.borrow().class_name.clone();
 
-        // If receiver carries lambda payload, try direct SAM dispatch.
+        // Lambda dispatch — handle inline.
         let lambda_info = match &this.borrow().native {
             NativePayload::BytecodeLambda { sam_method, sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured } => {
-                Some((
-                    sam_method.clone(),
-                    sam_desc.clone(),
-                    impl_class.clone(),
-                    impl_method.clone(),
-                    impl_desc.clone(),
-                    *ref_kind,
-                    captured.clone(),
-                ))
+                Some((sam_method.clone(), sam_desc.clone(), impl_class.clone(), impl_method.clone(), impl_desc.clone(), *ref_kind, captured.clone()))
             }
             NativePayload::Lambda(f) => {
-                let result = f(args);
-                return Ok(result);
+                return Ok(f(args));
             }
             _ => None,
         };
@@ -228,8 +143,6 @@ impl Vm {
             if method_name == sam_method && call_arg_count == sam_arg_count {
                 let mut full_args = captured;
                 full_args.extend(args);
-                // ref_kind 5 = invokeVirtual, 7 = invokeSpecial, 9 = invokeInterface
-                // ref_kind 6 = invokeStatic
                 let invoked = if ref_kind == 5 || ref_kind == 7 || ref_kind == 9 {
                     if full_args.is_empty() {
                         return Err("Lambda invoke_virtual: missing receiver argument".to_owned());
@@ -237,9 +150,7 @@ impl Vm {
                     let recv = full_args.remove(0);
                     match recv {
                         JValue::Ref(Some(r)) => self.invoke_virtual(r, &impl_class, &impl_method, &impl_desc, full_args),
-                        _ => Err(format!(
-                            "Lambda invoke_virtual: expected Ref for this, got {recv:?}"
-                        )),
+                        _ => Err(format!("Lambda invoke_virtual: expected Ref for this, got {recv:?}")),
                     }
                 } else {
                     self.invoke_static(&impl_class, &impl_method, &impl_desc, full_args)
@@ -248,96 +159,35 @@ impl Vm {
             }
         }
 
-        // Resolve method starting from the runtime class.
-        let resolve_class = if self.classes.contains_key(&runtime_class) {
-            runtime_class.clone()
-        } else {
-            class_name.to_owned()
-        };
-
-        // Resolve descriptor: exact match first, then param-only fallback for generic return types.
-        let resolved_descriptor = if self.method_exists(&resolve_class, method_name, descriptor) {
-            descriptor.to_owned()
-        } else {
-            self.find_method_real_descriptor(&resolve_class, method_name, descriptor)
-                .unwrap_or_else(|| descriptor.to_owned())
-        };
-        let descriptor = resolved_descriptor.as_str();
-
-        if !self.method_exists(&resolve_class, method_name, descriptor) {
-            // Method not in bytecode — try native stubs.
-            if let Some(v) = self.native_virtual(&this, &runtime_class, method_name, descriptor, &args) {
-                if let Some(err) = self.pending_exception_err() {
-                    return Err(err);
+        // Try to build a bytecode frame.
+        match self.build_virtual_frame_inner(this.clone(), class_name, method_name, descriptor, args.clone(), true)? {
+            Some(fi) => {
+                let frame_owner = fi.class_name.clone();
+                let mut call_stack = vec![fi];
+                self.run_trampoline(&mut call_stack)
+                    .map_err(|e| format!("{e}\n  at {frame_owner}"))
+            }
+            None => {
+                // Native fallback.
+                let resolve_class = if self.classes.contains_key(&runtime_class) {
+                    runtime_class.clone()
+                } else {
+                    class_name.to_owned()
+                };
+                let resolved = if self.method_exists(&resolve_class, method_name, descriptor) {
+                    descriptor.to_owned()
+                } else {
+                    self.find_method_real_descriptor(&resolve_class, method_name, descriptor)
+                        .unwrap_or_else(|| descriptor.to_owned())
+                };
+                let desc = resolved.as_str();
+                if let Some(v) = self.native_virtual(&this, &runtime_class, method_name, desc, &args) {
+                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                    return Ok(v);
                 }
-                return Ok(v);
+                Err(format!("Virtual method not found: {resolve_class}.{method_name}{desc} (runtime={runtime_class})"))
             }
-            return Err(format!(
-                "Virtual method not found: {resolve_class}.{method_name}{descriptor} (runtime={runtime_class})"
-            ));
         }
-
-        // Resolve method and extract all execution info in one pass.
-        let info = self
-            .resolve_method_exec_info(&resolve_class, method_name, descriptor)
-            .unwrap();
-
-        // JVMS §5.4.3.3: invoking an abstract method throws AbstractMethodError.
-        if info.access_flags & 0x0400 != 0 {
-            let exc = crate::heap::JObject::new("java/lang/AbstractMethodError");
-            let msg_str = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-            let msg = self.intern_string(msg_str);
-            exc.borrow_mut().fields.insert("detailMessage".to_owned(), crate::heap::JValue::Ref(Some(msg)));
-            self.pending_exception = Some(exc);
-            return Err(format!("java/lang/AbstractMethodError: {}.{method_name}{}", info.class_name, info.descriptor));
-        }
-
-        // `this` goes into local[0], then arguments.
-        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
-        let required_slots = 1 + param_tokens
-            .iter()
-            .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
-            .sum::<usize>();
-        let total = info.max_locals.max(required_slots);
-        let mut locals = vec![JValue::Void; total];
-        locals[0] = JValue::Ref(Some(this));
-        let mut local_idx = 1usize;
-        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
-            if local_idx >= locals.len() {
-                break;
-            }
-            locals[local_idx] = self.adapt_value_for_descriptor(t, a);
-            local_idx += if t == "J" || t == "D" { 2 } else { 1 };
-        }
-
-        // If method has no code (native), fall back to native stubs.
-        if !info.has_code {
-            let this_ref = match &locals[0] {
-                JValue::Ref(Some(r)) => r.clone(),
-                _ => return Err(format!("No code (native) in {}.{method_name}{}", info.class_name, info.descriptor)),
-            };
-            let virt_args: Vec<JValue> = locals[1..].iter()
-                .filter(|v| !matches!(v, JValue::Void))
-                .cloned()
-                .collect();
-            if let Some(v) = self.native_virtual(&this_ref, &info.class_name, method_name, &info.descriptor, &virt_args) {
-                if let Some(err) = self.pending_exception_err() {
-                    return Err(err);
-                }
-                return Ok(v);
-            }
-            return Err(format!("No code (native) in {}.{method_name}{}", info.class_name, info.descriptor));
-        }
-
-        let mut frame = Frame {
-            locals,
-            stack: Vec::new(),
-            pc: 0,
-        };
-
-        let frame_owner = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-        self.run_frame(&mut frame, &info.code, &*info.cp, &frame_owner, &info.bootstrap_methods, &info.exception_table)
-            .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 
     fn adapt_lambda_return(
