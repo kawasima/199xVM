@@ -44,7 +44,7 @@ impl Vm {
         let push_return = !desc.ends_with(")V");
         match self.build_static_frame(&class_name, &method_name, &desc, args.clone(), push_return)? {
             Some(fi) => {
-                self.pending_frame = Some(fi);
+                *self.pending_frame_mut() = Some(fi);
                 Ok(None)
             }
             None => {
@@ -93,7 +93,7 @@ impl Vm {
     ) -> Result<Option<JValue>, String> {
         match self.build_virtual_frame_inner(r.clone(), class_name, method_name, descriptor, args.clone(), push_return)? {
             Some(fi) => {
-                self.pending_frame = Some(fi);
+                *self.pending_frame_mut() = Some(fi);
                 Ok(None)
             }
             None => {
@@ -133,7 +133,7 @@ impl Vm {
                 let push_return = !descriptor.ends_with(")V");
                 match self.build_special_frame_inner(r.clone(), &class_name, &method_name, &descriptor, args.clone(), push_return)? {
                     Some(fi) => {
-                        self.pending_frame = Some(fi);
+                        *self.pending_frame_mut() = Some(fi);
                         Ok(None)
                     }
                     None => {
@@ -169,7 +169,7 @@ impl Vm {
             let push_return = !descriptor.ends_with(")V");
             match self.build_static_frame(&class_name, &method_name, &descriptor, args.clone(), push_return)? {
                 Some(fi) => {
-                    self.pending_frame = Some(fi);
+                    *self.pending_frame_mut() = Some(fi);
                     return Ok(None);
                 }
                 None => {

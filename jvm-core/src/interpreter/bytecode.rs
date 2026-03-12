@@ -66,7 +66,7 @@ impl Vm {
 
     /// Take the pending exception object if set, or create a new one.
     fn take_or_create_exception(&mut self, exc_class: &str, err_msg: &str) -> JValue {
-        if let Some(r) = self.pending_exception.take() {
+        if let Some(r) = self.pending_exception_mut().take() {
             JValue::Ref(Some(r))
         } else {
             // Create exception object with the message stored as a field.
@@ -933,7 +933,7 @@ impl Vm {
                         ),
                     };
                     if let Some(r) = exc_ref {
-                        self.pending_exception = Some(r);
+                        *self.pending_exception_mut() = Some(r);
                     }
                     return Err(msg);
                 }
