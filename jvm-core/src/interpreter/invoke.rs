@@ -54,7 +54,7 @@ impl Vm {
         }
 
         // Resolve method and extract all execution info in one pass.
-        let (class_name_owned, descriptor_owned, max_locals, has_code, code, exception_table, cp, bootstrap_methods) = self
+        let info = self
             .resolve_method_exec_info(class_name, method_name, descriptor)
             .ok_or_else(|| format!("Method not found: {class_name}.{method_name}{descriptor}"))?;
 
@@ -64,7 +64,7 @@ impl Vm {
             .iter()
             .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
             .sum();
-        let mut locals = vec![JValue::Void; max_locals.max(required_slots)];
+        let mut locals = vec![JValue::Void; info.max_locals.max(required_slots)];
         let mut local_idx = 0usize;
         for (a, t) in args.into_iter().zip(param_tokens.iter()) {
             if local_idx >= locals.len() {
@@ -75,8 +75,8 @@ impl Vm {
         }
 
         // If method has no code (native), fall back to native stubs.
-        if !has_code {
-            let (param_tokens, _) = Self::parse_method_descriptor_tokens(&descriptor_owned);
+        if !info.has_code {
+            let (param_tokens, _) = Self::parse_method_descriptor_tokens(&info.descriptor);
             let mut native_args = Vec::with_capacity(param_tokens.len());
             let mut slot = 0usize;
             for t in &param_tokens {
@@ -85,13 +85,13 @@ impl Vm {
                 }
                 slot += if t == "J" || t == "D" { 2 } else { 1 };
             }
-            if let Some(v) = self.native_static(&class_name_owned, method_name, &descriptor_owned, &native_args) {
+            if let Some(v) = self.native_static(&info.class_name, method_name, &info.descriptor, &native_args) {
                 if let Some(err) = self.pending_exception_err() {
                     return Err(err);
                 }
                 return Ok(v);
             }
-            return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
+            return Err(format!("No code (native) in {}.{method_name}{}", info.class_name, info.descriptor));
         }
 
         let mut frame = Frame {
@@ -100,8 +100,8 @@ impl Vm {
             pc: 0,
         };
 
-        let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
-        self.run_frame(&mut frame, &code, &*cp, &frame_owner, &bootstrap_methods, &exception_table)
+        let frame_owner = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+        self.run_frame(&mut frame, &info.code, &*info.cp, &frame_owner, &info.bootstrap_methods, &info.exception_table)
             .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 
@@ -136,7 +136,7 @@ impl Vm {
         }
 
         // Resolve method and extract all execution info in one pass.
-        let (class_name_owned, descriptor_owned, max_locals, has_code, code, exception_table, cp, bootstrap_methods) = self
+        let info = self
             .resolve_method_exec_info(class_name, method_name, descriptor)
             .unwrap();
 
@@ -145,7 +145,7 @@ impl Vm {
             .iter()
             .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
             .sum::<usize>();
-        let total = max_locals.max(required_slots);
+        let total = info.max_locals.max(required_slots);
         let mut locals = vec![JValue::Void; total];
         locals[0] = JValue::Ref(Some(this.clone()));
         let mut local_idx = 1usize;
@@ -158,18 +158,18 @@ impl Vm {
         }
 
         // If method has no code (native), fall back to native stubs.
-        if !has_code {
+        if !info.has_code {
             let virt_args: Vec<JValue> = locals[1..].iter()
                 .filter(|v| !matches!(v, JValue::Void))
                 .cloned()
                 .collect();
-            if let Some(v) = self.native_virtual(&this, &class_name_owned, method_name, &descriptor_owned, &virt_args) {
+            if let Some(v) = self.native_virtual(&this, &info.class_name, method_name, &info.descriptor, &virt_args) {
                 if let Some(err) = self.pending_exception_err() {
                     return Err(err);
                 }
                 return Ok(v);
             }
-            return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
+            return Err(format!("No code (native) in {}.{method_name}{}", info.class_name, info.descriptor));
         }
 
         let mut frame = Frame {
@@ -178,8 +178,8 @@ impl Vm {
             pc: 0,
         };
 
-        let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
-        self.run_frame(&mut frame, &code, &*cp, &frame_owner, &bootstrap_methods, &exception_table)
+        let frame_owner = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+        self.run_frame(&mut frame, &info.code, &*info.cp, &frame_owner, &info.bootstrap_methods, &info.exception_table)
             .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 
@@ -270,7 +270,7 @@ impl Vm {
         }
 
         // Resolve method and extract all execution info in one pass.
-        let (class_name_owned, descriptor_owned, max_locals, has_code, code, exception_table, cp, bootstrap_methods) = self
+        let info = self
             .resolve_method_exec_info(&resolve_class, method_name, descriptor)
             .unwrap();
 
@@ -280,7 +280,7 @@ impl Vm {
             .iter()
             .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
             .sum::<usize>();
-        let total = max_locals.max(required_slots);
+        let total = info.max_locals.max(required_slots);
         let mut locals = vec![JValue::Void; total];
         locals[0] = JValue::Ref(Some(this));
         let mut local_idx = 1usize;
@@ -293,22 +293,22 @@ impl Vm {
         }
 
         // If method has no code (native), fall back to native stubs.
-        if !has_code {
+        if !info.has_code {
             let this_ref = match &locals[0] {
                 JValue::Ref(Some(r)) => r.clone(),
-                _ => return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}")),
+                _ => return Err(format!("No code (native) in {}.{method_name}{}", info.class_name, info.descriptor)),
             };
             let virt_args: Vec<JValue> = locals[1..].iter()
                 .filter(|v| !matches!(v, JValue::Void))
                 .cloned()
                 .collect();
-            if let Some(v) = self.native_virtual(&this_ref, &class_name_owned, method_name, &descriptor_owned, &virt_args) {
+            if let Some(v) = self.native_virtual(&this_ref, &info.class_name, method_name, &info.descriptor, &virt_args) {
                 if let Some(err) = self.pending_exception_err() {
                     return Err(err);
                 }
                 return Ok(v);
             }
-            return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
+            return Err(format!("No code (native) in {}.{method_name}{}", info.class_name, info.descriptor));
         }
 
         let mut frame = Frame {
@@ -317,8 +317,8 @@ impl Vm {
             pc: 0,
         };
 
-        let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
-        self.run_frame(&mut frame, &code, &*cp, &frame_owner, &bootstrap_methods, &exception_table)
+        let frame_owner = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+        self.run_frame(&mut frame, &info.code, &*info.cp, &frame_owner, &info.bootstrap_methods, &info.exception_table)
             .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 

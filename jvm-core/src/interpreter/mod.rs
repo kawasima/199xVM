@@ -19,6 +19,28 @@ use crate::class_file::{
 };
 use crate::heap::{JObject, JRef, JValue};
 
+/// All execution-time data extracted from a resolved method in a single pass.
+/// Returned by [`Vm::resolve_method_exec_info`] to avoid repeated `find_method`
+/// calls and to give each field a self-documenting name.
+pub(super) struct MethodExecInfo {
+    /// Internal class name that owns the resolved method.
+    pub class_name: String,
+    /// Resolved method descriptor (may differ from the call-site descriptor for generics).
+    pub descriptor: String,
+    /// `Code.max_locals` (0 if the method has no `Code` attribute).
+    pub max_locals: usize,
+    /// `true` when the method has a `Code` attribute (i.e. is not abstract/native).
+    pub has_code: bool,
+    /// Raw bytecode.
+    pub code: Vec<u8>,
+    /// Exception handler table.
+    pub exception_table: Vec<ExceptionTableEntry>,
+    /// Shared constant-pool entries (`Rc` for O(1) clone).
+    pub cp: Rc<Vec<ConstantPoolEntry>>,
+    /// Bootstrap methods from the `BootstrapMethods` attribute.
+    pub bootstrap_methods: Vec<BootstrapMethod>,
+}
+
 mod annotations;
 mod bytecode;
 mod descriptors;
@@ -195,19 +217,10 @@ impl Vm {
         class_name: &str,
         method_name: &str,
         descriptor: &str,
-    ) -> Option<(
-        String,
-        String,
-        usize,
-        bool,
-        Vec<u8>,
-        Vec<ExceptionTableEntry>,
-        Rc<Vec<ConstantPoolEntry>>,
-        Vec<BootstrapMethod>,
-    )> {
+    ) -> Option<MethodExecInfo> {
         let (class, method) = self.find_method(class_name, method_name, descriptor)?;
-        let cn = class.constant_pool.class_name(class.this_class).to_owned();
-        let desc = class.constant_pool.utf8(method.descriptor_index).to_owned();
+        let class_name = class.constant_pool.class_name(class.this_class).to_owned();
+        let descriptor = class.constant_pool.utf8(method.descriptor_index).to_owned();
         let (max_locals, has_code, code, exception_table) = if let Some(ca) = method.code() {
             (ca.max_locals as usize, true, ca.code.clone(), ca.exception_table.clone())
         } else {
@@ -217,7 +230,7 @@ impl Vm {
         let bootstrap_methods = class.attributes.iter().find_map(|a| {
             if let Attribute::BootstrapMethods(bms) = a { Some(bms.clone()) } else { None }
         }).unwrap_or_default();
-        Some((cn, desc, max_locals, has_code, code, exception_table, cp, bootstrap_methods))
+        Some(MethodExecInfo { class_name, descriptor, max_locals, has_code, code, exception_table, cp, bootstrap_methods })
     }
 
     /// Like find_method but with relaxed matching when the compiler emits generic types.
