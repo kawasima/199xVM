@@ -185,7 +185,7 @@ impl Vm {
         }
     }
 
-    fn adapt_lambda_return(
+    pub(in crate::interpreter) fn adapt_lambda_return(
         &mut self,
         sam_descriptor: &str,
         impl_descriptor: &str,

@@ -97,6 +97,7 @@ impl Vm {
         // thread state for yielding.
         match (method_name, descriptor) {
             ("wait", "()V") | ("wait", "(J)V") => {
+                // Note: wait(long) timeout is intentionally ignored — waits indefinitely.
                 if let Err(e) = self.monitor_wait(&r) {
                     return Err(e);
                 }
@@ -249,6 +250,7 @@ impl Vm {
                     let call_arg_count = count_args(descriptor);
                     if method_name == sam_method.as_str() && call_arg_count == sam_arg_count {
                         Some((
+                            sam_desc.clone(),
                             impl_class.clone(), impl_method.clone(), impl_desc.clone(),
                             *ref_kind, captured.clone(),
                         ))
@@ -259,14 +261,16 @@ impl Vm {
                 _ => None,
             }
         };
-        let Some((impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info else {
+        let Some((sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info else {
             return Ok(None);
         };
 
         let mut full_args = captured;
         full_args.extend(args);
 
-        if ref_kind == 5 || ref_kind == 7 || ref_kind == 9 {
+        let adapt = Some((sam_desc, impl_desc.clone()));
+
+        let mut fi = if ref_kind == 5 || ref_kind == 7 || ref_kind == 9 {
             // Virtual/interface dispatch on receiver.
             if full_args.is_empty() {
                 return Err("Lambda SAM dispatch: missing receiver argument".to_owned());
@@ -284,7 +288,14 @@ impl Vm {
             // Static dispatch.
             self.ensure_class_init(&impl_class)?;
             self.build_static_frame(&impl_class, &impl_method, &impl_desc, full_args, push_return)
+        }?;
+
+        // Attach return-type adaptation info so the trampoline can box
+        // primitive returns when the SAM expects a reference type.
+        if let Some(ref mut frame_info) = fi {
+            frame_info.lambda_return_adapt = adapt;
         }
+        Ok(fi)
     }
 
     /// Handle `invokedynamic` — currently supports the three bootstrap methods

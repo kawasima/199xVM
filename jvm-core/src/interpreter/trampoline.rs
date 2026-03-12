@@ -23,6 +23,10 @@ pub(crate) struct FrameInfo {
     pub push_return: bool,
     /// Pending concat recipe state (for StringConcatFactory toString() calls).
     pub concat_state: Option<ConcatState>,
+    /// For lambda SAM frames: (sam_descriptor, impl_descriptor) for return-type boxing.
+    /// When present, the return value will be adapted (e.g., int → Integer) before
+    /// being pushed onto the caller's stack.
+    pub lambda_return_adapt: Option<(String, String)>,
 }
 
 /// Saved state for a StringConcatFactory recipe interrupted by toString().
@@ -84,6 +88,7 @@ impl Vm {
                 Ok(Some(ret)) => {
                     // Method returned a value — pop frame.
                     let popped = call_stack.pop().unwrap();
+                    let ret = self.adapt_lambda_return_if_needed(&popped, ret)?;
                     if call_stack.is_empty() {
                         return Ok(ret);
                     }
@@ -163,6 +168,7 @@ impl Vm {
             match result {
                 Ok(Some(ret)) => {
                     let popped = call_stack.pop().unwrap();
+                    let ret = self.adapt_lambda_return_if_needed(&popped, ret)?;
                     if call_stack.is_empty() {
                         return Ok(Some(ret));
                     }
@@ -375,6 +381,20 @@ impl Vm {
         Err(if trace.is_empty() { err_msg.to_owned() } else { trace })
     }
 
+    /// Apply lambda return-type adaptation (boxing) if the popped frame was a
+    /// lambda SAM frame with mismatched return types.
+    fn adapt_lambda_return_if_needed(
+        &mut self,
+        popped: &FrameInfo,
+        ret: JValue,
+    ) -> Result<JValue, String> {
+        let Some((ref sam_desc, ref impl_desc)) = popped.lambda_return_adapt else {
+            return Ok(ret);
+        };
+        // Delegate to the same adaptation logic used by invoke_virtual's SAM path.
+        self.adapt_lambda_return(sam_desc, impl_desc, ret)
+    }
+
     /// Continue a StringConcatFactory recipe. May push new frames for toString().
     fn try_resume_concat(
         &mut self,
@@ -554,7 +574,7 @@ impl Vm {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
             code: info.code, cp: info.cp, frame_owner: fo,
             bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
-            push_return, concat_state: None,
+            push_return, concat_state: None, lambda_return_adapt: None,
         }))
     }
 
@@ -637,7 +657,7 @@ impl Vm {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
             code: info.code, cp: info.cp, frame_owner: fo,
             bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
-            push_return, concat_state: None,
+            push_return, concat_state: None, lambda_return_adapt: None,
         }))
     }
 
@@ -693,7 +713,7 @@ impl Vm {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
             code: info.code, cp: info.cp, frame_owner: fo,
             bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
-            push_return, concat_state: None,
+            push_return, concat_state: None, lambda_return_adapt: None,
         }))
     }
 }
