@@ -281,7 +281,14 @@ impl super::Vm {
                 ("start", "()V") => {
                     match self.thread_start(Rc::clone(this)) {
                         Ok(_) => {}
-                        Err(e) => eprintln!("Thread.start() error: {e}"),
+                        Err(e) => {
+                            // Propagate the error as a pending Java exception
+                            // so that Java code can observe the failure.
+                            let msg_ref = self.intern_string(&e);
+                            let exc = crate::heap::JObject::new("java/lang/RuntimeException");
+                            exc.borrow_mut().fields.insert("message".to_owned(), JValue::Ref(Some(msg_ref)));
+                            *self.pending_exception_mut() = Some(exc);
+                        }
                     }
                     return Some(JValue::Void);
                 }

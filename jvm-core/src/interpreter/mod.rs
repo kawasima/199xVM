@@ -101,6 +101,9 @@ pub(crate) enum ThreadState {
     Joining(ThreadId),
     /// Sleeping (Thread.sleep).
     Sleeping,
+    /// Yielded — Thread.yield() requested a voluntary context switch.
+    /// The scheduler sets this back to Runnable after switching.
+    Yielded,
     /// Terminated — run() method returned or threw.
     Terminated,
 }
@@ -165,7 +168,7 @@ pub(crate) struct Scheduler {
 const TIME_SLICE: usize = 1000;
 
 impl Scheduler {
-    fn new() -> Self {
+    pub(in crate::interpreter) fn new() -> Self {
         let main_thread = ThreadContext::new(0);
         Scheduler {
             threads: vec![main_thread],
@@ -407,6 +410,11 @@ impl Vm {
     /// Spawn a new green thread that will execute the `run()` method of the
     /// given java.lang.Thread object. Returns the new thread's ID.
     pub(in crate::interpreter) fn thread_start(&mut self, thread_obj: JRef) -> Result<ThreadId, String> {
+        // Reject double-start: check if a ThreadContext already exists for this object.
+        if self.find_thread_id_by_object(&thread_obj).is_some() {
+            return Err("IllegalThreadStateException: thread already started".to_owned());
+        }
+
         let id = self.scheduler.spawn(Some(Rc::clone(&thread_obj)));
 
         // Build a frame for `run()V` on the Thread object.
@@ -446,10 +454,11 @@ impl Vm {
             return Rc::clone(obj);
         }
         // Main thread — create a Thread object lazily.
+        // Use tid=0 to avoid collision with Thread.nextId which starts at 1.
         let obj = JObject::new("java/lang/Thread");
         {
             let mut b = obj.borrow_mut();
-            b.fields.insert("tid".to_owned(), JValue::Int(1));
+            b.fields.insert("tid".to_owned(), JValue::Int(0));
             b.fields.insert("name".to_owned(), JValue::Ref(Some(self.intern_string("main"))));
             b.fields.insert("priority".to_owned(), JValue::Int(5));
             b.fields.insert("daemon".to_owned(), JValue::Int(0));
