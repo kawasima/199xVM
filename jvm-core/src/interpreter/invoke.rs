@@ -16,11 +16,12 @@ impl Vm {
     ) -> Result<JValue, String> {
         // Normalize descriptor and args (varargs synthesis) once, shared by
         // both the bytecode (trampoline) and native paths.
-        let (resolved_desc, args) = match self.prepare_static_args(class_name, method_name, descriptor, args) {
+        let orig_args = args;
+        let (resolved_desc, args) = match self.prepare_static_args(class_name, method_name, descriptor, orig_args.clone()) {
             Some(pair) => pair,
             None => {
-                // Method flags not found — try native stubs with original descriptor.
-                if let Some(v) = self.native_static(class_name, method_name, descriptor, &[]) {
+                // Method flags not found — try native stubs with original args/descriptor.
+                if let Some(v) = self.native_static(class_name, method_name, descriptor, &orig_args) {
                     if let Some(err) = self.pending_exception_err() { return Err(err); }
                     return Ok(v);
                 }

@@ -30,11 +30,12 @@ impl Vm {
         let args = pop_args(frame, n_args);
 
         // Normalize descriptor and args (varargs synthesis) before branching.
+        let orig_args = args.clone();
         let (desc, args) = match self.prepare_static_args(&class_name, &method_name, &descriptor, args) {
             Some(pair) => pair,
             None => {
-                // Method flags not found — fall back to invoke_static which handles native stubs.
-                let result = self.invoke_static(&class_name, &method_name, &descriptor, vec![])?;
+                // Method flags not found — fall back to invoke_static with original args.
+                let result = self.invoke_static(&class_name, &method_name, &descriptor, orig_args)?;
                 if !matches!(result, JValue::Void) { frame.stack.push(result); }
                 return Ok(None);
             }
