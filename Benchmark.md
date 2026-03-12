@@ -54,3 +54,16 @@ criterion will print a percentage change and confidence interval for each benchm
 | `static_field_1000x` | 4.15 ms |
 | `string_ldc_1000x` | 3.54 ms |
 | `virtual_call_1000x` | 5.06 ms |
+
+## After Issue #13 fixes (2026-03-12)
+
+Changes: `resolve_method_exec_info` helper (eliminates repeated `find_method` calls),
+`ConstantPool.entries` wrapped in `Rc` (O(1) clone), `static_fields` restructured to
+`HashMap<class, HashMap<field, value>>` (no `format!` key), `intern_string` uses `entry` API.
+
+| Benchmark | Before | After | Change |
+|---|---|---|---|
+| `method_call_1000x` | 4.91 ms | 4.39 ms | **-10.7%** |
+| `static_field_1000x` | 4.15 ms | 3.93 ms | **-5.4%** |
+| `string_ldc_1000x` | 3.54 ms | 3.68 ms | ~0% (noise) |
+| `virtual_call_1000x` | 5.06 ms | 4.54 ms | **-10.3%** |

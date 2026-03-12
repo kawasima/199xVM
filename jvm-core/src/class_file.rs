@@ -3,6 +3,8 @@
 //! Parses the binary `.class` format as specified in JVMS §4.
 //! Supports class file versions up to 69 (Java 25).
 
+use std::rc::Rc;
+
 /// Magic number that starts every `.class` file.
 const MAGIC: u32 = 0xCAFE_BABE;
 
@@ -22,14 +24,17 @@ pub struct ClassFile {
 }
 
 /// Constant pool wrapper with 1-based indexing (index 0 is unused per spec).
-#[derive(Debug)]
+///
+/// `entries` is wrapped in `Rc` so cloning the constant pool (e.g. when
+/// passing it to `run_frame`) is O(1) instead of O(n).
+#[derive(Debug, Clone)]
 pub struct ConstantPool {
-    pub(crate) entries: Vec<ConstantPoolEntry>,
+    pub(crate) entries: Rc<Vec<ConstantPoolEntry>>,
 }
 
 impl ConstantPool {
     fn new(entries: Vec<ConstantPoolEntry>) -> Self {
-        Self { entries }
+        Self { entries: Rc::new(entries) }
     }
 
     /// Get entry at 1-based index.

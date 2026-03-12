@@ -8,14 +8,14 @@
 //! - Integer / long / reference comparisons and control flow
 //! - Native stubs for `java.lang.*` and `java.util.*`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 use crate::class_file::{
-    ClassFile, MethodInfo,
+    Attribute, BootstrapMethod, ClassFile, ConstantPoolEntry, ExceptionTableEntry, MethodInfo,
 };
 use crate::heap::{JObject, JRef, JValue};
 
@@ -50,8 +50,11 @@ pub struct Vm {
     pub(in crate::interpreter) classes: HashMap<String, ClassFile>,
     /// Interned strings cache (not strictly required but saves allocations).
     pub(in crate::interpreter) string_pool: HashMap<String, JRef>,
-    /// Static field storage keyed by "ClassName.fieldName".
-    pub(in crate::interpreter) static_fields: HashMap<String, JValue>,
+    /// Static field storage keyed by class name → field name.
+    /// Avoids allocating a `"ClassName.fieldName"` string on every getstatic/putstatic.
+    pub(in crate::interpreter) static_fields: HashMap<String, HashMap<String, JValue>>,
+    /// Classes whose `<clinit>` has already been run.
+    pub(in crate::interpreter) clinit_done: HashSet<String>,
     /// Canonical Class objects keyed by internal class name or descriptor.
     pub(in crate::interpreter) class_pool: HashMap<String, JRef>,
     /// Pending exception object — set by athrow, consumed by exception handler.
@@ -71,6 +74,7 @@ impl Vm {
             classes: HashMap::new(),
             string_pool: HashMap::new(),
             static_fields: HashMap::new(),
+            clinit_done: HashSet::new(),
             class_pool: HashMap::new(),
             pending_exception: None,
             stdout_buffer: String::new(),
@@ -99,12 +103,7 @@ impl Vm {
     /// Intern a Java string (returns same `JRef` for equal content).
     pub fn intern_string(&mut self, s: impl Into<String>) -> JRef {
         let s = s.into();
-        if let Some(r) = self.string_pool.get(&s) {
-            return Rc::clone(r);
-        }
-        let r = JObject::new_string(s.clone());
-        self.string_pool.insert(s, Rc::clone(&r));
-        r
+        Rc::clone(self.string_pool.entry(s.clone()).or_insert_with(|| JObject::new_string(s)))
     }
 
     fn pending_exception_err(&self) -> Option<String> {
@@ -165,15 +164,53 @@ impl Vm {
             }
         }
         // Walk interfaces (for default methods).
+        // Collect interface names before the recursive calls to avoid holding
+        // a borrow on `self.classes` across the mutable-borrow boundary.
         let iface_names: Vec<String> = class.interfaces.iter()
             .map(|&idx| class.constant_pool.class_name(idx).to_owned())
             .collect();
-        for iface_name in iface_names {
-            if let Some(result) = self.find_method(&iface_name, method_name, descriptor) {
+        for iface_name in &iface_names {
+            if let Some(result) = self.find_method(iface_name, method_name, descriptor) {
                 return Some(result);
             }
         }
         None
+    }
+
+    /// Resolve a method and extract all execution-time data in a single pass:
+    /// `(canonical_class_name, canonical_descriptor, max_locals, has_code,
+    ///   code_bytes, exception_table, cp_entries, bootstrap_methods)`.
+    ///
+    /// This avoids repeated `find_method` calls and eliminates the full clone of
+    /// the constant pool that was previously needed to release the borrow on `self`.
+    pub(super) fn resolve_method_exec_info(
+        &self,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Option<(
+        String,
+        String,
+        usize,
+        bool,
+        Vec<u8>,
+        Vec<ExceptionTableEntry>,
+        Rc<Vec<ConstantPoolEntry>>,
+        Vec<BootstrapMethod>,
+    )> {
+        let (class, method) = self.find_method(class_name, method_name, descriptor)?;
+        let cn = class.constant_pool.class_name(class.this_class).to_owned();
+        let desc = class.constant_pool.utf8(method.descriptor_index).to_owned();
+        let (max_locals, has_code, code, exception_table) = if let Some(ca) = method.code() {
+            (ca.max_locals as usize, true, ca.code.clone(), ca.exception_table.clone())
+        } else {
+            (0, false, vec![], vec![])
+        };
+        let cp = Rc::clone(&class.constant_pool.entries);
+        let bootstrap_methods = class.attributes.iter().find_map(|a| {
+            if let Attribute::BootstrapMethods(bms) = a { Some(bms.clone()) } else { None }
+        }).unwrap_or_default();
+        Some((cn, desc, max_locals, has_code, code, exception_table, cp, bootstrap_methods))
     }
 
     /// Like find_method but with relaxed matching when the compiler emits generic types.
@@ -246,12 +283,11 @@ impl Vm {
     /// be initialized first (recursively), and any superinterfaces that declare
     /// default methods must also be initialized.
     fn ensure_class_init(&mut self, class_name: &str) -> Result<(), String> {
-        let key = format!("{class_name}.<clinit>done");
-        if self.static_fields.contains_key(&key) {
+        if self.clinit_done.contains(class_name) {
             return Ok(());
         }
         // Mark as initialized before running to prevent recursion.
-        self.static_fields.insert(key, JValue::Int(1));
+        self.clinit_done.insert(class_name.to_owned());
 
         // Initialize super class first (JVMS §5.5 step 7).
         let (super_name, iface_names) = if let Some(class) = self.classes.get(class_name) {
