@@ -598,8 +598,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
   // Parse method/constructor throws clause and return resolved type names.
   function parseOptionalThrowsClause(): string[] {
-    if (!(at(TokenKind.Ident) && peek().value === "throws")) return [];
-    advance(); // throws
+    if (!match(TokenKind.KwThrows)) return [];
     const out = [parseResolvedTypeName()];
     while (match(TokenKind.Comma)) {
       out.push(parseResolvedTypeName());

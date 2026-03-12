@@ -52,6 +52,7 @@ export enum TokenKind {
   KwEnum = "enum",
   KwDo = "do",
   KwThrow = "throw",
+  KwThrows = "throws",
   KwTry = "try",
   KwCatch = "catch",
   KwFinally = "finally",
@@ -59,6 +60,12 @@ export enum TokenKind {
   KwSynchronized = "synchronized",
   KwBreak = "break",
   KwContinue = "continue",
+  KwNative = "native",
+  KwStrictfp = "strictfp",
+  KwTransient = "transient",
+  KwVolatile = "volatile",
+  KwConst = "const",
+  KwGoto = "goto",
 
   // Delimiters
   LParen = "(",
@@ -199,6 +206,7 @@ const KEYWORDS: Record<string, TokenKind> = {
   enum: TokenKind.KwEnum,
   do: TokenKind.KwDo,
   throw: TokenKind.KwThrow,
+  throws: TokenKind.KwThrows,
   try: TokenKind.KwTry,
   catch: TokenKind.KwCatch,
   finally: TokenKind.KwFinally,
@@ -206,6 +214,12 @@ const KEYWORDS: Record<string, TokenKind> = {
   synchronized: TokenKind.KwSynchronized,
   break: TokenKind.KwBreak,
   continue: TokenKind.KwContinue,
+  native: TokenKind.KwNative,
+  strictfp: TokenKind.KwStrictfp,
+  transient: TokenKind.KwTransient,
+  volatile: TokenKind.KwVolatile,
+  const: TokenKind.KwConst,
+  goto: TokenKind.KwGoto,
 };
 
 export function lex(source: string): Token[] {
@@ -258,33 +272,56 @@ export function lex(source: string): Token[] {
         throw new Error(`Invalid escape sequence at line ${startLine}:${startCol}`);
     }
   }
-  function scanDigits(startLine: number, startCol: number, digitRe: RegExp): string {
-    let out = "";
-    let sawDigit = false;
-    let prevUnderscore = false;
-    while (true) {
-      const c = peek();
-      if (digitRe.test(c)) {
-        sawDigit = true;
-        prevUnderscore = false;
-        out += advance();
-        continue;
-      }
-      if (c === "_") {
-        const next = peekN(1);
-        if (!sawDigit || prevUnderscore || !digitRe.test(next)) {
-          throw new Error(`Invalid underscore placement in number literal at line ${startLine}:${startCol}`);
-        }
-        prevUnderscore = true;
-        out += advance();
-        continue;
-      }
-      break;
+  function parseNumberLiteral(startLine: number, startCol: number): { kind: TokenKind; value: string; len: number } | undefined {
+    const rem = source.slice(pos);
+    const DEC = "[0-9](?:_?[0-9])*";
+    const NZDEC = "[1-9](?:_?[0-9])*";
+    const OCT = "[0-7](?:_?[0-7])*";
+    const HEX = "[0-9a-fA-F](?:_?[0-9a-fA-F])*";
+    const BIN = "[01](?:_?[01])*";
+    const EXP10 = `[eE][+-]?${DEC}`;
+    const EXP2 = `[pP][+-]?${DEC}`;
+    const patterns: Array<{ re: RegExp; kind: TokenKind }> = [
+      { re: new RegExp(`^0[xX](?:${HEX}\\.(?:${HEX})?|(?:${HEX})?\\.${HEX})${EXP2}[fFdD]?`), kind: TokenKind.DoubleLiteral },
+      { re: new RegExp(`^0[xX]${HEX}${EXP2}[fFdD]?`), kind: TokenKind.DoubleLiteral },
+      { re: new RegExp(`^(?:${DEC}\\.(?:${DEC})?|\\.${DEC})(?:${EXP10})?[fFdD]?`), kind: TokenKind.DoubleLiteral },
+      { re: new RegExp(`^${DEC}${EXP10}[fFdD]?`), kind: TokenKind.DoubleLiteral },
+      { re: new RegExp(`^${DEC}[fFdD]`), kind: TokenKind.FloatLiteral },
+      { re: new RegExp(`^0[xX]${HEX}[lL]?`), kind: TokenKind.IntLiteral },
+      { re: new RegExp(`^0[bB]${BIN}[lL]?`), kind: TokenKind.IntLiteral },
+      { re: new RegExp(`^0(?:_?[0-7])+[lL]?`), kind: TokenKind.IntLiteral },
+      { re: new RegExp(`^(?:0|${NZDEC})[lL]?`), kind: TokenKind.IntLiteral },
+    ];
+
+    let best: { text: string; kind: TokenKind } | undefined;
+    for (const p of patterns) {
+      const m = rem.match(p.re);
+      if (!m) continue;
+      const text = m[0];
+      if (!best || text.length > best.text.length) best = { text, kind: p.kind };
     }
-    if (!sawDigit || prevUnderscore) {
+    if (!best) return undefined;
+
+    const matched = best.text;
+    const last = matched[matched.length - 1];
+    if (last === "_") {
+      throw new Error(`Invalid underscore placement in number literal at line ${startLine}:${startCol}`);
+    }
+
+    const next = rem[matched.length] ?? "\0";
+    if (isIdentifierPart(next)) {
       throw new Error(`Malformed number literal at line ${startLine}:${startCol}`);
     }
-    return out;
+    if (rem.startsWith("0") && matched === "0" && /[0-9_]/.test(next)) {
+      throw new Error(`Malformed octal literal at line ${startLine}:${startCol}`);
+    }
+
+    if (/[fF]/.test(last)) best.kind = TokenKind.FloatLiteral;
+    else if (/[dD]/.test(last)) best.kind = TokenKind.DoubleLiteral;
+    else if (/[lL]/.test(last)) best.kind = TokenKind.LongLiteral;
+    else if (best.kind === TokenKind.IntLiteral) best.kind = TokenKind.IntLiteral;
+    else best.kind = TokenKind.DoubleLiteral;
+    return { kind: best.kind, value: matched, len: matched.length };
   }
 
   while (pos < source.length) {
@@ -327,11 +364,12 @@ export function lex(source: string): Token[] {
         advance();
       }
       let s = "";
+      let closed = false;
       while (pos < source.length) {
         if (peek() === '"' && peekN(1) === '"' && peekN(2) === '"') {
           advance(); advance(); advance();
           tokens.push({ kind: TokenKind.StringLiteral, value: s, line: startLine, col: startCol });
-          s = "";
+          closed = true;
           break;
         }
         if (peek() === "\\") {
@@ -341,7 +379,7 @@ export function lex(source: string): Token[] {
           s += advance();
         }
       }
-      if (s.length > 0 || !(tokens[tokens.length - 1]?.kind === TokenKind.StringLiteral && tokens[tokens.length - 1].line === startLine && tokens[tokens.length - 1].col === startCol)) {
+      if (!closed) {
         throw new Error(`Unterminated text block at line ${startLine}:${startCol}`);
       }
       continue;
@@ -390,71 +428,12 @@ export function lex(source: string): Token[] {
       continue;
     }
 
-    // Floating-point starting with decimal point: .123, .5e2, .0f
-    if (ch === "." && /[0-9]/.test(peekN(1))) {
-      let raw = ".";
-      advance();
-      raw += scanDigits(startLine, startCol, /[0-9]/);
-      if (peek() === "e" || peek() === "E") {
-        raw += advance();
-        if (peek() === "+" || peek() === "-") raw += advance();
-        raw += scanDigits(startLine, startCol, /[0-9]/);
-      }
-      const isFloat = peek() === "f" || peek() === "F";
-      const isDouble = peek() === "d" || peek() === "D";
-      if (isFloat || isDouble) raw += advance();
-      tokens.push({ kind: isFloat ? TokenKind.FloatLiteral : TokenKind.DoubleLiteral, value: raw, line: startLine, col: startCol });
-      continue;
-    }
-
     // Number literal
-    if (/[0-9]/.test(ch)) {
-      let raw = "";
-      let hasDecimal = false;
-      if (peek() === "0" && (source[pos + 1] === "x" || source[pos + 1] === "X")) {
-        raw += advance(); // 0
-        raw += advance(); // x/X
-        raw += scanDigits(startLine, startCol, /[0-9a-fA-F]/);
-      } else if (peek() === "0" && (source[pos + 1] === "b" || source[pos + 1] === "B")) {
-        raw += advance(); // 0
-        raw += advance(); // b/B
-        raw += scanDigits(startLine, startCol, /[01]/);
-      } else if (peek() === "0" && /[0-9_]/.test(source[pos + 1] ?? "")) {
-        raw += advance(); // leading 0
-        raw += scanDigits(startLine, startCol, /[0-7]/);
-      } else {
-        raw += scanDigits(startLine, startCol, /[0-9]/);
-      }
-      // Decimal point (float/double)
-      if (peek() === ".") {
-        hasDecimal = true;
-        raw += advance(); // '.'
-        if (/[0-9_]/.test(peek())) raw += scanDigits(startLine, startCol, /[0-9]/);
-      }
-      // Exponent
-      if (peek() === "e" || peek() === "E") {
-        hasDecimal = true; // exponent implies floating point
-        raw += advance();
-        if (peek() === "+" || peek() === "-") raw += advance();
-        raw += scanDigits(startLine, startCol, /[0-9]/);
-      }
-      // Suffix
-      const isFloat = peek() === "f" || peek() === "F";
-      const isDouble = peek() === "d" || peek() === "D";
-      const isLong = !isFloat && !isDouble && (peek() === "L" || peek() === "l");
-      if (isFloat || isDouble || isLong) raw += advance();
-      if (isLong && hasDecimal) {
-        throw new Error(`Invalid long literal with floating-point form at line ${startLine}:${startCol}`);
-      }
-      if (isFloat) {
-        tokens.push({ kind: TokenKind.FloatLiteral, value: raw, line: startLine, col: startCol });
-      } else if (isDouble || hasDecimal) {
-        tokens.push({ kind: TokenKind.DoubleLiteral, value: raw, line: startLine, col: startCol });
-      } else if (isLong) {
-        tokens.push({ kind: TokenKind.LongLiteral, value: raw, line: startLine, col: startCol });
-      } else {
-        tokens.push({ kind: TokenKind.IntLiteral, value: raw, line: startLine, col: startCol });
-      }
+    if (/[0-9]/.test(ch) || (ch === "." && /[0-9]/.test(peekN(1)))) {
+      const parsed = parseNumberLiteral(startLine, startCol);
+      if (!parsed) throw new Error(`Malformed number literal at line ${startLine}:${startCol}`);
+      for (let i = 0; i < parsed.len; i++) advance();
+      tokens.push({ kind: parsed.kind, value: parsed.value, line: startLine, col: startCol });
       continue;
     }
 
@@ -462,6 +441,9 @@ export function lex(source: string): Token[] {
     if (isIdentifierStart(ch)) {
       let ident = "";
       while (isIdentifierPart(peek())) ident += advance();
+      if (ident === "_") {
+        throw new Error(`'_' is a reserved keyword and cannot be used as an identifier at line ${startLine}:${startCol}`);
+      }
       const kw = Object.prototype.hasOwnProperty.call(KEYWORDS, ident) ? KEYWORDS[ident] : undefined;
       tokens.push({ kind: kw ?? TokenKind.Ident, value: ident, line: startLine, col: startCol });
       continue;

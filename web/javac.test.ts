@@ -215,6 +215,27 @@ world
     assert.equal(tokens[3].kind, TokenKind.FloatLiteral);
   });
 
+  test("hex floating-point literals are tokenized", () => {
+    const tokens = lex("0x1.fp3 0x1p-1");
+    assert.equal(tokens[0].kind, TokenKind.DoubleLiteral);
+    assert.equal(tokens[1].kind, TokenKind.DoubleLiteral);
+  });
+
+  test("underscore is rejected as identifier", () => {
+    assert.throws(() => lex("_"), /reserved keyword/);
+  });
+
+  test("legacy reserved keywords are tokenized", () => {
+    const tokens = lex("native strictfp transient volatile const goto throws");
+    assert.equal(tokens[0].kind, TokenKind.KwNative);
+    assert.equal(tokens[1].kind, TokenKind.KwStrictfp);
+    assert.equal(tokens[2].kind, TokenKind.KwTransient);
+    assert.equal(tokens[3].kind, TokenKind.KwVolatile);
+    assert.equal(tokens[4].kind, TokenKind.KwConst);
+    assert.equal(tokens[5].kind, TokenKind.KwGoto);
+    assert.equal(tokens[6].kind, TokenKind.KwThrows);
+  });
+
   test("operators", () => {
     const tokens = lex("== != <= >= && || ++ -- ::");
     const kinds = tokens.slice(0, -1).map(t => t.kind);
