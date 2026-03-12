@@ -25,10 +25,35 @@ const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
   "java/lang/String.toString()": { owner: "java/lang/String", returnType: "String", paramTypes: [] },
   // Object
   "java/lang/Object.toString()": { owner: "java/lang/Object", returnType: "String", paramTypes: [] },
+  "java/lang/Object.wait()": { owner: "java/lang/Object", returnType: "void", paramTypes: [] },
+  "java/lang/Object.notify()": { owner: "java/lang/Object", returnType: "void", paramTypes: [] },
+  "java/lang/Object.notifyAll()": { owner: "java/lang/Object", returnType: "void", paramTypes: [] },
   "java/lang/Object.getClass()": {
     owner: "java/lang/Object",
     returnType: { className: "java/lang/Class" },
     paramTypes: [],
+  },
+  // Thread
+  "java/lang/Thread.<init>(Ljava/lang/Runnable;)": {
+    owner: "java/lang/Thread",
+    returnType: "void",
+    paramTypes: [{ className: "java/lang/Runnable" }],
+  },
+  "java/lang/Thread.start()": {
+    owner: "java/lang/Thread",
+    returnType: "void",
+    paramTypes: [],
+  },
+  "java/lang/Thread.join()": {
+    owner: "java/lang/Thread",
+    returnType: "void",
+    paramTypes: [],
+  },
+  "java/lang/Thread.yield()": {
+    owner: "java/lang/Thread",
+    returnType: "void",
+    paramTypes: [],
+    isStatic: true,
   },
   "java/lang/Throwable.addSuppressed(Ljava/lang/Throwable;)": {
     owner: "java/lang/Throwable",

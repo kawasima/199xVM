@@ -902,6 +902,35 @@ describe("Parser", () => {
     assert.equal(cls.methods[1].isSynchronized, true);
     assert.equal(cls.methods[1].isStatic, true);
   });
+
+  test("qualified Thread.yield call parses", () => {
+    const src = `public class YieldCall {
+      public static String run() {
+        Thread.yield();
+        return "ok";
+      }
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.methods[0].name, "run");
+  });
+
+  test("nested interface declaration parses", () => {
+    const src = `public class Outer {
+      interface In {
+        String m();
+      }
+      static class Impl implements In {
+        public String m() { return "ok"; }
+      }
+      public static String run() {
+        In i = new Impl();
+        return i.m();
+      }
+    }`;
+    const cls = parse(lex(src));
+    assert.ok(cls.nestedClasses.some(c => c.kind === "interface" && c.name.endsWith("$In")));
+    assert.ok(cls.nestedClasses.some(c => c.kind === "class" && c.name.endsWith("$Impl")));
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1642,6 +1671,41 @@ describe("Code generator", () => {
     assert.ok(bytes.length > 200, "bundle has content");
   });
 
+  test("compiles lambda in constructor argument with target type context", () => {
+    const bytes = compile(`public class LambdaCtorArg {
+      public static String run() {
+        Thread t = new Thread(() -> {});
+        return t != null ? "ok" : "ng";
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles qualified Thread.yield call", () => {
+    const bytes = compile(`public class YieldCompile {
+      public static String run() {
+        Thread.yield();
+        return "ok";
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("compiles nested interface declaration in class", () => {
+    const bytes = compile(`public class NestedInterfaceCompile {
+      interface In {
+        String m();
+      }
+      static class Impl implements In {
+        public String m() { return "ok"; }
+      }
+      public static String run() {
+        return new Impl().m();
+      }
+    }`);
+    assert.ok(bytes.length > 200, "bundle has content");
+  });
+
   test("lambda rejects non-Object overload of equals in functional interface detection", () => {
     assert.throws(() => compile(`public interface BadSam {
       int apply(int x);
@@ -2298,6 +2362,66 @@ describe("Runtime (WASM)", () => {
     assert.equal(result, "9");
   });
 
+  test("static object field initializer is available in synchronized", async () => {
+    const result = await runSnippet(`public class StaticLockSyncRun {
+      static final Object lock = new Object();
+      static int c = 0;
+      public static String run() {
+        synchronized (lock) {
+          c++;
+        }
+        return "" + c;
+      }
+    }`, "StaticLockSyncRun");
+    assert.equal(result, "1");
+  });
+
+  test("notifyAll with static lock wakes all waiters", async () => {
+    const result = await runSnippet(`public class NotifyAllRun {
+      static final Object lock = new Object();
+      static int woken = 0;
+      static boolean go = false;
+      static void waitForGo() {
+        synchronized (lock) {
+          while (!go) {
+            try {
+              lock.wait();
+            } catch (InterruptedException e) {
+              return;
+            }
+          }
+          woken++;
+        }
+      }
+      public static String run() {
+        woken = 0;
+        go = false;
+        Thread a = new Thread(() -> waitForGo());
+        Thread b = new Thread(() -> waitForGo());
+        Thread c = new Thread(() -> waitForGo());
+        a.start();
+        b.start();
+        c.start();
+        Thread.yield();
+        Thread.yield();
+        Thread.yield();
+        synchronized (lock) {
+          go = true;
+          lock.notifyAll();
+        }
+        try {
+          a.join();
+          b.join();
+          c.join();
+        } catch (InterruptedException e) {
+          return "interrupted";
+        }
+        return String.valueOf(woken);
+      }
+    }`, "NotifyAllRun");
+    assert.equal(result, "3");
+  });
+
   test("try-with-resources closes resource", async () => {
     const result = await runSnippet(`public class TwrRun {
       static int closed;
@@ -2365,6 +2489,19 @@ describe("Runtime (WASM)", () => {
       }
     }`, "CompoundNarrowByteRun");
     assert.equal(result, "-125");
+  });
+
+  test("post-increment statement on static field preserves side effects", async () => {
+    const result = await runSnippet(`public class PostIncStmtRun {
+      static int counter = 0;
+      public static String run() {
+        for (int i = 0; i < 10; i++) {
+          counter++;
+        }
+        return "" + counter;
+      }
+    }`, "PostIncStmtRun");
+    assert.equal(result, "10");
   });
 
 });

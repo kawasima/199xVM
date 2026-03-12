@@ -54,6 +54,17 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     }
     return advance().value;
   }
+  function isIdentLikeToken(kind: TokenKind): boolean {
+    // Contextual keywords usable as member names in qualified form.
+    return kind === TokenKind.Ident || kind === TokenKind.KwYield;
+  }
+  function parseIdentLike(): string {
+    const t = peek();
+    if (!isIdentLikeToken(t.kind)) {
+      throw new Error(`Expected Ident but got ${t.kind} ("${t.value}") at line ${t.line}:${t.col}`);
+    }
+    return advance().value;
+  }
   function parseQualifiedName(): string {
     let name = parseNameSegment();
     while (at(TokenKind.Dot) && isNameSegmentToken(tokens[pos + 1]?.kind ?? TokenKind.EOF)) {
@@ -493,7 +504,57 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       break;
     }
 
-    // Static nested class: static class Inner { ... }
+    // Nested type declaration: class/interface Inner { ... }
+    // Nested interfaces are implicitly static in Java.
+    if (at(TokenKind.KwClass) || at(TokenKind.KwInterface)) {
+      const isNestedInterface = at(TokenKind.KwInterface);
+      if (!isNestedInterface && !isStatic) {
+        // Keep existing scope narrow for now: only static nested classes are supported.
+        // (Nested interfaces are always static and allowed.)
+        // Fall through to normal member parsing.
+      } else {
+        advance(); // consume 'class' or 'interface'
+        const nestedName = expect(TokenKind.Ident).value;
+        const nestedKind: "class" | "interface" = isNestedInterface ? "interface" : "class";
+        const mangledName = ownerName + "$" + nestedName;
+        let nestedSuper = "java/lang/Object";
+        const nestedInterfaces: string[] = [];
+        if (match(TokenKind.KwExtends)) {
+          if (nestedKind === "class") nestedSuper = parseResolvedTypeName();
+          else nestedInterfaces.push(...parseTypeNameList());
+        }
+        if (nestedKind === "class" && match(TokenKind.KwImplements)) {
+          nestedInterfaces.push(...parseTypeNameList());
+        }
+        expect(TokenKind.LBrace);
+        const nf: FieldDecl[] = [];
+        const nm: MethodDecl[] = [];
+        const nnc: ClassDecl[] = [];
+        while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
+          parseMember(nf, nm, nnc, mangledName, nestedKind);
+        }
+        expect(TokenKind.RBrace);
+        // Register simple name so outer class can refer to "Inner" as "Outer$Inner"
+        importMap.set(nestedName, mangledName);
+        nestedClasses.push({
+          name: mangledName,
+          kind: nestedKind,
+          superClass: nestedSuper,
+          interfaces: nestedInterfaces,
+          isRecord: false,
+          recordComponents: [],
+          fields: nf,
+          methods: nm,
+          nestedClasses: nnc,
+          importMap,
+          packageImports,
+          staticWildcardImports,
+        });
+        return;
+      }
+    }
+
+    // Static nested class: static class Inner { ... } (legacy path)
     if (at(TokenKind.KwClass) && isStatic) {
       advance(); // consume 'class'
       const nestedName = expect(TokenKind.Ident).value;
@@ -1693,7 +1754,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           expr = { kind: "classLit", className: qn };
           continue;
         }
-        const name = expect(TokenKind.Ident).value;
+        const name = parseIdentLike();
         if (at(TokenKind.LParen)) {
           // Method call
           expect(TokenKind.LParen);
@@ -1723,7 +1784,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         if (match(TokenKind.KwNew)) {
           expr = { kind: "methodRef", target: expr, method: "<init>", isConstructor: true };
         } else {
-          const method = expect(TokenKind.Ident).value;
+          const method = parseIdentLike();
           expr = { kind: "methodRef", target: expr, method, isConstructor: false };
         }
         break;

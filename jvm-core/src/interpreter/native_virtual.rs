@@ -260,18 +260,17 @@ impl super::Vm {
         _descriptor: &str,
         _args: &[JValue],
     ) -> Option<JValue> {
-        if _class_name == "java/lang/Object" {
-            match method_name {
-                "hashCode" => {
-                    let ptr = Rc::as_ptr(this) as usize;
-                    return Some(JValue::Int((ptr as u64 as u32) as i32));
-                }
-                "getClass" => {
-                    let runtime_class = this.borrow().class_name.clone();
-                    return Some(JValue::Ref(Some(self.class_object(runtime_class))));
-                }
-                _ => {}
+        // java/lang/Object instance methods are inherited by all reference types.
+        match method_name {
+            "hashCode" if _descriptor == "()I" => {
+                let ptr = Rc::as_ptr(this) as usize;
+                return Some(JValue::Int((ptr as u64 as u32) as i32));
             }
+            "getClass" if _descriptor == "()Ljava/lang/Class;" => {
+                let runtime_class = this.borrow().class_name.clone();
+                return Some(JValue::Ref(Some(self.class_object(runtime_class))));
+            }
+            _ => {}
         }
         // ----- Object.wait/notify/notifyAll (inherited by ALL classes) -----
         {

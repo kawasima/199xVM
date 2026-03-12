@@ -135,6 +135,15 @@
       justify-content: space-between;
       gap: 12px;
     }
+    /* Hover bridge: keep parent item hovered while moving into submenu */
+    .snippet-categories .cat-item::after {
+      content: "";
+      position: absolute;
+      top: -6px;
+      right: -12px;
+      width: 12px;
+      height: calc(100% + 12px);
+    }
     .snippet-categories .cat-item:hover {
       background: var(--accent);
       color: #fff;
@@ -144,9 +153,9 @@
     .cat-submenu {
       display: none;
       position: absolute;
-      left: 100%;
+      left: calc(100% - 1px);
       top: -4px;
-      margin-left: 2px;
+      margin-left: 0;
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -327,6 +336,7 @@
             <div class="snippet-item" data-key="hello">Hello World</div>
             <div class="snippet-item" data-key="arithmetic">Arithmetic</div>
             <div class="snippet-item" data-key="strings">String ops</div>
+            <div class="snippet-item" data-key="text_block">Multi-line String</div>
             <div class="snippet-item" data-key="string_format">String.formatted()</div>
             <div class="snippet-item" data-key="loop">Loop &amp; accumulate</div>
             <div class="snippet-item" data-key="while_loop">While loop</div>
@@ -339,6 +349,7 @@
             <div class="snippet-item" data-key="class_fields">Class with fields</div>
             <div class="snippet-item" data-key="inheritance">Inheritance</div>
             <div class="snippet-item" data-key="record_type">Record type</div>
+            <div class="snippet-item" data-key="enum_type">Enum type</div>
             <div class="snippet-item" data-key="static_method">Static methods</div>
           </div>
         </div>
@@ -367,6 +378,8 @@
             <div class="snippet-item" data-key="switch_expr">Switch expression</div>
             <div class="snippet-item" data-key="pattern_matching">Pattern matching</div>
             <div class="snippet-item" data-key="record_modern">Record</div>
+            <div class="snippet-item" data-key="assert_stmt">assert</div>
+            <div class="snippet-item" data-key="try_with_resources">try-with-resources</div>
           </div>
         </div>
         <div class="cat-item">
@@ -388,6 +401,30 @@
             <div class="snippet-item" data-key="jvm_completable_future">CompletableFuture</div>
             <div class="snippet-item" data-key="jvm_forkjoin">ForkJoin / RecursiveTask</div>
             <div class="snippet-item" data-key="jvm_pattern_switch_record">Pattern + Switch + Record</div>
+          </div>
+        </div>
+        <div class="cat-item">
+          JVM Concurrency <span class="arrow">&#9654;</span>
+          <div class="cat-submenu">
+            <div class="snippet-item" data-key="jvm_thread_start_join">Thread start/join</div>
+            <div class="snippet-item" data-key="jvm_monitor_contention">Monitor contention</div>
+            <div class="snippet-item" data-key="jvm_sync_reentrant">Synchronized reentrant</div>
+            <div class="snippet-item" data-key="jvm_reentrant_wait">Reentrant wait restore</div>
+            <div class="snippet-item" data-key="jvm_wait_notify">wait/notify handshake</div>
+            <div class="snippet-item" data-key="jvm_notify_all">notifyAll wake-all</div>
+            <div class="snippet-item" data-key="jvm_wait_notify_imse">wait/notify IMSE</div>
+            <div class="snippet-item" data-key="jvm_sync_null_npe">synchronized(null) NPE</div>
+          </div>
+        </div>
+        <div class="cat-item">
+          JVM Semantics <span class="arrow">&#9654;</span>
+          <div class="cat-submenu">
+            <div class="snippet-item" data-key="jvm_classloader_ok">ClassLoader / forName</div>
+            <div class="snippet-item" data-key="jvm_classloader_cnf">ClassLoader CNF</div>
+            <div class="snippet-item" data-key="jvm_clinit_exception">clinit exception</div>
+            <div class="snippet-item" data-key="jvm_clinit_erroneous">clinit erroneous state</div>
+            <div class="snippet-item" data-key="jvm_interface_default">interface default dispatch</div>
+            <div class="snippet-item" data-key="jvm_lambda_overload">lambda overload dispatch</div>
           </div>
         </div>
       </div>
@@ -475,6 +512,18 @@
         String sub = s.substring(7);
         boolean starts = s.startsWith("Hello");
         return "len=" + len + " upper=" + upper + " sub=" + sub + " starts=" + starts;
+    }
+}
+`,
+      text_block: `public class TextBlockDemo {
+    public static String run() {
+        String json = """
+                {
+                  "name": "199xVM",
+                  "kind": "demo"
+                }
+                """;
+        return json.trim();
     }
 }
 `,
@@ -587,6 +636,18 @@ public class RecordDemo {
         Point p = new Point(3, 4);
         int dist2 = p.x() * p.x() + p.y() * p.y();
         return "p=(" + p.x() + "," + p.y() + ") dist2=" + dist2;
+    }
+}
+`,
+      enum_type: `enum Level {
+    LOW, MEDIUM, HIGH
+}
+
+public class EnumDemo {
+    public static String run() {
+        Level a = Level.MEDIUM;
+        Level b = Level.HIGH;
+        return a.name() + ":" + a.ordinal() + " | " + b.name() + ":" + b.ordinal();
     }
 }
 `,
@@ -795,6 +856,28 @@ public class RecordModernDemo {
     }
 }
 `,
+      assert_stmt: `public class AssertDemo {
+    public static String run() {
+        int x = 2 + 2;
+        assert x == 4 : "math is broken";
+        return "assert-ok";
+    }
+}
+`,
+      try_with_resources: `public class TwrDemo {
+    static int closed = 0;
+
+    public void close() { closed = closed + 1; }
+
+    public static String run() {
+        closed = 0;
+        try (TwrDemo r = new TwrDemo()) {
+            int x = 1;
+        }
+        return "closed=" + closed;
+    }
+}
+`,
       raoh_object_string: `import net.unit8.raoh.Result;
 import static net.unit8.raoh.ObjectDecoders.*;
 
@@ -982,6 +1065,357 @@ public class JvmPatternSwitchRecord {
 
     public static String run() {
         return classify(new User("Aki", 19)) + " | " + classify("hello") + " | " + classify("ok");
+    }
+}
+`,
+      jvm_thread_start_join: `public class JvmThreadStartJoin {
+    static String out = "";
+
+    public static String run() {
+        out = "";
+        out += "A";
+        Thread t = new Thread(() -> {
+            out += "B";
+        });
+        t.start();
+        try {
+            t.join();
+        } catch (InterruptedException e) {
+            return "interrupted";
+        }
+        out += "C";
+        return out;
+    }
+}
+`,
+      jvm_monitor_contention: `public class JvmMonitorContention {
+    static int counter = 0;
+    static final Object lock = new Object();
+
+    public static String run() {
+        counter = 0;
+        Thread t1 = new Thread(() -> {
+            for (int i = 0; i < 5; i++) {
+                synchronized (lock) {
+                    counter++;
+                }
+            }
+        });
+        Thread t2 = new Thread(() -> {
+            for (int i = 0; i < 5; i++) {
+                synchronized (lock) {
+                    counter++;
+                }
+            }
+        });
+        t1.start();
+        t2.start();
+        try {
+            t1.join();
+            t2.join();
+        } catch (InterruptedException e) {
+            return "interrupted";
+        }
+        return String.valueOf(counter);
+    }
+}
+`,
+      jvm_sync_reentrant: `public class JvmSyncReentrant {
+    static int counter = 0;
+
+    public static String run() {
+        Object lock = new Object();
+        synchronized (lock) {
+            counter = 1;
+        }
+        synchronized (lock) {
+            synchronized (lock) {
+                counter = 2;
+            }
+            counter = 3;
+        }
+        Object lock2 = new Object();
+        synchronized (lock2) {
+            counter += 10;
+        }
+        return String.valueOf(counter);
+    }
+}
+`,
+      jvm_reentrant_wait: `public class JvmReentrantWait {
+    static final Object lock = new Object();
+    static boolean ready = false;
+
+    public static String run() {
+        ready = false;
+        Thread waiter = new Thread(() -> {
+            synchronized (lock) {
+                synchronized (lock) {
+                    synchronized (lock) {
+                        while (!ready) {
+                            try {
+                                lock.wait();
+                            } catch (InterruptedException e) {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        waiter.start();
+        Thread.yield();
+        Thread.yield();
+        synchronized (lock) {
+            ready = true;
+            lock.notify();
+        }
+        try {
+            waiter.join();
+        } catch (InterruptedException e) {
+            return "interrupted";
+        }
+        return "ok";
+    }
+}
+`,
+      jvm_wait_notify: `public class JvmWaitNotify {
+    static final Object lock = new Object();
+    static int value = 0;
+    static boolean ready = false;
+
+    public static String run() {
+        value = 0;
+        ready = false;
+        Thread consumer = new Thread(() -> {
+            synchronized (lock) {
+                while (!ready) {
+                    try {
+                        lock.wait();
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
+            }
+        });
+        Thread producer = new Thread(() -> {
+            synchronized (lock) {
+                value = 42;
+                ready = true;
+                lock.notify();
+            }
+        });
+        consumer.start();
+        producer.start();
+        try {
+            consumer.join();
+            producer.join();
+        } catch (InterruptedException e) {
+            return "interrupted";
+        }
+        return "produced:" + value + ",consumed:" + value;
+    }
+}
+`,
+      jvm_notify_all: `public class JvmNotifyAll {
+    static final Object lock = new Object();
+    static int woken = 0;
+    static boolean go = false;
+
+    static void waitForGo() {
+        synchronized (lock) {
+            while (!go) {
+                try {
+                    lock.wait();
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+            woken++;
+        }
+    }
+
+    public static String run() {
+        woken = 0;
+        go = false;
+        Thread a = new Thread(() -> waitForGo());
+        Thread b = new Thread(() -> waitForGo());
+        Thread c = new Thread(() -> waitForGo());
+        a.start();
+        b.start();
+        c.start();
+        Thread.yield();
+        Thread.yield();
+        Thread.yield();
+        synchronized (lock) {
+            go = true;
+            lock.notifyAll();
+        }
+        try {
+            a.join();
+            b.join();
+            c.join();
+        } catch (InterruptedException e) {
+            return "interrupted";
+        }
+        return String.valueOf(woken);
+    }
+}
+`,
+      jvm_wait_notify_imse: `public class JvmWaitNotifyImse {
+    public static String run() {
+        Object lock = new Object();
+        StringBuilder sb = new StringBuilder();
+        try {
+            lock.wait();
+            sb.append("FAIL");
+        } catch (IllegalMonitorStateException e) {
+            sb.append("wait:IMSE");
+        } catch (InterruptedException e) {
+            sb.append("FAIL");
+        }
+        sb.append(",");
+        try {
+            lock.notify();
+            sb.append("FAIL");
+        } catch (IllegalMonitorStateException e) {
+            sb.append("notify:IMSE");
+        }
+        sb.append(",");
+        try {
+            lock.notifyAll();
+            sb.append("FAIL");
+        } catch (IllegalMonitorStateException e) {
+            sb.append("notifyAll:IMSE");
+        }
+        return sb.toString();
+    }
+}
+`,
+      jvm_sync_null_npe: `public class JvmSyncNullNpe {
+    public static String run() {
+        try {
+            Object lock = null;
+            synchronized (lock) {
+                return "should-not-reach";
+            }
+        } catch (NullPointerException e) {
+            return "npe-ok";
+        }
+    }
+}
+`,
+      jvm_classloader_ok: `public class JvmClassLoaderOk {
+    public static String run() {
+        StringBuilder sb = new StringBuilder();
+        ClassLoader cl = ClassLoader.getSystemClassLoader();
+        sb.append(cl != null ? "cl:ok" : "cl:null");
+        sb.append("|");
+        try {
+            Class c = Class.forName("java.util.ArrayList");
+            sb.append(c != null ? "forName:ok" : "forName:null");
+        } catch (ClassNotFoundException e) {
+            sb.append("forName:cnf");
+        }
+        sb.append("|");
+        try {
+            Class c = ClassLoader.getSystemClassLoader().loadClass("java.util.ArrayList");
+            sb.append(c != null ? "loadClass:ok" : "loadClass:null");
+        } catch (ClassNotFoundException e) {
+            sb.append("loadClass:cnf");
+        }
+        return sb.toString();
+    }
+}
+`,
+      jvm_classloader_cnf: `public class JvmClassLoaderCnf {
+    public static String run() {
+        try {
+            Class.forName("com.example.NonExistentClass");
+            return "no-exception";
+        } catch (ClassNotFoundException e) {
+            return "ClassNotFoundException:" + e.getMessage();
+        }
+    }
+}
+`,
+      jvm_clinit_exception: `public class JvmClinitException {
+    static class BadInit {
+        static String VALUE = initValue();
+        static String initValue() {
+            throw new RuntimeException("clinit failed");
+        }
+    }
+
+    public static String run() {
+        try {
+            return BadInit.VALUE;
+        } catch (ExceptionInInitializerError e) {
+            return "ExceptionInInitializerError";
+        } catch (Throwable t) {
+            return "other:" + t.getClass().getSimpleName();
+        }
+    }
+}
+`,
+      jvm_clinit_erroneous: `public class JvmClinitErroneous {
+    static class BadInit {
+        static String VALUE = initValue();
+        static String initValue() {
+            throw new RuntimeException("clinit failed");
+        }
+    }
+
+    public static String run() {
+        String first;
+        try {
+            first = BadInit.VALUE;
+        } catch (ExceptionInInitializerError e) {
+            first = "EIIE";
+        } catch (Throwable t) {
+            first = "other1:" + t.getClass().getSimpleName();
+        }
+        String second;
+        try {
+            second = BadInit.VALUE;
+        } catch (NoClassDefFoundError e) {
+            second = "NCDFE";
+        } catch (Throwable t) {
+            second = "other2:" + t.getClass().getSimpleName();
+        }
+        return first + "," + second;
+    }
+}
+`,
+      jvm_interface_default: `interface Describable {
+    String name();
+    default String describe() {
+        return "I am " + name();
+    }
+}
+
+public class JvmInterfaceDefault implements Describable {
+    public String name() {
+        return "Thing";
+    }
+
+    public static String run() {
+        Describable d = new JvmInterfaceDefault();
+        return d.describe();
+    }
+}
+`,
+      jvm_lambda_overload: `public class JvmLambdaOverload {
+    interface Processor {
+        String process(String input, String suffix);
+        default String process(String input) {
+            return process(input, "!");
+        }
+    }
+
+    public static String run() {
+        Processor p = (a, b) -> a.toUpperCase() + b;
+        return p.process("hello") + "|" + p.process("hi", "?");
     }
 }
 `,

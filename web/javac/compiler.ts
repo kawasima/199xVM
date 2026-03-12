@@ -1152,10 +1152,20 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       emitter.emit(0xbb); // new
       emitter.emitU16(classIdx);
       emitter.emit(0x59); // dup
-      // Compile constructor args
-      const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
-      for (const arg of expr.args) compileExpr(ctx, emitter, arg);
-      const desc = "(" + argTypes.join("") + ")V";
+
+      // Resolve constructor first so lambda/method-ref args receive target type context.
+      const resolvedCtor = resolveMethodCandidate(ctx, internalName, "<init>", expr.args, false);
+      let desc: string;
+      if (resolvedCtor) {
+        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, resolvedCtor.paramTypes[i] ?? { className: "java/lang/Object" }));
+        const sigArgDescs = resolvedCtor.paramTypes.map(typeToDescriptor).join("");
+        desc = "(" + sigArgDescs + ")V";
+      } else {
+        const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
+        for (const arg of expr.args) compileExpr(ctx, emitter, arg);
+        desc = "(" + argTypes.join("") + ")V";
+      }
+
       const mRef = ctx.cp.addMethodref(internalName, "<init>", desc);
       emitter.emitInvokespecial(mRef, expr.args.length, false);
       break;
@@ -2640,6 +2650,18 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       break;
     }
     case "exprStmt": {
+      // Preserve side effects for ++/-- used as a statement (e.g. field/array increments).
+      // Compile as compound assignment so LHS read/modify/write is emitted correctly.
+      if (stmt.expr.kind === "postIncrement" || stmt.expr.kind === "preIncrement") {
+        const op = stmt.expr.op === "++" ? "+" : "-";
+        compileStmt(ctx, emitter, {
+          kind: "compoundAssign",
+          target: stmt.expr.operand,
+          op,
+          value: { kind: "intLit", value: 1 },
+        });
+        break;
+      }
       compileExpr(ctx, emitter, stmt.expr);
       // Pop result if non-void
       const exprType = inferType(ctx, stmt.expr);
@@ -3851,39 +3873,41 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     }
   }
 
-  // Synthesize enum static initialization for constants.
-  if (isEnumClass) {
-    const enumConstants = classDecl.fields.filter(f => !!f.isEnumConstant);
-    const hasClinit = classDecl.methods.some(m => m.name === "<clinit>");
-    if (enumConstants.length > 0 && !hasClinit) {
-      const clinitMethod: MethodDecl = { name: "<clinit>", returnType: "void", params: [], body: [], isStatic: true };
-      const clinitCtx: CompileContext = {
-        className: classDecl.name,
-        superClass: classDecl.superClass,
-        cp,
-        method: clinitMethod,
-        locals: [],
-        nextSlot: 0,
-        fields: classDecl.fields,
-        inheritedFields,
-        allMethods,
-        importMap: classDecl.importMap,
-        packageImports: classDecl.packageImports,
-        staticWildcardImports: classDecl.staticWildcardImports,
-        classSupers,
-        classDecls,
-        lambdaCounter,
-        generatedMethods,
-        lambdaBootstraps,
-        ownerIsStatic: true,
-        breakPatches: [],
-        continuePatches: [],
-      };
-      const emitter = new BytecodeEmitter();
-      const classIdx = cp.addClass(classDecl.name);
-      const enumCtors = classDecl.methods.filter(m => m.name === "<init>");
-      for (let ordinal = 0; ordinal < enumConstants.length; ordinal++) {
-        const field = enumConstants[ordinal];
+  // Synthesize static initialization for enum constants and static field initializers.
+  const hasClinit = classDecl.methods.some(m => m.name === "<clinit>");
+  const hasStaticFieldInitializers = classDecl.fields.some(f => f.isStatic && !!f.initializer);
+  const enumConstantCount = isEnumClass ? classDecl.fields.filter(f => !!f.isEnumConstant).length : 0;
+  if (!hasClinit && (hasStaticFieldInitializers || enumConstantCount > 0)) {
+    const clinitMethod: MethodDecl = { name: "<clinit>", returnType: "void", params: [], body: [], isStatic: true };
+    const clinitCtx: CompileContext = {
+      className: classDecl.name,
+      superClass: classDecl.superClass,
+      cp,
+      method: clinitMethod,
+      locals: [],
+      nextSlot: 0,
+      fields: classDecl.fields,
+      inheritedFields,
+      allMethods,
+      importMap: classDecl.importMap,
+      packageImports: classDecl.packageImports,
+      staticWildcardImports: classDecl.staticWildcardImports,
+      classSupers,
+      classDecls,
+      lambdaCounter,
+      generatedMethods,
+      lambdaBootstraps,
+      ownerIsStatic: true,
+      breakPatches: [],
+      continuePatches: [],
+    };
+    const emitter = new BytecodeEmitter();
+    const classIdx = cp.addClass(classDecl.name);
+    const enumCtors = classDecl.methods.filter(m => m.name === "<init>");
+    let enumOrdinal = 0;
+    for (const field of classDecl.fields) {
+      if (!field.isStatic) continue;
+      if (field.isEnumConstant) {
         const init = field.initializer;
         if (!init || init.kind !== "newExpr") {
           throw new Error(`Enum constant ${field.name} must have initializer`);
@@ -3896,7 +3920,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         emitter.emitU16(classIdx);
         emitter.emit(0x59); // dup
         emitter.emitLdc(cp.addString(field.name));
-        emitter.emitIconst(ordinal);
+        emitter.emitIconst(enumOrdinal++);
         for (let ai = 0; ai < init.args.length; ai++) {
           compileExpr(clinitCtx, emitter, init.args[ai], ctor.params[ai]?.type);
         }
@@ -3906,18 +3930,24 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         const fieldRef = cp.addFieldref(classDecl.name, field.name, typeToDescriptor(field.type));
         emitter.emit(0xb3); // putstatic
         emitter.emitU16(fieldRef);
+        continue;
       }
-      emitter.emit(0xb1); // return
-      compiledMethods.push({
-        nameIdx: cp.addUtf8("<clinit>"),
-        descIdx: cp.addUtf8("()V"),
-        accessFlags: 0x0008, // ACC_STATIC
-        hasCode: true,
-        code: emitter.code,
-        maxStack: Math.max(emitter.maxStack, 6),
-        maxLocals: 0,
-      });
+      if (!field.initializer) continue;
+      compileExpr(clinitCtx, emitter, field.initializer, field.type);
+      const fieldRef = cp.addFieldref(classDecl.name, field.name, typeToDescriptor(field.type));
+      emitter.emit(0xb3); // putstatic
+      emitter.emitU16(fieldRef);
     }
+    emitter.emit(0xb1); // return
+    compiledMethods.push({
+      nameIdx: cp.addUtf8("<clinit>"),
+      descIdx: cp.addUtf8("()V"),
+      accessFlags: 0x0008, // ACC_STATIC
+      hasCode: true,
+      code: emitter.code,
+      maxStack: Math.max(emitter.maxStack, 6),
+      maxLocals: 0,
+    });
   }
 
   // Build fields

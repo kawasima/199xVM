@@ -150,6 +150,13 @@ impl super::Vm {
                     .and_then(|v| v.as_ref())
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))?;
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
+                // Primitive class names are VM-defined synthetic Class objects.
+                if matches!(
+                    internal.as_str(),
+                    "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void"
+                ) {
+                    return Some(JValue::Ref(Some(self.class_object(internal))));
+                }
                 // Array descriptors (e.g. "[I", "[Ljava/lang/String;") are synthetic types
                 // not backed by a ClassFile entry — return a class object directly.
                 if internal.starts_with('[') {
