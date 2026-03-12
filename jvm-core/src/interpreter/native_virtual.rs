@@ -273,6 +273,46 @@ impl super::Vm {
                 _ => {}
             }
         }
+        // ----- Object.wait/notify/notifyAll (inherited by ALL classes) -----
+        match (method_name, _descriptor) {
+            ("wait", "()V") | ("wait", "(J)V") => {
+                match self.monitor_wait(this) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        let msg = self.intern_string(&e);
+                        let exc = crate::heap::JObject::new("java/lang/IllegalMonitorStateException");
+                        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+                        *self.pending_exception_mut() = Some(exc);
+                    }
+                }
+                return Some(JValue::Void);
+            }
+            ("notify", "()V") => {
+                match self.monitor_notify(this) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        let msg = self.intern_string(&e);
+                        let exc = crate::heap::JObject::new("java/lang/IllegalMonitorStateException");
+                        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+                        *self.pending_exception_mut() = Some(exc);
+                    }
+                }
+                return Some(JValue::Void);
+            }
+            ("notifyAll", "()V") => {
+                match self.monitor_notify_all(this) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        let msg = self.intern_string(&e);
+                        let exc = crate::heap::JObject::new("java/lang/IllegalMonitorStateException");
+                        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+                        *self.pending_exception_mut() = Some(exc);
+                    }
+                }
+                return Some(JValue::Void);
+            }
+            _ => {}
+        }
         // ----- java.lang.Thread native methods -----
         if this.borrow().class_name == "java/lang/Thread"
             || self.is_instance_of(&this.borrow().class_name.clone(), "java/lang/Thread")

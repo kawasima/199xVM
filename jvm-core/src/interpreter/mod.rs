@@ -140,6 +140,8 @@ pub(crate) struct ThreadContext {
     pub thread_object: Option<JRef>,
     /// Number of instructions executed in the current time slice.
     pub instruction_count: usize,
+    /// Saved monitor reentrant count for Object.wait() — restored after notify.
+    pub saved_monitor_count: usize,
 }
 
 impl ThreadContext {
@@ -152,6 +154,7 @@ impl ThreadContext {
             call_stack: Vec::new(),
             thread_object: None,
             instruction_count: 0,
+            saved_monitor_count: 0,
         }
     }
 }
@@ -407,6 +410,8 @@ impl Vm {
                 } else if let Some(waiting_id) = monitor.entry_queue.pop_front() {
                     // Transfer ownership directly to the next waiter.
                     monitor.owner = Some(waiting_id);
+                    // Default count = 1 for normal monitorenter waiters.
+                    // Overridden below for wait()-woken threads.
                     monitor.count = 1;
                     wake_thread = Some(waiting_id);
                 } else {
@@ -419,9 +424,107 @@ impl Vm {
         }
         // Set the woken thread to Runnable (outside the monitor borrow).
         if let Some(wid) = wake_thread {
+            // Check if the woken thread needs saved_monitor_count restored.
+            let restore_count = self.scheduler.thread(wid).and_then(|t| {
+                if matches!(t.state, ThreadState::WaitingOnCondition(_)) && t.saved_monitor_count > 0 {
+                    Some(t.saved_monitor_count)
+                } else {
+                    None
+                }
+            });
+            if let Some(count) = restore_count {
+                if let Some(m) = self.monitors.get_mut(&id) {
+                    m.count = count;
+                }
+                if let Some(t) = self.scheduler.thread_mut(wid) {
+                    t.saved_monitor_count = 0;
+                }
+            }
             if let Some(t) = self.scheduler.thread_mut(wid) {
                 t.state = ThreadState::Runnable;
             }
+        }
+        Ok(())
+    }
+
+    /// Object.wait() — release monitor, add to wait_queue, block.
+    ///
+    /// JVMS semantics: the current thread must own the monitor. The reentrant
+    /// count is saved, the monitor is fully released, and the thread is added
+    /// to the wait_queue. After notify, the thread re-enters the entry_queue
+    /// and must re-acquire the monitor before resuming.
+    pub(in crate::interpreter) fn monitor_wait(&mut self, obj: &JRef) -> Result<(), String> {
+        let id = Self::object_id(obj);
+        let thread_id = self.scheduler.current_thread().id;
+
+        let saved_count = {
+            let monitor = match self.monitors.get_mut(&id) {
+                Some(m) => m,
+                None => return Err("java/lang/IllegalMonitorStateException: object not locked".to_owned()),
+            };
+            if monitor.owner != Some(thread_id) {
+                return Err("java/lang/IllegalMonitorStateException: current thread is not owner".to_owned());
+            }
+            // Save reentrant count and fully release.
+            let saved = monitor.count;
+            monitor.count = 0;
+            monitor.owner = None;
+            monitor.wait_queue.push_back(thread_id);
+
+            // If there are threads blocked on entry, transfer ownership to the first one.
+            if let Some(waiting_id) = monitor.entry_queue.pop_front() {
+                monitor.owner = Some(waiting_id);
+                monitor.count = 1;
+                // Wake the entry waiter.
+                if let Some(t) = self.scheduler.thread_mut(waiting_id) {
+                    t.state = ThreadState::Runnable;
+                }
+            }
+
+            saved
+        };
+
+        // Save the reentrant count and block the current thread.
+        let current = self.scheduler.current_thread_mut();
+        current.saved_monitor_count = saved_count;
+        current.state = ThreadState::WaitingOnCondition(id);
+        Ok(())
+    }
+
+    /// Object.notify() — move one thread from wait_queue to entry_queue.
+    pub(in crate::interpreter) fn monitor_notify(&mut self, obj: &JRef) -> Result<(), String> {
+        let id = Self::object_id(obj);
+        let thread_id = self.scheduler.current_thread().id;
+
+        let monitor = match self.monitors.get_mut(&id) {
+            Some(m) => m,
+            None => return Err("java/lang/IllegalMonitorStateException: object not locked".to_owned()),
+        };
+        if monitor.owner != Some(thread_id) {
+            return Err("java/lang/IllegalMonitorStateException: current thread is not owner".to_owned());
+        }
+        // Move one waiter from wait_queue to entry_queue.
+        if let Some(waiter_id) = monitor.wait_queue.pop_front() {
+            monitor.entry_queue.push_back(waiter_id);
+        }
+        Ok(())
+    }
+
+    /// Object.notifyAll() — move all threads from wait_queue to entry_queue.
+    pub(in crate::interpreter) fn monitor_notify_all(&mut self, obj: &JRef) -> Result<(), String> {
+        let id = Self::object_id(obj);
+        let thread_id = self.scheduler.current_thread().id;
+
+        let monitor = match self.monitors.get_mut(&id) {
+            Some(m) => m,
+            None => return Err("java/lang/IllegalMonitorStateException: object not locked".to_owned()),
+        };
+        if monitor.owner != Some(thread_id) {
+            return Err("java/lang/IllegalMonitorStateException: current thread is not owner".to_owned());
+        }
+        // Move all waiters to entry_queue.
+        while let Some(waiter_id) = monitor.wait_queue.pop_front() {
+            monitor.entry_queue.push_back(waiter_id);
         }
         Ok(())
     }

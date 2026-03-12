@@ -7,6 +7,7 @@ use crate::heap::{JObject, JRef, JValue, NativePayload};
 use super::Vm;
 use super::descriptors::*;
 use super::frame::*;
+use super::trampoline::FrameInfo;
 
 
 impl Vm {
@@ -91,13 +92,46 @@ impl Vm {
         push_return: bool,
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
+        // Fast-path: intercept Object.wait/notify/notifyAll directly to avoid
+        // re-entering invoke_virtual's recursive path, which doesn't check
+        // thread state for yielding.
+        match (method_name, descriptor) {
+            ("wait", "()V") | ("wait", "(J)V") => {
+                if let Err(e) = self.monitor_wait(&r) {
+                    return Err(e);
+                }
+                return Ok(None);
+            }
+            ("notify", "()V") => {
+                if let Err(e) = self.monitor_notify(&r) {
+                    return Err(e);
+                }
+                return Ok(None);
+            }
+            ("notifyAll", "()V") => {
+                if let Err(e) = self.monitor_notify_all(&r) {
+                    return Err(e);
+                }
+                return Ok(None);
+            }
+            _ => {}
+        }
+
         match self.build_virtual_frame_inner(r.clone(), class_name, method_name, descriptor, args.clone(), push_return)? {
             Some(fi) => {
                 *self.pending_frame_mut() = Some(fi);
                 Ok(None)
             }
             None => {
-                // Native or lambda — fall back to recursive invoke_virtual.
+                // Try to handle BytecodeLambda SAM dispatch via the trampoline
+                // (instead of the recursive invoke_virtual path which uses
+                // run_trampoline — the non-time-sliced variant that ignores
+                // thread state changes like WaitingOnCondition).
+                if let Some(fi) = self.try_build_lambda_sam_frame(&r, method_name, descriptor, args.clone(), push_return)? {
+                    *self.pending_frame_mut() = Some(fi);
+                    return Ok(None);
+                }
+                // Native or non-lambda — fall back to recursive invoke_virtual.
                 let result = self.invoke_virtual(r, class_name, method_name, descriptor, args)?;
                 if !matches!(result, JValue::Void) {
                     frame.stack.push(result);
@@ -192,6 +226,64 @@ impl Vm {
             other => Err(format!(
                 "Expected reference for invokeinterface {class_name}.{method_name}{descriptor}, got {other:?}"
             )),
+        }
+    }
+
+    /// Try to build a FrameInfo for a BytecodeLambda's SAM dispatch.
+    /// Returns Ok(Some(fi)) if successful, Ok(None) if not a lambda or SAM doesn't match.
+    fn try_build_lambda_sam_frame(
+        &mut self,
+        r: &JRef,
+        method_name: &str,
+        descriptor: &str,
+        args: Vec<JValue>,
+        push_return: bool,
+    ) -> Result<Option<FrameInfo>, String> {
+        let lambda_info = {
+            let borrow = r.borrow();
+            match &borrow.native {
+                NativePayload::BytecodeLambda {
+                    sam_method, sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured,
+                } => {
+                    let sam_arg_count = count_args(sam_desc);
+                    let call_arg_count = count_args(descriptor);
+                    if method_name == sam_method.as_str() && call_arg_count == sam_arg_count {
+                        Some((
+                            impl_class.clone(), impl_method.clone(), impl_desc.clone(),
+                            *ref_kind, captured.clone(),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+        let Some((impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info else {
+            return Ok(None);
+        };
+
+        let mut full_args = captured;
+        full_args.extend(args);
+
+        if ref_kind == 5 || ref_kind == 7 || ref_kind == 9 {
+            // Virtual/interface dispatch on receiver.
+            if full_args.is_empty() {
+                return Err("Lambda SAM dispatch: missing receiver argument".to_owned());
+            }
+            let recv = full_args.remove(0);
+            match recv {
+                JValue::Ref(Some(recv_ref)) => {
+                    self.build_virtual_frame_inner(
+                        recv_ref, &impl_class, &impl_method, &impl_desc, full_args, push_return,
+                    )
+                }
+                _ => Err(format!("Lambda SAM dispatch: expected Ref for receiver, got {recv:?}")),
+            }
+        } else {
+            // Static dispatch.
+            self.ensure_class_init(&impl_class)?;
+            self.build_static_frame(&impl_class, &impl_method, &impl_desc, full_args, push_return)
         }
     }
 
