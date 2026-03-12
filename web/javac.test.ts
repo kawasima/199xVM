@@ -1310,6 +1310,15 @@ describe("Code generator", () => {
     assert.equal(result, "str");
   });
 
+  test("unqualified call resolves exact overload by descriptor", async () => {
+    const result = await runSnippet(`public class OverloadUnqualified {
+        public static String f(int x) { return "int"; }
+        public static String f(String s) { return "str"; }
+        public static String run() { return f("x"); }
+      }`, "OverloadUnqualified");
+    assert.equal(result, "str");
+  });
+
   test("compiles switch statement with int labels", () => {
     const bytes = compile(`public class SwitchInt {
       public static String run() {
@@ -1697,6 +1706,18 @@ describe("Code generator", () => {
           return "ng";
         }
       }`), /Unhandled checked exception/);
+  });
+
+  test("checked exception analysis picks correct overload by argument types", () => {
+    assert.doesNotThrow(() => compile(`import java.io.IOException;
+      public class CheckedOverload {
+        public static void g(String s) throws IOException { throw new IOException(); }
+        public static void g(int x) {}
+        public static String run() {
+          g(1);
+          return "ok";
+        }
+      }`));
   });
 
   test("switch expression with null + total pattern is exhaustive for reference selector", () => {
