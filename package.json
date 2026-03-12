@@ -2,7 +2,24 @@
   "name": "199xvm",
   "version": "1.0.0",
   "description": "A minimal Java bytecode interpreter compiled to WebAssembly.",
-  "main": "index.js",
+  "main": "web/javac.js",
+  "exports": {
+    ".": "./web/javac.js",
+    "./javac": "./web/javac.js",
+    "./jvm": "./jvm-core/pkg/jvm_core.js",
+    "./jvm-wasm": "./jvm-core/pkg/jvm_core_bg.wasm",
+    "./shim-bundle": "./jdk-shim/bundle.bin"
+  },
+  "files": [
+    "README.md",
+    "LICENSE",
+    "web/javac.js",
+    "jvm-core/pkg/jvm_core.js",
+    "jvm-core/pkg/jvm_core.d.ts",
+    "jvm-core/pkg/jvm_core_bg.wasm",
+    "jvm-core/pkg/jvm_core_bg.wasm.d.ts",
+    "jdk-shim/bundle.bin"
+  ],
   "scripts": {
     "build:javac": "esbuild web/javac.ts --bundle --format=esm --outfile=web/javac.js --target=es2020",
     "watch:javac": "esbuild web/javac.ts --bundle --format=esm --outfile=web/javac.js --target=es2020 --watch",
@@ -11,7 +28,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "GPL-2.0-only",
   "type": "module",
   "devDependencies": {
     "esbuild": "^0.27.3",
