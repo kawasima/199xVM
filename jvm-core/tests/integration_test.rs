@@ -364,5 +364,5 @@ fn synchronized_methods() {
         "run",
         "()Ljava/lang/String;",
     );
-    assert_eq!(result, "3,2,200");
+    assert_eq!(result, "3,2,200,2");
 }
