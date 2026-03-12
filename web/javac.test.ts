@@ -176,6 +176,16 @@ describe("Lexer", () => {
     assert.equal(tokens[0].value, "class");
   });
 
+  test("unicode escapes with repeated u are translated", () => {
+    const tokens = lex("\\uuuu0069nt x = 1;");
+    assert.equal(tokens[0].kind, TokenKind.KwInt);
+  });
+
+  test("invalid unicode escape reports location", () => {
+    assert.throws(() => lex("a\\u00G0"), /Invalid Unicode escape: \\u00G0 at line 1:2/);
+    assert.throws(() => lex("a\\u0"), /Invalid Unicode escape sequence at line 1:2/);
+  });
+
   test("unicode identifier is accepted", () => {
     const tokens = lex("int 名前 = 1;");
     assert.equal(tokens[0].kind, TokenKind.KwInt);
