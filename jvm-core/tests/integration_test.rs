@@ -274,3 +274,19 @@ fn interface_default_method_dispatch() {
     );
     assert_eq!(result, "I am Thing");
 }
+
+// ---------------------------------------------------------------------------
+// Green threads: Thread.start() / Thread.join()
+// ---------------------------------------------------------------------------
+
+#[test]
+fn thread_start_join_basic() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "ThreadBasicTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ABC");
+}

@@ -218,7 +218,48 @@ impl Vm {
     }
 
     // ------------------------------------------------------------------
-    // Core interpreter loop
+    // Top-level entry point with green thread scheduling
     // ------------------------------------------------------------------
 
+    /// Execute a static method as the top-level entry point with green thread support.
+    /// The initial method runs on the main thread. If Thread.start() is called during
+    /// execution, spawned threads are scheduled cooperatively.
+    pub fn invoke_static_threaded(
+        &mut self,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+        args: Vec<JValue>,
+    ) -> Result<JValue, String> {
+        let orig_args = args;
+        let (resolved_desc, args) = match self.prepare_static_args(class_name, method_name, descriptor, orig_args.clone()) {
+            Some(pair) => pair,
+            None => {
+                if let Some(v) = self.native_static(class_name, method_name, descriptor, &orig_args) {
+                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                    return Ok(v);
+                }
+                return Err(format!("Method not found: {class_name}.{method_name}{descriptor}"));
+            }
+        };
+        let desc = resolved_desc.as_str();
+
+        match self.build_static_frame(class_name, method_name, desc, args.clone(), true)? {
+            Some(fi) => {
+                // Push onto main thread's call_stack and run via scheduler.
+                self.scheduler.current_thread_mut().call_stack.push(fi);
+                self.run_all_threads()
+            }
+            None => {
+                // Native method — no threading needed.
+                if let Some(v) = self.native_static(class_name, method_name, desc, &args) {
+                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                    return Ok(v);
+                }
+                Err(format!(
+                    "Native stub not found for: {class_name}.{method_name}{desc}"
+                ))
+            }
+        }
+    }
 }
