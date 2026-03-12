@@ -366,3 +366,19 @@ fn synchronized_methods() {
     );
     assert_eq!(result, "3,2,200,2");
 }
+
+// ---------------------------------------------------------------------------
+// Compact source files (implicit classes)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn compact_source_file() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "CompactTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ok");
+}

@@ -13,6 +13,7 @@ export interface ClassDecl {
   importMap: Map<string, string>; // simpleName -> internal JVM name
   packageImports: string[]; // package names for import-on-demand (e.g. "java/util")
   staticWildcardImports: string[]; // owner class internal names for import static T.*
+  isImplicit?: boolean; // true for implicitly declared classes (compact source files)
 }
 
 export interface FieldDecl {

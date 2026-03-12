@@ -3687,9 +3687,9 @@ function flattenClasses(decls: ClassDecl[]): ClassDecl[] {
   return result;
 }
 
-export function compile(source: string): Uint8Array {
+export function compile(source: string, implicitClassName?: string): Uint8Array {
   const tokens = lex(source);
-  const classDecls = flattenClasses(parseAll(tokens));
+  const classDecls = flattenClasses(parseAll(tokens, implicitClassName));
   if (classDecls.length === 1) {
     return generateClassFile(classDecls[0], classDecls);
   }
@@ -4008,6 +4008,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   if (classDecl.kind === "annotation") classFlags = 0x2601; // PUBLIC | INTERFACE | ABSTRACT | ANNOTATION
   else if (classDecl.kind === "interface") classFlags = 0x0601; // PUBLIC | INTERFACE | ABSTRACT
   else if (classDecl.kind === "enum") classFlags = 0x4031; // PUBLIC | SUPER | FINAL | ENUM
+  else if (classDecl.isImplicit) classFlags = 0x0031; // implicit (compact source) classes are final
   else classFlags = classDecl.isRecord ? 0x0031 : 0x0021; // record classes are final
   if (hasAbstractMethods && classDecl.kind !== "interface" && classDecl.kind !== "annotation") {
     classFlags &= ~0x0010; // clear FINAL
