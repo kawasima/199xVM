@@ -10,6 +10,7 @@ public class ClassLoader {
     }
 
     protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+        // The 'resolve' flag (link resolution) is intentionally ignored — not applicable in 199xVM.
         Class<?> c = findLoadedClass(name);
         if (c == null) {
             c = findClass(name);
