@@ -236,6 +236,34 @@ world
     assert.equal(tokens[6].kind, TokenKind.KwThrows);
   });
 
+  test("module and sealed-related keywords are tokenized", () => {
+    const tokens = lex("module open requires transitive exports opens to uses provides with sealed permits non-sealed");
+    assert.equal(tokens[0].kind, TokenKind.KwModule);
+    assert.equal(tokens[1].kind, TokenKind.KwOpen);
+    assert.equal(tokens[2].kind, TokenKind.KwRequires);
+    assert.equal(tokens[3].kind, TokenKind.KwTransitive);
+    assert.equal(tokens[4].kind, TokenKind.KwExports);
+    assert.equal(tokens[5].kind, TokenKind.KwOpens);
+    assert.equal(tokens[6].kind, TokenKind.KwTo);
+    assert.equal(tokens[7].kind, TokenKind.KwUses);
+    assert.equal(tokens[8].kind, TokenKind.KwProvides);
+    assert.equal(tokens[9].kind, TokenKind.KwWith);
+    assert.equal(tokens[10].kind, TokenKind.KwSealed);
+    assert.equal(tokens[11].kind, TokenKind.KwPermits);
+    assert.equal(tokens[12].kind, TokenKind.KwNonSealed);
+  });
+
+  test("ellipsis token is recognized", () => {
+    const tokens = lex("int... args");
+    assert.equal(tokens[1].kind, TokenKind.Ellipsis);
+  });
+
+  test("malformed prefixed literals are rejected", () => {
+    assert.throws(() => lex("0b102"), /Malformed number literal/);
+    assert.throws(() => lex("08"), /Malformed/);
+    assert.throws(() => lex("0x"), /Malformed number literal/);
+  });
+
   test("operators", () => {
     const tokens = lex("== != <= >= && || ++ -- ::");
     const kinds = tokens.slice(0, -1).map(t => t.kind);

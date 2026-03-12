@@ -48,6 +48,19 @@ export enum TokenKind {
   KwVar = "var",
   KwInstanceof = "instanceof",
   KwRecord = "record",
+  KwModule = "module",
+  KwOpen = "open",
+  KwRequires = "requires",
+  KwTransitive = "transitive",
+  KwExports = "exports",
+  KwOpens = "opens",
+  KwTo = "to",
+  KwUses = "uses",
+  KwProvides = "provides",
+  KwWith = "with",
+  KwSealed = "sealed",
+  KwPermits = "permits",
+  KwNonSealed = "non-sealed",
   KwInterface = "interface",
   KwEnum = "enum",
   KwDo = "do",
@@ -77,6 +90,7 @@ export enum TokenKind {
   Semi = ";",
   Comma = ",",
   Dot = ".",
+  Ellipsis = "...",
   At = "@",
 
   // Operators
@@ -202,6 +216,19 @@ const KEYWORDS: Record<string, TokenKind> = {
   var: TokenKind.KwVar,
   instanceof: TokenKind.KwInstanceof,
   record: TokenKind.KwRecord,
+  module: TokenKind.KwModule,
+  open: TokenKind.KwOpen,
+  requires: TokenKind.KwRequires,
+  transitive: TokenKind.KwTransitive,
+  exports: TokenKind.KwExports,
+  opens: TokenKind.KwOpens,
+  to: TokenKind.KwTo,
+  uses: TokenKind.KwUses,
+  provides: TokenKind.KwProvides,
+  with: TokenKind.KwWith,
+  sealed: TokenKind.KwSealed,
+  permits: TokenKind.KwPermits,
+  "non-sealed": TokenKind.KwNonSealed,
   interface: TokenKind.KwInterface,
   enum: TokenKind.KwEnum,
   do: TokenKind.KwDo,
@@ -437,6 +464,16 @@ export function lex(source: string): Token[] {
       continue;
     }
 
+    // Hyphenated restricted keyword: non-sealed
+    if (source.startsWith("non-sealed", pos)) {
+      const after = source[pos + "non-sealed".length] ?? "\0";
+      if (!isIdentifierPart(after)) {
+        for (let i = 0; i < "non-sealed".length; i++) advance();
+        tokens.push({ kind: TokenKind.KwNonSealed, value: "non-sealed", line: startLine, col: startCol });
+        continue;
+      }
+    }
+
     // Identifier / keyword
     if (isIdentifierStart(ch)) {
       let ident = "";
@@ -453,6 +490,7 @@ export function lex(source: string): Token[] {
     const two = pos + 1 < source.length ? ch + source[pos + 1] : "";
     const three = pos + 2 < source.length ? ch + source[pos + 1] + source[pos + 2] : "";
     if (three === "<<=") { advance(); advance(); advance(); tokens.push({ kind: TokenKind.ShiftLeftAssign, value: "<<=", line: startLine, col: startCol }); continue; }
+    if (three === "...") { advance(); advance(); advance(); tokens.push({ kind: TokenKind.Ellipsis, value: "...", line: startLine, col: startCol }); continue; }
     if (two === "==") { advance(); advance(); tokens.push({ kind: TokenKind.Eq, value: "==", line: startLine, col: startCol }); continue; }
     if (two === "!=") { advance(); advance(); tokens.push({ kind: TokenKind.Ne, value: "!=", line: startLine, col: startCol }); continue; }
     if (two === "<=") { advance(); advance(); tokens.push({ kind: TokenKind.Le, value: "<=", line: startLine, col: startCol }); continue; }
