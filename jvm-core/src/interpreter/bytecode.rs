@@ -938,8 +938,23 @@ impl Vm {
                     return Err(msg);
                 }
 
-                // ---- monitorenter / monitorexit (no-ops in single-threaded context) ----
-                0xc2 | 0xc3 => { frame.stack.pop(); }
+                // ---- monitorenter / monitorexit ----
+                0xc2 => { // monitorenter
+                    let obj_val = frame.stack.pop().unwrap_or(JValue::Void);
+                    match obj_val {
+                        JValue::Ref(Some(r)) => self.monitor_enter(&r),
+                        JValue::Ref(None) => return Err("java/lang/NullPointerException: monitorenter on null".to_owned()),
+                        _ => {} // ignore non-reference (shouldn't happen)
+                    }
+                }
+                0xc3 => { // monitorexit
+                    let obj_val = frame.stack.pop().unwrap_or(JValue::Void);
+                    match obj_val {
+                        JValue::Ref(Some(r)) => self.monitor_exit(&r)?,
+                        JValue::Ref(None) => return Err("java/lang/NullPointerException: monitorexit on null".to_owned()),
+                        _ => {} // ignore non-reference (shouldn't happen)
+                    }
+                }
 
                 other => {
                     return Err(format!(

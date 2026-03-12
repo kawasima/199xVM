@@ -156,6 +156,22 @@ fn lambda_overload_arity() {
 }
 
 // ---------------------------------------------------------------------------
+// Synchronized blocks (monitorenter / monitorexit)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn synchronized_blocks() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "SynchronizedTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "13");
+}
+
+// ---------------------------------------------------------------------------
 // ClassLoader API: getSystemClassLoader, Class.forName, loadClass
 // ---------------------------------------------------------------------------
 
