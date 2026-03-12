@@ -159,21 +159,36 @@ function isIdentifierPart(ch: string): boolean {
 function preprocessUnicodeEscapes(input: string): string {
   // JLS 3.3: translate Unicode escapes before lexical analysis.
   let out = "";
+  let line = 1;
+  let col = 1;
+  const bump = (ch: string): void => {
+    if (ch === "\n") {
+      line++;
+      col = 1;
+    } else {
+      col++;
+    }
+  };
   for (let i = 0; i < input.length; i++) {
-    if (input[i] !== "\\") {
-      out += input[i];
+    const ch = input[i];
+    if (ch !== "\\") {
+      out += ch;
+      bump(ch);
       continue;
     }
     let j = i + 1;
     if (j >= input.length || input[j] !== "u") {
-      out += input[i];
+      out += ch;
+      bump(ch);
       continue;
     }
     while (j < input.length && input[j] === "u") j++;
-    if (j + 4 > input.length) throw new Error("Invalid Unicode escape sequence");
+    if (j + 4 > input.length) throw new Error(`Invalid Unicode escape sequence at line ${line}:${col}`);
     const hex = input.slice(j, j + 4);
-    if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error(`Invalid Unicode escape: \\u${hex}`);
+    if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error(`Invalid Unicode escape: \\u${hex} at line ${line}:${col}`);
     out += String.fromCharCode(parseInt(hex, 16));
+    const consumed = j + 4 - i;
+    col += consumed;
     i = j + 3;
   }
   return out;
