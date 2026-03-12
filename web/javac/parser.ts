@@ -532,12 +532,12 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         } while (match(TokenKind.Comma));
       }
       expect(TokenKind.RParen);
-      parseOptionalThrowsClause();
+      const throwsTypes = parseOptionalThrowsClause();
       if (match(TokenKind.Semi)) throw new Error("constructor declaration cannot end with ';'");
       expect(TokenKind.LBrace);
       const body = parseBlock();
       expect(TokenKind.RBrace);
-      methods.push({ name: "<init>", returnType: "void", params, body, isStatic: false });
+      methods.push({ name: "<init>", returnType: "void", params, body, isStatic: false, throwsTypes });
       return;
     }
 
@@ -556,12 +556,12 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         } while (match(TokenKind.Comma));
       }
       expect(TokenKind.RParen);
-      parseOptionalThrowsClause();
+      const throwsTypes = parseOptionalThrowsClause();
       if (ownerKind === "annotation" && at(TokenKind.KwDefault)) {
         advance(); // default
         parseExpr(); // ignore default value for now
         expect(TokenKind.Semi);
-        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: true });
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: true, throwsTypes });
         return;
       }
       if (match(TokenKind.Semi)) {
@@ -569,12 +569,12 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         if (!inInterfaceLike && !isAbstract) {
           throw new Error("Method declarations in classes, enums, and records must have a body unless declared abstract.");
         }
-        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: inInterfaceLike || isAbstract });
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: inInterfaceLike || isAbstract, throwsTypes });
       } else {
         expect(TokenKind.LBrace);
         const body = parseBlock();
         expect(TokenKind.RBrace);
-        methods.push({ name, returnType: retType, params, body, isStatic, isAbstract: false });
+        methods.push({ name, returnType: retType, params, body, isStatic, isAbstract: false, throwsTypes });
       }
     } else {
       // Field
@@ -597,13 +597,14 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
   }
 
   // Accept and skip method/constructor throws clause: `throws A, b.C`
-  function parseOptionalThrowsClause(): void {
-    if (!(at(TokenKind.Ident) && peek().value === "throws")) return;
+  function parseOptionalThrowsClause(): string[] {
+    if (!(at(TokenKind.Ident) && peek().value === "throws")) return [];
     advance(); // throws
-    parseQualifiedName();
+    const out = [parseResolvedTypeName()];
     while (match(TokenKind.Comma)) {
-      parseQualifiedName();
+      out.push(parseResolvedTypeName());
     }
+    return out;
   }
 
   function parseType(): Type {
