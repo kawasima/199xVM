@@ -2433,12 +2433,18 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       } else if (stmt.target.kind === "arrayAccess") {
         const elemType = inferType(ctx, stmt.target);
         const arrType = inferType(ctx, stmt.target.array);
+        const indexType = inferType(ctx, stmt.target.index);
         // Evaluate array and index once
         compileExpr(ctx, emitter, stmt.target.array);
         const arrSlot = addLocal(ctx, tempName("$ca_arr_"), arrType);
         if (emitter.maxLocals <= arrSlot) emitter.maxLocals = arrSlot + 1;
         emitter.emitAstore(arrSlot);
         compileExpr(ctx, emitter, stmt.target.index, "int");
+        if (indexType === "long") {
+          emitter.emit(0x88); // l2i
+        } else if (!(indexType === "int" || indexType === "byte" || indexType === "short" || indexType === "char")) {
+          throw new Error(`Invalid array index type in compound assignment: ${String(indexType)}`);
+        }
         const idxSlot = addLocal(ctx, tempName("$ca_idx_"), "int");
         if (emitter.maxLocals <= idxSlot) emitter.maxLocals = idxSlot + 1;
         emitter.emitIstore(idxSlot);
@@ -2466,6 +2472,8 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         } else {
           emitter.emit(0x53); // aastore
         }
+      } else {
+        throw new Error(`Unsupported compound assignment target of kind '${(stmt.target as Expr).kind}'`);
       }
       break;
     }
@@ -2796,9 +2804,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       break;
     }
     case "tryCatch": {
-      // Simplified try/catch: emit try body, then goto end; emit each catch handler
-      // Exception table entries are not yet supported in the bytecode emitter,
-      // so we emit the structure and register exception table entries.
+      // Emit try/catch/finally with exception-table based finally handling.
       const tryStart = emitter.pc;
       const exitActions = getExitActions(ctx);
       if (stmt.finallyBody) exitActions.push({ kind: "finally", body: stmt.finallyBody });
@@ -2809,11 +2815,13 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
       const patchEnd = emitter.emitBranch(0xa7); // goto after all catches
       const catchEndPatches: number[] = [patchEnd];
       const exceptionTable: { startPc: number; endPc: number; handlerPc: number; catchType: number }[] = [];
+      const catchRanges: { startPc: number; endPc: number }[] = [];
       for (const c of stmt.catches) {
         const handlerPc = emitter.pc;
         const catchClass = resolveClassName(ctx, c.exType);
         const classIdx = ctx.cp.addClass(catchClass);
         exceptionTable.push({ startPc: tryStart, endPc: tryEnd, handlerPc, catchType: classIdx });
+        const catchStart = emitter.pc;
         withScopedLocals(ctx, () => {
           // The exception object is on the stack
           emitter.adjustStackForCatch();
@@ -2822,20 +2830,38 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
           emitter.emitAstore(slot);
           for (const s of c.body) compileStmt(ctx, emitter, s);
         });
+        const catchEnd = emitter.pc;
+        catchRanges.push({ startPc: catchStart, endPc: catchEnd });
         catchEndPatches.push(emitter.emitBranch(0xa7)); // goto end
       }
-      if (stmt.finallyBody) exitActions.pop();
-      // Finally block (if present) — simplified: inline after try and each catch
       if (stmt.finallyBody) {
-        // Patch all catch-end gotos to here, then emit finally
-        for (const p of catchEndPatches) emitter.patchBranch(p, emitter.pc);
+        const finallyStart = emitter.pc;
+        for (const p of catchEndPatches) emitter.patchBranch(p, finallyStart);
         withScopedLocals(ctx, () => {
           for (const s of stmt.finallyBody!) compileStmt(ctx, emitter, s);
         });
+        const patchAfterFinally = emitter.emitBranch(0xa7); // skip exceptional finally handler on normal flow
+        const finallyHandlerPc = emitter.pc;
+        emitter.adjustStackForCatch();
+        const exSlot = addLocal(ctx, `\u0001finally_ex_${ctx.nextSlot}`, { className: "java/lang/Throwable" });
+        if (emitter.maxLocals <= exSlot) emitter.maxLocals = exSlot + 1;
+        emitter.emitAstore(exSlot);
+        withScopedLocals(ctx, () => {
+          for (const s of stmt.finallyBody!) compileStmt(ctx, emitter, s);
+        });
+        emitter.emitAload(exSlot);
+        emitter.emit(0xbf); // athrow
+        exceptionTable.push({ startPc: tryStart, endPc: tryEnd, handlerPc: finallyHandlerPc, catchType: 0 });
+        for (const r of catchRanges) {
+          if (r.endPc > r.startPc) {
+            exceptionTable.push({ startPc: r.startPc, endPc: r.endPc, handlerPc: finallyHandlerPc, catchType: 0 });
+          }
+        }
+        emitter.patchBranch(patchAfterFinally, emitter.pc);
+        exitActions.pop();
       } else {
         for (const p of catchEndPatches) emitter.patchBranch(p, emitter.pc);
       }
-      // Store exception table entries on the emitter
       for (const entry of exceptionTable) {
         emitter.exceptionTable.push(entry);
       }
