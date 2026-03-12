@@ -39,6 +39,8 @@ pub(super) struct MethodExecInfo {
     pub cp: Rc<Vec<ConstantPoolEntry>>,
     /// Bootstrap methods from the `BootstrapMethods` attribute.
     pub bootstrap_methods: Vec<BootstrapMethod>,
+    /// `access_flags` from the method_info entry.
+    pub access_flags: u16,
 }
 
 /// A class entry in the VM's class registry.
@@ -342,6 +344,7 @@ impl Vm {
         })?;
         let class_name_out = class.constant_pool.class_name(class.this_class).to_owned();
         let descriptor_out = class.constant_pool.utf8(class.methods[method_idx].descriptor_index).to_owned();
+        let access_flags = class.methods[method_idx].access_flags;
         let (max_locals, has_code, code, exception_table) =
             if let Some(ca) = class.methods[method_idx].code() {
                 (ca.max_locals as usize, true, ca.code.clone(), ca.exception_table.clone())
@@ -355,6 +358,7 @@ impl Vm {
         Some(MethodExecInfo {
             class_name: class_name_out,
             descriptor: descriptor_out,
+            access_flags,
             max_locals,
             has_code,
             code,

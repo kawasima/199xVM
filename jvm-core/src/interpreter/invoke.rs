@@ -139,15 +139,13 @@ impl Vm {
             .unwrap();
 
         // JVMS §5.4.3.3: invoking an abstract method throws AbstractMethodError.
-        if let Some(flags) = self.find_method_flags(&info.class_name, method_name, &info.descriptor) {
-            if flags & 0x0400 != 0 {
-                let exc = crate::heap::JObject::new("java/lang/AbstractMethodError");
-                let msg_str = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-                let msg = self.intern_string(msg_str);
-                exc.borrow_mut().fields.insert("detailMessage".to_owned(), crate::heap::JValue::Ref(Some(msg)));
-                self.pending_exception = Some(exc);
-                return Err(format!("AbstractMethodError: {}.{method_name}{}", info.class_name, info.descriptor));
-            }
+        if info.access_flags & 0x0400 != 0 {
+            let exc = crate::heap::JObject::new("java/lang/AbstractMethodError");
+            let msg_str = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+            let msg = self.intern_string(msg_str);
+            exc.borrow_mut().fields.insert("detailMessage".to_owned(), crate::heap::JValue::Ref(Some(msg)));
+            self.pending_exception = Some(exc);
+            return Err(format!("AbstractMethodError: {}.{method_name}{}", info.class_name, info.descriptor));
         }
 
         let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
@@ -285,15 +283,13 @@ impl Vm {
             .unwrap();
 
         // JVMS §5.4.3.3: invoking an abstract method throws AbstractMethodError.
-        if let Some(flags) = self.find_method_flags(&info.class_name, method_name, &info.descriptor) {
-            if flags & 0x0400 != 0 {
-                let exc = crate::heap::JObject::new("java/lang/AbstractMethodError");
-                let msg_str = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-                let msg = self.intern_string(msg_str);
-                exc.borrow_mut().fields.insert("detailMessage".to_owned(), crate::heap::JValue::Ref(Some(msg)));
-                self.pending_exception = Some(exc);
-                return Err(format!("AbstractMethodError: {}.{method_name}{}", info.class_name, info.descriptor));
-            }
+        if info.access_flags & 0x0400 != 0 {
+            let exc = crate::heap::JObject::new("java/lang/AbstractMethodError");
+            let msg_str = format!("{}.{method_name}{}", info.class_name, info.descriptor);
+            let msg = self.intern_string(msg_str);
+            exc.borrow_mut().fields.insert("detailMessage".to_owned(), crate::heap::JValue::Ref(Some(msg)));
+            self.pending_exception = Some(exc);
+            return Err(format!("AbstractMethodError: {}.{method_name}{}", info.class_name, info.descriptor));
         }
 
         // `this` goes into local[0], then arguments.
