@@ -122,9 +122,9 @@ impl ThreadContext {
 /// Round-robin scheduler managing all green threads.
 #[allow(dead_code)]
 pub(crate) struct Scheduler {
-    pub threads: Vec<ThreadContext>,
-    pub current_thread_idx: usize,
-    pub next_thread_id: ThreadId,
+    threads: Vec<ThreadContext>,
+    current_thread_idx: usize,
+    next_thread_id: ThreadId,
 }
 
 impl Scheduler {
@@ -178,7 +178,7 @@ pub struct Vm {
     /// Singleton system ClassLoader instance (created on first access).
     pub(in crate::interpreter) system_classloader: Option<JRef>,
     /// Green thread scheduler.
-    pub(crate) scheduler: Scheduler,
+    scheduler: Scheduler,
 }
 
 impl Vm {
