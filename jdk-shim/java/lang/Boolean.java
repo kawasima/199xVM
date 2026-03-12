@@ -74,4 +74,16 @@ public final class Boolean implements Serializable, Comparable<Boolean> {
     public static int compare(boolean x, boolean y) {
         return (x == y) ? 0 : (x ? 1 : -1);
     }
+
+    public static int hashCode(boolean value) {
+        return value ? 1231 : 1237;
+    }
+
+    public static boolean getBoolean(String name) {
+        return false;
+    }
+
+    public static boolean parseBoolean(String s) {
+        return "true".equalsIgnoreCase(s);
+    }
 }

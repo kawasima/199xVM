@@ -26,9 +26,20 @@
 package java.util.stream;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
+import java.util.Spliterator;
+import java.util.function.BinaryOperator;
+import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.IntFunction;
 import java.util.function.Predicate;
+import java.util.function.ToIntFunction;
+import java.util.function.ToLongFunction;
+import java.util.function.ToDoubleFunction;
 
 public class StreamImpl<T> implements Stream<T> {
     private final List<T> elements;
@@ -48,6 +59,49 @@ public class StreamImpl<T> implements Stream<T> {
     }
 
     @Override
+    @SuppressWarnings("unchecked")
+    public <R> Stream<R> flatMap(Function<? super T, ? extends Stream<? extends R>> mapper) {
+        List<R> result = new ArrayList<>();
+        for (T e : elements) {
+            Stream<? extends R> s = mapper.apply(e);
+            if (s != null) {
+                s.forEach(r -> result.add(r));
+            }
+        }
+        return new StreamImpl<>(result);
+    }
+
+    @Override
+    public IntStream mapToInt(ToIntFunction<? super T> mapper) {
+        throw new UnsupportedOperationException("mapToInt");
+    }
+
+    @Override
+    public LongStream mapToLong(ToLongFunction<? super T> mapper) {
+        throw new UnsupportedOperationException("mapToLong");
+    }
+
+    @Override
+    public DoubleStream mapToDouble(ToDoubleFunction<? super T> mapper) {
+        throw new UnsupportedOperationException("mapToDouble");
+    }
+
+    @Override
+    public IntStream flatMapToInt(Function<? super T, ? extends IntStream> mapper) {
+        throw new UnsupportedOperationException("flatMapToInt");
+    }
+
+    @Override
+    public LongStream flatMapToLong(Function<? super T, ? extends LongStream> mapper) {
+        throw new UnsupportedOperationException("flatMapToLong");
+    }
+
+    @Override
+    public DoubleStream flatMapToDouble(Function<? super T, ? extends DoubleStream> mapper) {
+        throw new UnsupportedOperationException("flatMapToDouble");
+    }
+
+    @Override
     public Stream<T> filter(Predicate<? super T> predicate) {
         List<T> result = new ArrayList<>();
         for (T e : elements) {
@@ -57,13 +111,251 @@ public class StreamImpl<T> implements Stream<T> {
     }
 
     @Override
+    public Stream<T> distinct() {
+        List<T> result = new ArrayList<>();
+        for (T e : elements) {
+            if (!result.contains(e)) result.add(e);
+        }
+        return new StreamImpl<>(result);
+    }
+
+    @Override
     @SuppressWarnings("unchecked")
-    public <R> R collect(Collector<? super T, ?, R> collector) {
+    public Stream<T> sorted() {
+        List<T> result = new ArrayList<>(elements);
+        Collections.sort((List<Comparable>) result);
+        return new StreamImpl<>(result);
+    }
+
+    @Override
+    public Stream<T> sorted(Comparator<? super T> comparator) {
+        List<T> result = new ArrayList<>(elements);
+        result.sort(comparator);
+        return new StreamImpl<>(result);
+    }
+
+    @Override
+    public Stream<T> peek(Consumer<? super T> action) {
+        List<T> result = new ArrayList<>();
+        for (T e : elements) {
+            action.accept(e);
+            result.add(e);
+        }
+        return new StreamImpl<>(result);
+    }
+
+    @Override
+    public Stream<T> limit(long maxSize) {
+        List<T> result = new ArrayList<>();
+        long count = 0;
+        for (T e : elements) {
+            if (count >= maxSize) break;
+            result.add(e);
+            count++;
+        }
+        return new StreamImpl<>(result);
+    }
+
+    @Override
+    public Stream<T> skip(long n) {
+        List<T> result = new ArrayList<>();
+        long count = 0;
+        for (T e : elements) {
+            if (count >= n) result.add(e);
+            count++;
+        }
+        return new StreamImpl<>(result);
+    }
+
+    @Override
+    public void forEach(Consumer<? super T> action) {
+        for (T e : elements) {
+            action.accept(e);
+        }
+    }
+
+    @Override
+    public void forEachOrdered(Consumer<? super T> action) {
+        forEach(action);
+    }
+
+    @Override
+    public Object[] toArray() {
+        return elements.toArray();
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public <A> A[] toArray(IntFunction<A[]> generator) {
+        A[] arr = generator.apply(elements.size());
+        for (int i = 0; i < elements.size(); i++) {
+            arr[i] = (A) elements.get(i);
+        }
+        return arr;
+    }
+
+    @Override
+    public T reduce(T identity, BinaryOperator<T> accumulator) {
+        T result = identity;
+        for (T e : elements) {
+            result = accumulator.apply(result, e);
+        }
+        return result;
+    }
+
+    @Override
+    public Optional<T> reduce(BinaryOperator<T> accumulator) {
+        if (elements.isEmpty()) return Optional.empty();
+        T result = elements.get(0);
+        for (int i = 1; i < elements.size(); i++) {
+            result = accumulator.apply(result, elements.get(i));
+        }
+        return Optional.of(result);
+    }
+
+    @Override
+    public <U> U reduce(U identity,
+                        java.util.function.BiFunction<U, ? super T, U> accumulator,
+                        BinaryOperator<U> combiner) {
+        U result = identity;
+        for (T e : elements) {
+            result = accumulator.apply(result, e);
+        }
+        return result;
+    }
+
+    @Override
+    public <R> R collect(java.util.function.Supplier<R> supplier,
+                         java.util.function.BiConsumer<R, ? super T> accumulator,
+                         java.util.function.BiConsumer<R, R> combiner) {
+        R result = supplier.get();
+        for (T e : elements) {
+            accumulator.accept(result, e);
+        }
+        return result;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public <R, A> R collect(Collector<? super T, A, R> collector) {
         Collector<T, Object, R> c = (Collector<T, Object, R>) collector;
         Object container = c.supplier();
         for (T e : elements) {
             c.accumulator(container, e);
         }
         return c.finisher(container);
+    }
+
+    @Override
+    public Optional<T> min(Comparator<? super T> comparator) {
+        if (elements.isEmpty()) return Optional.empty();
+        T min = elements.get(0);
+        for (int i = 1; i < elements.size(); i++) {
+            if (comparator.compare(elements.get(i), min) < 0) {
+                min = elements.get(i);
+            }
+        }
+        return Optional.of(min);
+    }
+
+    @Override
+    public Optional<T> max(Comparator<? super T> comparator) {
+        if (elements.isEmpty()) return Optional.empty();
+        T max = elements.get(0);
+        for (int i = 1; i < elements.size(); i++) {
+            if (comparator.compare(elements.get(i), max) > 0) {
+                max = elements.get(i);
+            }
+        }
+        return Optional.of(max);
+    }
+
+    @Override
+    public long count() {
+        return elements.size();
+    }
+
+    @Override
+    public boolean anyMatch(Predicate<? super T> predicate) {
+        for (T e : elements) {
+            if (predicate.test(e)) return true;
+        }
+        return false;
+    }
+
+    @Override
+    public boolean allMatch(Predicate<? super T> predicate) {
+        for (T e : elements) {
+            if (!predicate.test(e)) return false;
+        }
+        return true;
+    }
+
+    @Override
+    public boolean noneMatch(Predicate<? super T> predicate) {
+        for (T e : elements) {
+            if (predicate.test(e)) return false;
+        }
+        return true;
+    }
+
+    @Override
+    public Optional<T> findFirst() {
+        if (elements.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(elements.get(0));
+    }
+
+    @Override
+    public Optional<T> findAny() {
+        if (elements.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(elements.get(0));
+    }
+
+    // BaseStream methods
+
+    @Override
+    public Iterator<T> iterator() {
+        return elements.iterator();
+    }
+
+    @Override
+    public Spliterator<T> spliterator() {
+        return elements.spliterator();
+    }
+
+    @Override
+    public boolean isParallel() {
+        return false;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Stream<T> sequential() {
+        return this;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Stream<T> parallel() {
+        return this;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Stream<T> unordered() {
+        return this;
+    }
+
+    @Override
+    public Stream<T> onClose(Runnable closeHandler) {
+        return this;
+    }
+
+    @Override
+    public void close() {
     }
 }

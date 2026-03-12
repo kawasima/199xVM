@@ -40,4 +40,16 @@ public final class Short extends Number implements Comparable<Short> {
     @Override public double doubleValue() { return value; }
     @Override public int compareTo(Short another) { return value - another.value; }
     @Override public String toString() { return Integer.toString(value); }
+
+    public static int compare(short x, short y) {
+        return x - y;
+    }
+
+    public static int toUnsignedInt(short x) {
+        return ((int) x) & 0xffff;
+    }
+
+    public static int compareUnsigned(short x, short y) {
+        return Short.toUnsignedInt(x) - Short.toUnsignedInt(y);
+    }
 }
