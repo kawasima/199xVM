@@ -19,7 +19,7 @@ import {
   lookupKnownMethod,
   setMethodRegistry,
 } from "./method-registry.js";
-import type { FunctionalSig, MethodSig } from "./method-registry.js";
+import type { FunctionalSig } from "./method-registry.js";
 export { setMethodRegistry };
 
 // ============================================================================
@@ -556,6 +556,85 @@ function resolveClassName(ctx: CompileContext, name: string): string {
   return name;
 }
 
+interface ResolvedMethodCandidate {
+  owner: string;
+  paramTypes: Type[];
+  returnType: Type;
+  isStatic: boolean;
+  isInterface: boolean;
+}
+
+function ownerSearchOrder(ctx: CompileContext, startOwner: string): string[] {
+  const out: string[] = [];
+  const queue: string[] = [startOwner];
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const owner = queue.shift()!;
+    if (seen.has(owner)) continue;
+    seen.add(owner);
+    out.push(owner);
+    const decl = ctx.classDecls.get(owner);
+    if (decl) {
+      for (const itf of decl.interfaces ?? []) {
+        queue.push(resolveClassName(ctx, itf));
+      }
+      if (decl.superClass) queue.push(resolveClassName(ctx, decl.superClass));
+    } else {
+      const next = ctx.classSupers.get(owner) ?? BUILTIN_SUPERS[owner];
+      if (next) queue.push(next);
+    }
+  }
+  return out;
+}
+
+function resolveMethodCandidate(
+  ctx: CompileContext,
+  ownerClass: string,
+  method: string,
+  args: Expr[],
+  wantStatic: boolean,
+): ResolvedMethodCandidate | undefined {
+  const argTypes = args.map(a => inferType(ctx, a));
+  return resolveMethodCandidateByTypes(ctx, ownerClass, method, argTypes, wantStatic, args);
+}
+
+function resolveMethodCandidateByTypes(
+  ctx: CompileContext,
+  ownerClass: string,
+  method: string,
+  argTypes: Type[],
+  wantStatic: boolean,
+  originalArgs: Expr[] = [],
+): ResolvedMethodCandidate | undefined {
+  const argDescs = argTypes.map(typeToDescriptor).join("");
+  for (const owner of ownerSearchOrder(ctx, ownerClass)) {
+    const decl = ctx.classDecls.get(owner);
+    if (decl) {
+      const m = decl.methods.find(mm => mm.name === method && mm.isStatic === wantStatic && mm.params.length === argTypes.length);
+      if (!m) continue;
+      return {
+        owner,
+        paramTypes: m.params.map(p => p.type),
+        returnType: m.returnType,
+        isStatic: m.isStatic,
+        isInterface: decl.kind === "interface" || decl.kind === "annotation",
+      };
+    }
+    const exactSig = lookupKnownMethod(owner, method, argDescs);
+    const sig = exactSig
+      ?? (hasFunctionalArg(originalArgs) ? findKnownMethodByArity(owner, method, argTypes.length, wantStatic) : undefined);
+    if (!sig) continue;
+    return {
+      owner,
+      paramTypes: sig.paramTypes,
+      returnType: sig.returnType,
+      isStatic: !!sig.isStatic,
+      isInterface: !!sig.isInterface,
+    };
+  }
+  return undefined;
+}
+
 function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
   for (let i = ctx.locals.length - 1; i >= 0; i--) {
     if (ctx.locals[i].name === name) return ctx.locals[i];
@@ -635,42 +714,26 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
           : typeof objType === "object" && "className" in objType ? objType.className
           : "java/lang/Object";
         const ownerClass = resolveClassName(ctx, rawOwner);
-        // Look in knownMethods
-        const argDescs = expr.args.map(a => typeToDescriptor(inferType(ctx, a))).join("");
-        const exactSig = lookupKnownMethod(ownerClass, expr.method, argDescs);
-        const sig = exactSig
-          ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(ownerClass, expr.method, expr.args.length, false) : undefined);
-        if (sig) return sig.returnType;
-        // Check user-defined methods
-        const userMethod = ctx.allMethods.find(m => m.name === expr.method);
-        if (userMethod) return userMethod.returnType;
+        const resolved = resolveMethodCandidate(ctx, ownerClass, expr.method, expr.args, false);
+        if (resolved) return resolved.returnType;
       } else {
-        // Unqualified call — look in user-defined methods
-        const userMethod = ctx.allMethods.find(m => m.name === expr.method);
+        const userMethod = ctx.classDecls.get(ctx.className)?.methods
+          .find(m => m.name === expr.method && m.params.length === expr.args.length);
         if (userMethod) return userMethod.returnType;
         // Static import-on-demand method
         if (ctx.staticWildcardImports.length > 0) {
-          const argDescs = expr.args.map(a => typeToDescriptor(inferType(ctx, a))).join("");
           for (const owner of ctx.staticWildcardImports) {
-            const exact = lookupKnownMethod(owner, expr.method, argDescs);
-            const sig = exact
-              ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(owner, expr.method, expr.args.length, true) : undefined);
-            if (sig) return sig.returnType;
+            const resolved = resolveMethodCandidate(ctx, owner, expr.method, expr.args, true);
+            if (resolved) return resolved.returnType;
           }
         }
       }
       return { className: "java/lang/Object" };
     }
     case "staticCall": {
-      const argDescs = expr.args.map(a => typeToDescriptor(inferType(ctx, a))).join("");
       const internalName = expr.className.replace(/\./g, "/");
-      const exactSig = lookupKnownMethod(internalName, expr.method, argDescs);
-      const sig = exactSig
-        ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(internalName, expr.method, expr.args.length, true) : undefined);
-      if (sig) return sig.returnType;
-      // Check user-defined static methods
-      const userMethod = ctx.allMethods.find(m => m.name === expr.method && m.isStatic);
-      if (userMethod) return userMethod.returnType;
+      const resolved = resolveMethodCandidate(ctx, internalName, expr.method, expr.args, true);
+      if (resolved) return resolved.returnType;
       return { className: "java/lang/Object" };
     }
     case "fieldAccess": {
@@ -1342,10 +1405,14 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         const ctorId = ctx.lambdaCounter.value++;
         const ctorImplName = `lambda$ctor$${ctorId}`;
         const ctorParams: ParamDecl[] = sig.params.map((p, i) => ({ name: `p${i}`, type: p }));
-        const argDescs = ctorParams.map(p => typeToDescriptor(p.type)).join("");
-        const ctorKnown = lookupKnownMethod(targetClass, "<init>", argDescs)
-          ?? findKnownMethodByArity(targetClass, "<init>", ctorParams.length, false);
-        const ctorTypes = ctorKnown?.paramTypes ?? ctorParams.map(p => p.type);
+        const ctorResolved = resolveMethodCandidateByTypes(
+          ctx,
+          targetClass,
+          "<init>",
+          ctorParams.map(p => p.type),
+          false,
+        );
+        const ctorTypes = ctorResolved?.paramTypes ?? ctorParams.map(p => p.type);
         const ctorArgs: Expr[] = ctorParams.map((p, i) => {
           const need = ctorTypes[i];
           if (need && !sameType(need, p.type)) {
@@ -1382,18 +1449,24 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       if (isClassRef && expr.target.kind === "ident") {
         implOwner = resolveClassName(ctx, expr.target.name);
         // Prefer static method reference
-        const staticSig = findKnownMethodByArity(implOwner, expr.method, sig.params.length, true);
-        if (staticSig) {
-          implDescriptor = "(" + staticSig.paramTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(staticSig.returnType);
+        const staticResolved = resolveMethodCandidateByTypes(ctx, implOwner, expr.method, sig.params, true);
+        if (staticResolved) {
+          implDescriptor = "(" + staticResolved.paramTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(staticResolved.returnType);
           implRefKind = 6;
-          implIsInterface = staticSig.isInterface ?? false;
+          implIsInterface = staticResolved.isInterface;
         } else {
           // Unbound instance: first SAM arg is receiver
-          const instSig = findKnownMethodByArity(implOwner, expr.method, Math.max(0, sig.params.length - 1), false);
-          if (instSig) {
-            implDescriptor = "(" + instSig.paramTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(instSig.returnType);
-            implRefKind = instSig.isInterface ? 9 : 5;
-            implIsInterface = instSig.isInterface ?? false;
+          const instResolved = resolveMethodCandidateByTypes(
+            ctx,
+            implOwner,
+            expr.method,
+            sig.params.slice(1),
+            false,
+          );
+          if (instResolved) {
+            implDescriptor = "(" + instResolved.paramTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(instResolved.returnType);
+            implRefKind = instResolved.isInterface ? 9 : 5;
+            implIsInterface = instResolved.isInterface;
           } else if (implOwner === ctx.className) {
             const staticUser = ctx.allMethods.find(m => m.name === expr.method && m.isStatic && m.params.length === sig.params.length);
             if (staticUser) {
@@ -1416,11 +1489,11 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         captureTypes = [t === "String" ? "String" : t];
         compileExpr(ctx, emitter, expr.target);
 
-        const boundSig = findKnownMethodByArity(implOwner, expr.method, sig.params.length, false);
-        if (boundSig) {
-          implDescriptor = "(" + boundSig.paramTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(boundSig.returnType);
-          implRefKind = boundSig.isInterface ? 9 : 5;
-          implIsInterface = boundSig.isInterface ?? false;
+        const boundResolved = resolveMethodCandidateByTypes(ctx, implOwner, expr.method, sig.params, false);
+        if (boundResolved) {
+          implDescriptor = "(" + boundResolved.paramTypes.map(typeToDescriptor).join("") + ")" + typeToDescriptor(boundResolved.returnType);
+          implRefKind = boundResolved.isInterface ? 9 : 5;
+          implIsInterface = boundResolved.isInterface;
         } else if (implOwner === ctx.className) {
           const m = ctx.allMethods.find(mm => mm.name === expr.method && !mm.isStatic && mm.params.length === sig.params.length);
           if (!m) throw new Error(`Cannot resolve method reference target::${expr.method}`);
@@ -1550,22 +1623,19 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
       // Check if it's a class name (starts with uppercase or in importMap, and not a local var)
       if ((/^[A-Z]/.test(name) || ctx.importMap.has(name)) && !findLocal(ctx, name)) {
         const internalName = resolveClassName(ctx, name);
-        const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
-
-        // Try known methods
-        const exactSig = lookupKnownMethod(internalName, expr.method, argTypes.join(""));
-        const sig = exactSig
-          ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(internalName, expr.method, expr.args.length, true) : undefined);
-        if (sig) {
-          expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, sig.paramTypes[i] ?? { className: "java/lang/Object" }));
-          const sigArgDescs = sig.paramTypes.map(t => typeToDescriptor(t)).join("");
-          const desc = "(" + sigArgDescs + ")" + typeToDescriptor(sig.returnType);
+        const resolved = resolveMethodCandidate(ctx, internalName, expr.method, expr.args, true);
+        if (resolved) {
+          expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, resolved.paramTypes[i] ?? { className: "java/lang/Object" }));
+          const sigArgDescs = resolved.paramTypes.map(t => typeToDescriptor(t)).join("");
+          const desc = "(" + sigArgDescs + ")" + typeToDescriptor(resolved.returnType);
           const mRef = ctx.cp.addMethodref(internalName, expr.method, desc);
-          emitter.emitInvokestatic(mRef, expr.args.length, sig.returnType !== "void");
+          emitter.emitInvokestatic(mRef, expr.args.length, resolved.returnType !== "void");
         } else {
+          const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
           for (const arg of expr.args) compileExpr(ctx, emitter, arg);
-          // User-defined static method in same or another class
-          const userMethod = ctx.allMethods.find(m => m.name === expr.method && m.isStatic);
+          // Fallback descriptor: declared static method in owner class by arity, else Object-returning.
+          const userMethod = ctx.classDecls.get(internalName)?.methods
+            .find(m => m.name === expr.method && m.isStatic && m.params.length === expr.args.length);
           const retType = userMethod ? userMethod.returnType : { className: "java/lang/Object" } as Type;
           const desc = "(" + argTypes.join("") + ")" + typeToDescriptor(retType);
           const mRef = ctx.cp.addMethodref(internalName, expr.method, desc);
@@ -1584,24 +1654,22 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
       : "java/lang/Object";
     const ownerClass = resolveClassName(ctx, rawOwner);
 
-    // Look up return type
-    const exactSig = lookupKnownMethod(ownerClass, expr.method, argTypes.join(""));
-    const sig = exactSig
-      ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(ownerClass, expr.method, expr.args.length, false) : undefined);
+    const resolved = resolveMethodCandidate(ctx, ownerClass, expr.method, expr.args, false);
 
     let desc: string;
     let retType: Type;
     let isInterface = false;
 
-    if (sig) {
-      expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, sig.paramTypes[i] ?? { className: "java/lang/Object" }));
-      retType = sig.returnType;
-      const sigArgDescs = sig.paramTypes.map(t => typeToDescriptor(t)).join("");
+    if (resolved) {
+      expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, resolved.paramTypes[i] ?? { className: "java/lang/Object" }));
+      retType = resolved.returnType;
+      const sigArgDescs = resolved.paramTypes.map(t => typeToDescriptor(t)).join("");
       desc = "(" + sigArgDescs + ")" + typeToDescriptor(retType);
-      isInterface = sig.isInterface ?? false;
+      isInterface = resolved.isInterface;
     } else {
       // Check user-defined methods
-      const userMethod = ctx.allMethods.find(m => m.name === expr.method && !m.isStatic);
+      const userMethod = ctx.classDecls.get(ownerClass)?.methods
+        .find(m => m.name === expr.method && !m.isStatic && m.params.length === expr.args.length);
       if (userMethod) {
         expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, userMethod.params[i]?.type));
       } else {
@@ -1620,7 +1688,8 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     }
   } else {
     // Unqualified method call — call on this or static
-    const userMethod = ctx.allMethods.find(m => m.name === expr.method);
+    const userMethod = ctx.classDecls.get(ctx.className)?.methods
+      .find(m => m.name === expr.method && m.params.length === expr.args.length);
     if (userMethod) {
       const desc = methodDescriptor(userMethod.params, userMethod.returnType);
       const ownerDecl = ctx.classDecls.get(ctx.className);
@@ -1642,26 +1711,24 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
       }
     } else if (ctx.staticWildcardImports.length > 0) {
       // Try static-import-on-demand owners in order
-      const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
       let ownerClass = ctx.staticWildcardImports[0];
-      let sig: MethodSig | undefined;
+      let resolved: ResolvedMethodCandidate | undefined;
       for (const owner of ctx.staticWildcardImports) {
-        const exact = lookupKnownMethod(owner, expr.method, argTypes.join(""));
-        const candidate = exact
-          ?? (hasFunctionalArg(expr.args) ? findKnownMethodByArity(owner, expr.method, expr.args.length, true) : undefined);
+        const candidate = resolveMethodCandidate(ctx, owner, expr.method, expr.args, true);
         if (candidate) {
           ownerClass = owner;
-          sig = candidate;
+          resolved = candidate;
           break;
         }
       }
-      if (sig) {
-        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, sig!.paramTypes[i] ?? { className: "java/lang/Object" }));
+      const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
+      if (resolved) {
+        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, resolved!.paramTypes[i] ?? { className: "java/lang/Object" }));
       } else {
         for (const arg of expr.args) compileExpr(ctx, emitter, arg);
       }
-      const retType: Type = sig?.returnType ?? { className: "java/lang/Object" };
-      const sigArgDescs = sig ? sig.paramTypes.map(t => typeToDescriptor(t)).join("") : argTypes.join("");
+      const retType: Type = resolved?.returnType ?? { className: "java/lang/Object" };
+      const sigArgDescs = resolved ? resolved.paramTypes.map(t => typeToDescriptor(t)).join("") : argTypes.join("");
       const desc = "(" + sigArgDescs + ")" + typeToDescriptor(retType);
       const mRef = ctx.cp.addMethodref(ownerClass, expr.method, desc);
       emitter.emitInvokestatic(mRef, expr.args.length, retType !== "void");
