@@ -3756,8 +3756,8 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     let accessFlags = 0x0001; // ACC_PUBLIC
     if (method.name === "<init>" && classDecl.kind === "enum") accessFlags = 0x0002; // ACC_PRIVATE
     if (method.isStatic) accessFlags |= 0x0008; // ACC_STATIC
-    if (method.isSynchronized) accessFlags |= 0x0020; // ACC_SYNCHRONIZED
     const methodIsAbstract = method.name !== "<init>" && !!method.isAbstract;
+    if (method.isSynchronized && !methodIsAbstract) accessFlags |= 0x0020; // ACC_SYNCHRONIZED
     if (methodIsAbstract) accessFlags |= 0x0400; // ACC_ABSTRACT
 
     if (methodIsAbstract) {

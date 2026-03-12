@@ -484,7 +484,12 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       if (at(TokenKind.KwAbstract)) { advance(); isAbstract = true; continue; }
       if (at(TokenKind.KwFinal)) { advance(); continue; }
       if (at(TokenKind.KwDefault)) { advance(); continue; }
-      if (at(TokenKind.KwSynchronized)) { advance(); isSynchronized = true; continue; }
+      if (at(TokenKind.KwSynchronized)) {
+        if (ownerKind === "interface" || ownerKind === "annotation") {
+          throw new Error("'synchronized' is not allowed on interface or annotation members");
+        }
+        advance(); isSynchronized = true; continue;
+      }
       break;
     }
 
