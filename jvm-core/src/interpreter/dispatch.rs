@@ -29,16 +29,26 @@ impl Vm {
         let n_args = count_args(&descriptor);
         let args = pop_args(frame, n_args);
 
-        // Try to build a bytecode frame.
-        let push_return = !descriptor.ends_with(")V");
-        match self.build_static_frame(&class_name, &method_name, &descriptor, args.clone(), push_return)? {
+        // Normalize descriptor and args (varargs synthesis) before branching.
+        let (desc, args) = match self.prepare_static_args(&class_name, &method_name, &descriptor, args) {
+            Some(pair) => pair,
+            None => {
+                // Method flags not found — fall back to invoke_static which handles native stubs.
+                let result = self.invoke_static(&class_name, &method_name, &descriptor, vec![])?;
+                if !matches!(result, JValue::Void) { frame.stack.push(result); }
+                return Ok(None);
+            }
+        };
+
+        let push_return = !desc.ends_with(")V");
+        match self.build_static_frame(&class_name, &method_name, &desc, args.clone(), push_return)? {
             Some(fi) => {
                 self.pending_frame = Some(fi);
                 Ok(None)
             }
             None => {
-                // Native fallback.
-                let result = self.invoke_static(&class_name, &method_name, &descriptor, args)?;
+                // Native fallback — args already have varargs synthesis applied.
+                let result = self.invoke_static(&class_name, &method_name, &desc, args)?;
                 if !matches!(result, JValue::Void) {
                     frame.stack.push(result);
                 }

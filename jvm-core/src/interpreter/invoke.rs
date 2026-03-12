@@ -14,7 +14,22 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        match self.build_static_frame(class_name, method_name, descriptor, args.clone(), true)? {
+        // Normalize descriptor and args (varargs synthesis) once, shared by
+        // both the bytecode (trampoline) and native paths.
+        let (resolved_desc, args) = match self.prepare_static_args(class_name, method_name, descriptor, args) {
+            Some(pair) => pair,
+            None => {
+                // Method flags not found — try native stubs with original descriptor.
+                if let Some(v) = self.native_static(class_name, method_name, descriptor, &[]) {
+                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                    return Ok(v);
+                }
+                return Err(format!("Method not found: {class_name}.{method_name}{descriptor}"));
+            }
+        };
+        let desc = resolved_desc.as_str();
+
+        match self.build_static_frame(class_name, method_name, desc, args.clone(), true)? {
             Some(fi) => {
                 let frame_owner = fi.frame_owner.clone();
                 let mut call_stack = vec![fi];
@@ -22,67 +37,43 @@ impl Vm {
                     .map_err(|e| format!("{e}\n  at {frame_owner}"))
             }
             None => {
-                // Native fallback — use the old inline path.
-                self.invoke_static_native(class_name, method_name, descriptor, args)
+                // Native fallback — args already have varargs synthesis applied.
+                if let Some(v) = self.native_static(class_name, method_name, desc, &args) {
+                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                    return Ok(v);
+                }
+                // Try with full locals construction for proper slot mapping.
+                let info = match self.resolve_method_exec_info(class_name, method_name, desc) {
+                    Some(info) => info,
+                    None => return Err(format!("Method not found: {class_name}.{method_name}{desc}")),
+                };
+                if !info.has_code {
+                    let (param_tokens, _) = Self::parse_method_descriptor_tokens(&info.descriptor);
+                    let mut native_args = Vec::with_capacity(param_tokens.len());
+                    let req: usize = param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum();
+                    let mut locals = vec![JValue::Void; info.max_locals.max(req)];
+                    let mut li = 0usize;
+                    for (a, t) in args.into_iter().zip(param_tokens.iter()) {
+                        if li >= locals.len() { break; }
+                        locals[li] = self.adapt_value_for_descriptor(t, a);
+                        li += if t == "J" || t == "D" { 2 } else { 1 };
+                    }
+                    let mut slot = 0usize;
+                    for t in &param_tokens {
+                        if slot < locals.len() { native_args.push(locals[slot].clone()); }
+                        slot += if t == "J" || t == "D" { 2 } else { 1 };
+                    }
+                    if let Some(v) = self.native_static(&info.class_name, method_name, &info.descriptor, &native_args) {
+                        if let Some(err) = self.pending_exception_err() { return Err(err); }
+                        return Ok(v);
+                    }
+                }
+                Err(format!(
+                    "Native stub not found for: {}.{method_name}{}",
+                    info.class_name, info.descriptor
+                ))
             }
         }
-    }
-
-    /// Native-only path for invoke_static (when build_static_frame returns None).
-    fn invoke_static_native(
-        &mut self,
-        class_name: &str,
-        method_name: &str,
-        descriptor: &str,
-        args: Vec<JValue>,
-    ) -> Result<JValue, String> {
-        let method_flags = self.find_method_flags(class_name, method_name, descriptor);
-        let resolved_descriptor = if method_flags.is_some() {
-            descriptor.to_owned()
-        } else {
-            self.find_method_real_descriptor(class_name, method_name, descriptor)
-                .unwrap_or_else(|| descriptor.to_owned())
-        };
-        let descriptor = resolved_descriptor.as_str();
-
-        if let Some(v) = self.native_static(class_name, method_name, descriptor, &args) {
-            if let Some(err) = self.pending_exception_err() { return Err(err); }
-            return Ok(v);
-        }
-
-        // Method has code but build_static_frame returned None — this means
-        // method_flags was None (descriptor mismatch). Try resolving method info
-        // for the native path with full locals construction.
-        let info = match self.resolve_method_exec_info(class_name, method_name, descriptor) {
-            Some(info) => info,
-            None => return Err(format!("Method not found: {class_name}.{method_name}{descriptor}")),
-        };
-        if !info.has_code {
-            let (param_tokens, _) = Self::parse_method_descriptor_tokens(&info.descriptor);
-            let mut native_args = Vec::with_capacity(param_tokens.len());
-            // Build locals to extract native args correctly.
-            let req: usize = param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum();
-            let mut locals = vec![JValue::Void; info.max_locals.max(req)];
-            let mut li = 0usize;
-            for (a, t) in args.into_iter().zip(param_tokens.iter()) {
-                if li >= locals.len() { break; }
-                locals[li] = self.adapt_value_for_descriptor(t, a);
-                li += if t == "J" || t == "D" { 2 } else { 1 };
-            }
-            let mut slot = 0usize;
-            for t in &param_tokens {
-                if slot < locals.len() { native_args.push(locals[slot].clone()); }
-                slot += if t == "J" || t == "D" { 2 } else { 1 };
-            }
-            if let Some(v) = self.native_static(&info.class_name, method_name, &info.descriptor, &native_args) {
-                if let Some(err) = self.pending_exception_err() { return Err(err); }
-                return Ok(v);
-            }
-        }
-        Err(format!(
-            "Native stub not found for: {}.{method_name}{}",
-            info.class_name, info.descriptor
-        ))
     }
 
     /// Execute an instance method with invokespecial semantics.
