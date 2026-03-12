@@ -53,7 +53,8 @@ pub(in crate::interpreter) enum LazyClass {
     /// Bytes were present but could not be parsed (malformed class).
     /// The entry is preserved so callers can distinguish "never registered"
     /// from "registered but broken", and to avoid repeated parse attempts.
-    ParseError,
+    /// The inner `String` holds the original parse error message.
+    ParseError(String),
 }
 
 mod annotations;
@@ -129,8 +130,9 @@ impl Vm {
 
     /// Register raw `.class` bytes for lazy parsing.
     /// The class is parsed only when first accessed via [`Self::ensure_class_ready`].
+    /// If the class is already registered (e.g., as `Ready`), the existing entry is kept.
     pub fn load_lazy(&mut self, name: String, bytes: Vec<u8>) {
-        self.classes.insert(name, LazyClass::Pending(bytes));
+        self.classes.entry(name).or_insert(LazyClass::Pending(bytes));
     }
 
     /// Ensure the named class is fully parsed (`Ready`).
@@ -139,14 +141,16 @@ impl Vm {
     /// diagnosable and repeated parse attempts are avoided.
     /// Does nothing if the class is already `Ready`, `ParseError`, or not registered.
     pub(in crate::interpreter) fn ensure_class_ready(&mut self, name: &str) {
-        if let Some(LazyClass::Pending(_)) = self.classes.get(name) {
-            if let Some(LazyClass::Pending(bytes)) = self.classes.remove(name) {
-                match class_file::parse(&bytes) {
-                    Ok(cf) => { self.classes.insert(name.to_owned(), LazyClass::Ready(cf)); }
-                    Err(e) => {
-                        eprintln!("Warning: failed to parse class '{name}': {e}");
-                        self.classes.insert(name.to_owned(), LazyClass::ParseError);
-                    }
+        // Only act when the entry is Pending; skip Ready / ParseError / missing.
+        if !matches!(self.classes.get(name), Some(LazyClass::Pending(_))) {
+            return;
+        }
+        if let Some(LazyClass::Pending(bytes)) = self.classes.remove(name) {
+            match class_file::parse(&bytes) {
+                Ok(cf) => { self.classes.insert(name.to_owned(), LazyClass::Ready(cf)); }
+                Err(e) => {
+                    eprintln!("Warning: failed to parse class '{name}': {e}");
+                    self.classes.insert(name.to_owned(), LazyClass::ParseError(e.to_string()));
                 }
             }
         }
@@ -157,7 +161,7 @@ impl Vm {
     pub(in crate::interpreter) fn get_class(&self, name: &str) -> Option<&ClassFile> {
         match self.classes.get(name)? {
             LazyClass::Ready(cf) => Some(cf),
-            LazyClass::Pending(_) | LazyClass::ParseError => None,
+            LazyClass::Pending(_) | LazyClass::ParseError(_) => None,
         }
     }
 
