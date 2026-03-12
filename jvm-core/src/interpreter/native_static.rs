@@ -157,7 +157,7 @@ impl super::Vm {
                 }
                 Some(JValue::Ref(Some(self.class_object(internal))))
             }
-            ("java/lang/ClassLoader", "getSystemClassLoader", _) => {
+            ("java/lang/ClassLoader", "getSystemClassLoader", "()Ljava/lang/ClassLoader;") => {
                 let cl = self.get_or_create_system_classloader();
                 Some(JValue::Ref(Some(cl)))
             }
