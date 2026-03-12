@@ -655,6 +655,24 @@ function resolveMethodCandidateByTypes(
   return undefined;
 }
 
+function resolveDeclaredMethodInOwnerByTypes(
+  ctx: CompileContext,
+  ownerClass: string,
+  method: string,
+  argTypes: Type[],
+): MethodDecl | undefined {
+  const decl = ctx.classDecls.get(ownerClass);
+  if (!decl) return undefined;
+  const argDescs = argTypes.map(typeToDescriptor).join("");
+  const candidates = decl.methods.filter(mm => mm.name === method && mm.params.length === argTypes.length);
+  if (candidates.length === 0) return undefined;
+  const exactMatches = candidates.filter(mm => mm.params.map(p => typeToDescriptor(p.type)).join("") === argDescs);
+  if (exactMatches.length === 1) return exactMatches[0];
+  if (exactMatches.length > 1) throw new Error(`Ambiguous method overload: ${ownerClass}.${method}(${argDescs})`);
+  if (candidates.length === 1) return candidates[0];
+  throw new Error(`Ambiguous method overload: ${ownerClass}.${method}(${argDescs})`);
+}
+
 function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
   for (let i = ctx.locals.length - 1; i >= 0; i--) {
     if (ctx.locals[i].name === name) return ctx.locals[i];
@@ -737,8 +755,12 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
         const resolved = resolveMethodCandidate(ctx, ownerClass, expr.method, expr.args, false);
         if (resolved) return resolved.returnType;
       } else {
-        const userMethod = ctx.classDecls.get(ctx.className)?.methods
-          .find(m => m.name === expr.method && m.params.length === expr.args.length);
+        const userMethod = resolveDeclaredMethodInOwnerByTypes(
+          ctx,
+          ctx.className,
+          expr.method,
+          expr.args.map(a => inferType(ctx, a)),
+        );
         if (userMethod) return userMethod.returnType;
         // Static import-on-demand method
         if (ctx.staticWildcardImports.length > 0) {
@@ -1708,8 +1730,12 @@ function compileCall(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr &
     }
   } else {
     // Unqualified method call — call on this or static
-    const userMethod = ctx.classDecls.get(ctx.className)?.methods
-      .find(m => m.name === expr.method && m.params.length === expr.args.length);
+    const userMethod = resolveDeclaredMethodInOwnerByTypes(
+      ctx,
+      ctx.className,
+      expr.method,
+      expr.args.map(a => inferType(ctx, a)),
+    );
     if (userMethod) {
       const desc = methodDescriptor(userMethod.params, userMethod.returnType);
       const ownerDecl = ctx.classDecls.get(ctx.className);
@@ -3294,9 +3320,23 @@ function findDeclaredMethodByArity(
   classSupers: Map<string, string>,
   ownerClass: string,
   methodName: string,
-  arity: number,
+  argTypes: Type[],
   wantStatic: boolean | undefined,
 ): MethodDecl | undefined {
+  const arity = argTypes.length;
+  const argDescs = argTypes.map(typeToDescriptor).join("");
+  const pick = (decl: ClassDecl): MethodDecl | undefined => {
+    const candidates = decl.methods.filter(m => m.name === methodName
+      && m.params.length === arity
+      && (wantStatic === undefined || m.isStatic === wantStatic));
+    if (candidates.length === 0) return undefined;
+    const exactMatches = candidates.filter(m => m.params.map(p => typeToDescriptor(p.type)).join("") === argDescs);
+    if (exactMatches.length === 1) return exactMatches[0];
+    if (exactMatches.length > 1) throw new Error(`Ambiguous method overload in checked-exception analysis: ${ownerClass}.${methodName}(${argDescs})`);
+    if (candidates.length === 1) return candidates[0];
+    throw new Error(`Ambiguous method overload in checked-exception analysis: ${ownerClass}.${methodName}(${argDescs})`);
+  };
+
   const classChain: string[] = [];
   const seenClass = new Set<string>();
   let cur: string | undefined = ownerClass;
@@ -3308,9 +3348,7 @@ function findDeclaredMethodByArity(
   for (const cls of classChain) {
     const decl = classDecls.get(cls);
     if (decl) {
-      const found = decl.methods.find(m => m.name === methodName
-        && m.params.length === arity
-        && (wantStatic === undefined || m.isStatic === wantStatic));
+      const found = pick(decl);
       if (found) return found;
     }
   }
@@ -3328,9 +3366,7 @@ function findDeclaredMethodByArity(
     seenIface.add(itf);
     const decl = classDecls.get(itf);
     if (!decl) continue;
-    const found = decl.methods.find(m => m.name === methodName
-      && m.params.length === arity
-      && (wantStatic === undefined || m.isStatic === wantStatic));
+    const found = pick(decl);
     if (found) return found;
     for (const parent of decl.interfaces ?? []) queue.push(parent);
   }
@@ -3344,6 +3380,24 @@ function collectExprCheckedExceptions(
   expr: Expr,
   localTypes: Map<string, Type>,
 ): Set<string> {
+  const inferArgTypesForChecks = (args: Expr[]): Type[] => {
+    const inferCtx = {
+      className: classDecl.name,
+      superClass: classDecl.superClass,
+      fields: classDecl.fields,
+      inheritedFields: [],
+      locals: Array.from(localTypes, ([name, type], idx) => ({ name, type, slot: idx })),
+      importMap: classDecl.importMap,
+      packageImports: classDecl.packageImports,
+      staticWildcardImports: classDecl.staticWildcardImports,
+      classSupers,
+      classDecls,
+      allMethods: classDecl.methods,
+      ownerIsStatic: true,
+    } as unknown as CompileContext;
+    return args.map(a => inferType(inferCtx, a));
+  };
+
   const out = new Set<string>();
   const merge = (s: Set<string>) => { for (const e of s) out.add(e); };
   const addThrown = (name: string | undefined) => {
@@ -3351,8 +3405,8 @@ function collectExprCheckedExceptions(
     if (!isCheckedExceptionType(classSupers, name)) return;
     out.add(name);
   };
-  const fromMethod = (owner: string, name: string, arity: number, wantStatic: boolean | undefined) => {
-    const m = findDeclaredMethodByArity(classDecls, classSupers, owner, name, arity, wantStatic);
+  const fromMethod = (owner: string, name: string, argTypes: Type[], wantStatic: boolean | undefined) => {
+    const m = findDeclaredMethodByArity(classDecls, classSupers, owner, name, argTypes, wantStatic);
     for (const t of m?.throwsTypes ?? []) {
       const resolved = resolveClassNameInDecl(classDecl, classDecls, t);
       addThrown(resolved);
@@ -3370,28 +3424,34 @@ function collectExprCheckedExceptions(
     case "call":
       if (expr.object) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.object, localTypes));
       for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes));
+      const callArgTypes = inferArgTypesForChecks(expr.args);
       if (!expr.object) {
-        fromMethod(classDecl.name, expr.method, expr.args.length, undefined);
+        fromMethod(classDecl.name, expr.method, callArgTypes, undefined);
       } else if (expr.object.kind === "this") {
-        fromMethod(classDecl.name, expr.method, expr.args.length, false);
+        fromMethod(classDecl.name, expr.method, callArgTypes, false);
       } else if (expr.object.kind === "newExpr") {
         const owner = resolveClassNameInDecl(classDecl, classDecls, expr.object.className);
-        fromMethod(owner, expr.method, expr.args.length, false);
+        fromMethod(owner, expr.method, callArgTypes, false);
       } else if (expr.object.kind === "ident") {
         const t = localTypes.get(expr.object.name);
         if (t && typeof t === "object" && "className" in t) {
-          fromMethod(resolveClassNameInDecl(classDecl, classDecls, t.className), expr.method, expr.args.length, false);
+          fromMethod(resolveClassNameInDecl(classDecl, classDecls, t.className), expr.method, callArgTypes, false);
         } else {
           const owner = resolveClassNameInDecl(classDecl, classDecls, expr.object.name);
           const looksLikeClassRef = !localTypes.has(expr.object.name)
             && (/^[A-Z]/.test(expr.object.name) || classDecl.importMap.has(expr.object.name) || owner !== expr.object.name);
-          if (looksLikeClassRef) fromMethod(owner, expr.method, expr.args.length, true);
+          if (looksLikeClassRef) fromMethod(owner, expr.method, callArgTypes, true);
         }
       }
       break;
     case "staticCall":
       for (const a of expr.args) merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, a, localTypes));
-      fromMethod(resolveClassNameInDecl(classDecl, classDecls, expr.className), expr.method, expr.args.length, true);
+      fromMethod(
+        resolveClassNameInDecl(classDecl, classDecls, expr.className),
+        expr.method,
+        inferArgTypesForChecks(expr.args),
+        true,
+      );
       break;
     case "fieldAccess":
       merge(collectExprCheckedExceptions(classDecl, classDecls, classSupers, expr.object, localTypes));
