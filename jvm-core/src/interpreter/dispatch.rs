@@ -95,6 +95,10 @@ impl Vm {
         // Fast-path: intercept Object.wait/notify/notifyAll directly to avoid
         // re-entering invoke_virtual's recursive path, which doesn't check
         // thread state for yielding.
+        // This handles the normal invokevirtual bytecode path. Errors are
+        // returned as Err (propagated to the trampoline's exception handler).
+        // The native_virtual path (for invoke_virtual recursive fallback)
+        // handles errors differently via pending_exception.
         match (method_name, descriptor) {
             ("wait", "()V") | ("wait", "(J)V") => {
                 // Note: wait(long) timeout is intentionally ignored — waits indefinitely.
@@ -132,7 +136,11 @@ impl Vm {
                     *self.pending_frame_mut() = Some(fi);
                     return Ok(None);
                 }
-                // Native or non-lambda — fall back to recursive invoke_virtual.
+                // Native, NativePayload::Lambda (Rust closure), or unresolved —
+                // fall back to recursive invoke_virtual. This runs outside the
+                // time-sliced trampoline, so thread state changes (e.g.
+                // WaitingOnCondition) won't cause a yield. This is acceptable
+                // because Rust closures don't call Java wait/notify.
                 let result = self.invoke_virtual(r, class_name, method_name, descriptor, args)?;
                 if !matches!(result, JValue::Void) {
                     frame.stack.push(result);
