@@ -150,6 +150,11 @@ impl super::Vm {
                     .and_then(|v| v.as_ref())
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))?;
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
+                // Array descriptors (e.g. "[I", "[Ljava/lang/String;") are synthetic types
+                // not backed by a ClassFile entry — return a class object directly.
+                if internal.starts_with('[') {
+                    return Some(JValue::Ref(Some(self.class_object(internal))));
+                }
                 self.ensure_class_ready(&internal);
                 match self.classes.get(&internal) {
                     Some(super::LazyClass::Ready(_)) => {}

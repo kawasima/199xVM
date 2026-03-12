@@ -188,11 +188,19 @@ impl super::Vm {
     /// Handle ClassLoader instance methods that must dispatch by resolved owner, not runtime class.
     /// Returns `Some(value)` if the method was handled, `None` to fall through.
     fn native_classloader(&mut self, method_name: &str, args: &[JValue]) -> Option<JValue> {
-        let name_str = args
+        // A null or missing name argument must surface as NullPointerException, not as a
+        // ClassNotFoundException for the empty string.
+        let name_str = match args
             .first()
             .and_then(|v| v.as_ref())
             .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
-            .unwrap_or_default();
+        {
+            Some(s) => s,
+            None => {
+                self.throw_null_pointer("name");
+                return Some(JValue::Void);
+            }
+        };
         match method_name {
             "loadClass" | "findClass" => {
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
@@ -250,7 +258,10 @@ impl super::Vm {
         }
         // ClassLoader methods must dispatch on the resolved owner (`_class_name`), not the
         // runtime class of `this`, so that subclasses of ClassLoader also hit these stubs.
-        if self.is_classloader_subtype(_class_name) {
+        // Guard on method name first to avoid super-chain walks on unrelated calls.
+        if matches!(method_name, "loadClass" | "findClass" | "findLoadedClass" | "defineClass")
+            && self.is_classloader_subtype(_class_name)
+        {
             if let Some(v) = self.native_classloader(method_name, _args) {
                 return Some(v);
             }
