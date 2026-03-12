@@ -399,12 +399,25 @@ impl super::Vm {
                 // loop in run_all_threads will set it back to Runnable after
                 // switching to another thread.
                 use super::ThreadState;
-                if self.scheduler.threads.len() > 1 {
+                if self.scheduler.thread_count() > 1 {
                     self.scheduler.current_thread_mut().state = ThreadState::Yielded;
                 }
                 Some(JValue::Void)
             }
             ("java/lang/Thread", "sleep", "(J)V") => {
+                // Validate: negative durations are illegal per JDK spec.
+                let millis = _args.first().map(|v| match v {
+                    JValue::Long(l) => *l,
+                    JValue::Int(i) => *i as i64,
+                    _ => 0,
+                }).unwrap_or(0);
+                if millis < 0 {
+                    let msg = self.intern_string("sleep duration must be >= 0");
+                    let exc = crate::heap::JObject::new("java/lang/IllegalArgumentException");
+                    exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+                    *self.pending_exception_mut() = Some(exc);
+                    return Some(JValue::Void);
+                }
                 // In our cooperative model, sleep yields to other threads.
                 // A full implementation would track wake-up times.
                 use super::ThreadState;

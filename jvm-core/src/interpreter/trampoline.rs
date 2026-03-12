@@ -228,7 +228,7 @@ impl Vm {
                                 // subsequent VM calls (pending_exception,
                                 // Thread.currentThread, monitors) see the
                                 // correct context.
-                                self.scheduler.current_thread_idx = 0;
+                                self.scheduler.reset_to_main();
                                 return Ok(val);
                             }
                         }
@@ -317,7 +317,11 @@ impl Vm {
             }
         }
         if !self.scheduler.only_main_alive() {
-            return Err("Thread drain timeout: non-main threads still alive after main returned".to_owned());
+            let summary = self.scheduler.alive_thread_summary();
+            if self.scheduler.runnable_count() == 0 {
+                return Err(format!("Thread drain deadlock: all remaining threads blocked [{}]", summary));
+            }
+            return Err(format!("Thread drain timeout after {} iterations: [{}]", max_iterations, summary));
         }
         Ok(())
     }
