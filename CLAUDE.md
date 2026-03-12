@@ -38,8 +38,9 @@
 ### Shim Implementation Policy
 
 1. **JDK 25ソースをコピーして始める。** `jdk.internal.*`、`sun.*`、nativeメソッドの部分だけ代替実装に置き換える。ゼロから書かない。
-2. **String is native-backed**: `NativePayload::JavaString`（Rust String）で管理。JDKのcompact-string (byte[]) パスは使えない。`Integer.toString`、`AbstractStringBuilder`等は独自実装を維持。
-3. **削除してよいもの**: serialization (`readObject`/`writeObject`/`serialVersionUID`/`SharedSecrets`)、`Unsafe`（標準フィールドアクセスに置換）、JDK内部アノテーション (`@IntrinsicCandidate`/`@ForceInline`/`@Stable`/`@ValueBased`)。
+2. **JDK元ファイルのヘッダ（copyright / license）を削除・改変しない。** SHIM追加・更新時は、コピー元JDKファイルのヘッダをそのまま保持する。ヘッダ欠落の新規作成は禁止。
+3. **String is native-backed**: `NativePayload::JavaString`（Rust String）で管理。JDKのcompact-string (byte[]) パスは使えない。`Integer.toString`、`AbstractStringBuilder`等は独自実装を維持。
+4. **削除してよいもの**: serialization (`readObject`/`writeObject`/`serialVersionUID`/`SharedSecrets`)、`Unsafe`（標準フィールドアクセスに置換）、JDK内部アノテーション (`@IntrinsicCandidate`/`@ForceInline`/`@Stable`/`@ValueBased`)。
 
 ## Web Compiler (`web/javac.ts`)
 
