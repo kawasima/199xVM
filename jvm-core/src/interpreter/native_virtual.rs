@@ -343,8 +343,7 @@ impl super::Vm {
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let _ = self.ensure_class_init(&target);
-                let key = format!("{target}.$VALUES");
-                if let Some(JValue::Ref(Some(arr))) = self.static_fields.get(&key).cloned() {
+                if let Some(JValue::Ref(Some(arr))) = self.static_fields.get(&target).and_then(|m| m.get("$VALUES")).cloned() {
                     let cloned = match self.invoke_virtual(
                         arr.clone(),
                         "java/lang/Object",
@@ -751,7 +750,7 @@ impl super::Vm {
 
                 let raw = if (modifiers & 0x0008) != 0 {
                     self.static_fields
-                        .get(&format!("{owner}.{name}"))
+                        .get(&owner).and_then(|m| m.get(&name))
                         .cloned()
                         .unwrap_or_else(|| default_value_for_descriptor(&desc))
                 } else {
@@ -787,7 +786,7 @@ impl super::Vm {
                 let val = _args.get(1).cloned().unwrap_or(JValue::Ref(None));
                 let adapted = self.adapt_value_for_descriptor(&desc, val);
                 if (modifiers & 0x0008) != 0 {
-                    self.static_fields.insert(format!("{owner}.{name}"), adapted);
+                    self.static_fields.entry(owner).or_default().insert(name, adapted);
                 } else if let Some(target) = _args.first().and_then(|v| v.as_ref()) {
                     target.borrow_mut().fields.insert(name, adapted);
                 }

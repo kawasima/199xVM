@@ -1,5 +1,4 @@
 
-use crate::class_file::{Attribute, BootstrapMethod, ConstantPoolEntry};
 use crate::heap::{JObject, JRef, JValue, NativePayload};
 
 use super::Vm;
@@ -15,9 +14,7 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        // Resolve descriptor and collect method flags in one pass.
-        // The compiler may emit a generic return type (e.g. Ljava/lang/Object;) for
-        // wildcard-imported methods whose real return type is more specific.
+        // Resolve descriptor: exact match first, then param-only fallback for generic return types.
         let method_flags = self.find_method(class_name, method_name, descriptor)
             .map(|(_, m)| m.access_flags);
         let resolved_descriptor = if method_flags.is_some() {
@@ -52,27 +49,16 @@ impl Vm {
         if args.len() < expected_arg_count {
             let is_varargs = method_flags.map(|f| f & 0x0080 != 0).unwrap_or(false);
             if is_varargs && expected_arg_count - args.len() == 1 {
-                // The JVM only synthesizes the final varargs array; do not silently pad
-                // multiple missing fixed parameters.
                 args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
             }
         }
 
-        // Look up class/method.
-        let (class_name_owned, descriptor_owned) = {
-            let (class, method) = self
-                .find_method(class_name, method_name, descriptor)
-                .ok_or_else(|| format!("Method not found: {class_name}.{method_name}{descriptor}"))?;
-            let cn = class.constant_pool.class_name(class.this_class).to_owned();
-            let desc = class.constant_pool.utf8(method.descriptor_index).to_owned();
-            (cn, desc)
-        };
+        // Resolve method and extract all execution info in one pass.
+        let (class_name_owned, descriptor_owned, max_locals, has_code, code, exception_table, cp, bootstrap_methods) = self
+            .resolve_method_exec_info(class_name, method_name, descriptor)
+            .ok_or_else(|| format!("Method not found: {class_name}.{method_name}{descriptor}"))?;
 
         // Build initial frame.
-        let max_locals = {
-            let (_class, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().map(|c| c.max_locals as usize).unwrap_or(0)
-        };
         let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
         let required_slots: usize = param_tokens
             .iter()
@@ -89,10 +75,6 @@ impl Vm {
         }
 
         // If method has no code (native), fall back to native stubs.
-        let has_code = {
-            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().is_some()
-        };
         if !has_code {
             let (param_tokens, _) = Self::parse_method_descriptor_tokens(&descriptor_owned);
             let mut native_args = Vec::with_capacity(param_tokens.len());
@@ -112,26 +94,6 @@ impl Vm {
             return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
         }
 
-        let (code, exception_table) = {
-            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            let ca = method.code().unwrap();
-            (ca.code.clone(), ca.exception_table.clone())
-        };
-        let cp_entries: Vec<ConstantPoolEntry> = {
-            let class = self.classes.get(&class_name_owned).unwrap();
-            class.constant_pool.entries.clone()
-        };
-        let bootstrap_methods: Vec<BootstrapMethod> = {
-            let class = self.classes.get(&class_name_owned).unwrap();
-            class.attributes.iter().find_map(|a| {
-                if let Attribute::BootstrapMethods(bms) = a {
-                    Some(bms.clone())
-                } else {
-                    None
-                }
-            }).unwrap_or_default()
-        };
-
         let mut frame = Frame {
             locals,
             stack: Vec::new(),
@@ -139,7 +101,7 @@ impl Vm {
         };
 
         let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
-        self.run_frame(&mut frame, &code, &cp_entries, &frame_owner, &bootstrap_methods, &exception_table)
+        self.run_frame(&mut frame, &code, &*cp, &frame_owner, &bootstrap_methods, &exception_table)
             .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 
@@ -163,8 +125,7 @@ impl Vm {
         let descriptor = resolved_descriptor.as_str();
 
         // Resolve from the specified class, not the runtime class.
-        let found = self.find_method(class_name, method_name, descriptor).is_some();
-        if !found {
+        if self.find_method(class_name, method_name, descriptor).is_none() {
             if let Some(v) = self.native_virtual(&this, class_name, method_name, descriptor, &args) {
                 if let Some(err) = self.pending_exception_err() {
                     return Err(err);
@@ -174,17 +135,10 @@ impl Vm {
             return Err(format!("Special method not found: {class_name}.{method_name}{descriptor}"));
         }
 
-        let (class_name_owned, descriptor_owned) = {
-            let (class, method) = self.find_method(class_name, method_name, descriptor).unwrap();
-            let cn = class.constant_pool.class_name(class.this_class).to_owned();
-            let desc = class.constant_pool.utf8(method.descriptor_index).to_owned();
-            (cn, desc)
-        };
-
-        let max_locals = {
-            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().map(|c| c.max_locals as usize).unwrap_or(0)
-        };
+        // Resolve method and extract all execution info in one pass.
+        let (class_name_owned, descriptor_owned, max_locals, has_code, code, exception_table, cp, bootstrap_methods) = self
+            .resolve_method_exec_info(class_name, method_name, descriptor)
+            .unwrap();
 
         let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
         let required_slots = 1 + param_tokens
@@ -204,10 +158,6 @@ impl Vm {
         }
 
         // If method has no code (native), fall back to native stubs.
-        let has_code = {
-            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().is_some()
-        };
         if !has_code {
             let virt_args: Vec<JValue> = locals[1..].iter()
                 .filter(|v| !matches!(v, JValue::Void))
@@ -222,26 +172,6 @@ impl Vm {
             return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
         }
 
-        let (code, exception_table) = {
-            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            let ca = method.code().unwrap();
-            (ca.code.clone(), ca.exception_table.clone())
-        };
-        let cp_entries: Vec<ConstantPoolEntry> = {
-            let class = self.classes.get(&class_name_owned).unwrap();
-            class.constant_pool.entries.clone()
-        };
-        let bootstrap_methods: Vec<BootstrapMethod> = {
-            let class = self.classes.get(&class_name_owned).unwrap();
-            class.attributes.iter().find_map(|a| {
-                if let Attribute::BootstrapMethods(bms) = a {
-                    Some(bms.clone())
-                } else {
-                    None
-                }
-            }).unwrap_or_default()
-        };
-
         let mut frame = Frame {
             locals,
             stack: Vec::new(),
@@ -249,7 +179,7 @@ impl Vm {
         };
 
         let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
-        self.run_frame(&mut frame, &code, &cp_entries, &frame_owner, &bootstrap_methods, &exception_table)
+        self.run_frame(&mut frame, &code, &*cp, &frame_owner, &bootstrap_methods, &exception_table)
             .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 
@@ -285,10 +215,6 @@ impl Vm {
             _ => None,
         };
         if let Some((sam_method, sam_desc_str, impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info {
-            // Generic interface call sites may use erased descriptors
-            // (e.g. Function.apply(Object)), so match by SAM method name AND argument count.
-            // This prevents matching overloaded methods with different arities
-            // (e.g. Decoder.decode(Object) should NOT match SAM decode(Object, Path)).
             let sam_arg_count = count_args(&sam_desc_str);
             let call_arg_count = count_args(descriptor);
             if method_name == sam_method && call_arg_count == sam_arg_count {
@@ -297,7 +223,6 @@ impl Vm {
                 // ref_kind 5 = invokeVirtual, 7 = invokeSpecial, 9 = invokeInterface
                 // ref_kind 6 = invokeStatic
                 let invoked = if ref_kind == 5 || ref_kind == 7 || ref_kind == 9 {
-                    // For instance impl methods, receiver is the first runtime argument.
                     if full_args.is_empty() {
                         return Err("Lambda invoke_virtual: missing receiver argument".to_owned());
                     }
@@ -331,8 +256,7 @@ impl Vm {
         };
         let descriptor = resolved_descriptor.as_str();
 
-        let found = self.find_method(&resolve_class, method_name, descriptor).is_some();
-        if !found {
+        if self.find_method(&resolve_class, method_name, descriptor).is_none() {
             // Method not in bytecode — try native stubs.
             if let Some(v) = self.native_virtual(&this, &runtime_class, method_name, descriptor, &args) {
                 if let Some(err) = self.pending_exception_err() {
@@ -345,19 +269,10 @@ impl Vm {
             ));
         }
 
-        let (class_name_owned, descriptor_owned) = {
-            let (class, method) = self
-                .find_method(&resolve_class, method_name, descriptor)
-                .unwrap();
-            let cn = class.constant_pool.class_name(class.this_class).to_owned();
-            let desc = class.constant_pool.utf8(method.descriptor_index).to_owned();
-            (cn, desc)
-        };
-
-        let max_locals = {
-            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().map(|c| c.max_locals as usize).unwrap_or(0)
-        };
+        // Resolve method and extract all execution info in one pass.
+        let (class_name_owned, descriptor_owned, max_locals, has_code, code, exception_table, cp, bootstrap_methods) = self
+            .resolve_method_exec_info(&resolve_class, method_name, descriptor)
+            .unwrap();
 
         // `this` goes into local[0], then arguments.
         let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
@@ -378,12 +293,7 @@ impl Vm {
         }
 
         // If method has no code (native), fall back to native stubs.
-        let has_code = {
-            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            method.code().is_some()
-        };
         if !has_code {
-            // Extract `this` back from locals[0].
             let this_ref = match &locals[0] {
                 JValue::Ref(Some(r)) => r.clone(),
                 _ => return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}")),
@@ -401,26 +311,6 @@ impl Vm {
             return Err(format!("No code (native) in {class_name_owned}.{method_name}{descriptor_owned}"));
         }
 
-        let (code, exception_table) = {
-            let (_, method) = self.find_method(&class_name_owned, method_name, &descriptor_owned).unwrap();
-            let ca = method.code().unwrap();
-            (ca.code.clone(), ca.exception_table.clone())
-        };
-        let cp_entries: Vec<ConstantPoolEntry> = {
-            let class = self.classes.get(&class_name_owned).unwrap();
-            class.constant_pool.entries.clone()
-        };
-        let bootstrap_methods: Vec<BootstrapMethod> = {
-            let class = self.classes.get(&class_name_owned).unwrap();
-            class.attributes.iter().find_map(|a| {
-                if let Attribute::BootstrapMethods(bms) = a {
-                    Some(bms.clone())
-                } else {
-                    None
-                }
-            }).unwrap_or_default()
-        };
-
         let mut frame = Frame {
             locals,
             stack: Vec::new(),
@@ -428,7 +318,7 @@ impl Vm {
         };
 
         let frame_owner = format!("{class_name_owned}.{method_name}{descriptor_owned}");
-        self.run_frame(&mut frame, &code, &cp_entries, &frame_owner, &bootstrap_methods, &exception_table)
+        self.run_frame(&mut frame, &code, &*cp, &frame_owner, &bootstrap_methods, &exception_table)
             .map_err(|e| format!("{e}\n  at {frame_owner}"))
     }
 

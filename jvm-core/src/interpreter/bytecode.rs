@@ -727,7 +727,7 @@ impl Vm {
                     let (cls, fld, _) = resolve_fieldref(cp, idx);
                     // Per JVMS §5.5: putstatic triggers class initialization.
                     self.ensure_class_init(&cls)?;
-                    self.static_fields.insert(format!("{cls}.{fld}"), val);
+                    self.static_fields.entry(cls).or_default().insert(fld, val);
                 }
                 0xb4 => { // getfield
                     let idx = read_u16(code, &mut frame.pc);
@@ -1010,9 +1010,9 @@ impl Vm {
             ConstantPoolEntry::Long(v) => frame.stack.push(JValue::Long(*v)),
             ConstantPoolEntry::Double(v) => frame.stack.push(JValue::Double(*v)),
             ConstantPoolEntry::String { string_index } => {
-                let s = match &cp[*string_index as usize] {
-                    ConstantPoolEntry::Utf8(s) => s.clone(),
-                    _ => String::new(),
+                let s: &str = match &cp[*string_index as usize] {
+                    ConstantPoolEntry::Utf8(s) => s.as_str(),
+                    _ => "",
                 };
                 let obj = self.intern_string(s);
                 frame.stack.push(JValue::Ref(Some(obj)));
@@ -1048,21 +1048,19 @@ impl Vm {
         // because the JDK classes are not in the bundle.
         match (class_name.as_str(), field_name.as_str()) {
             ("java/lang/System", "out") => {
-                let key = format!("{class_name}.{field_name}");
-                if let Some(v) = self.static_fields.get(&key) {
+                if let Some(v) = self.static_fields.get("java/lang/System").and_then(|m| m.get("out")) {
                     return Ok(v.clone());
                 }
                 let v = JValue::Ref(Some(JObject::new_print_stream(false)));
-                self.static_fields.insert(key, v.clone());
+                self.static_fields.entry(class_name).or_default().insert(field_name, v.clone());
                 Ok(v)
             }
             ("java/lang/System", "err") => {
-                let key = format!("{class_name}.{field_name}");
-                if let Some(v) = self.static_fields.get(&key) {
+                if let Some(v) = self.static_fields.get("java/lang/System").and_then(|m| m.get("err")) {
                     return Ok(v.clone());
                 }
                 let v = JValue::Ref(Some(JObject::new_print_stream(true)));
-                self.static_fields.insert(key, v.clone());
+                self.static_fields.entry(class_name).or_default().insert(field_name, v.clone());
                 Ok(v)
             }
             _ => Ok(default_value_for_descriptor(&descriptor)),
@@ -1072,11 +1070,10 @@ impl Vm {
     /// Walk the class hierarchy to find a static field value.
     fn resolve_static_field_in_hierarchy(&self, class_name: &str, field_name: &str) -> Option<JValue> {
         // Check this class first.
-        let key = format!("{class_name}.{field_name}");
-        if let Some(v) = self.static_fields.get(&key) {
+        if let Some(v) = self.static_fields.get(class_name).and_then(|m| m.get(field_name)) {
             return Some(v.clone());
         }
-        // Check super class.
+        // Check super class and interfaces.
         if let Some(class) = self.classes.get(class_name) {
             if class.super_class != 0 {
                 let super_name = class.constant_pool.class_name(class.super_class).to_owned();
@@ -1084,11 +1081,8 @@ impl Vm {
                     return Some(v);
                 }
             }
-            // Check interfaces.
-            let iface_names: Vec<String> = class.interfaces.iter()
-                .map(|&idx| class.constant_pool.class_name(idx).to_owned())
-                .collect();
-            for iface_name in iface_names {
+            for &idx in &class.interfaces {
+                let iface_name = class.constant_pool.class_name(idx).to_owned();
                 if let Some(v) = self.resolve_static_field_in_hierarchy(&iface_name, field_name) {
                     return Some(v);
                 }
