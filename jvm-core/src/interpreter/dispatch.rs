@@ -250,7 +250,6 @@ impl Vm {
                     let call_arg_count = count_args(descriptor);
                     if method_name == sam_method.as_str() && call_arg_count == sam_arg_count {
                         Some((
-                            sam_desc.clone(),
                             impl_class.clone(), impl_method.clone(), impl_desc.clone(),
                             *ref_kind, captured.clone(),
                         ))
@@ -261,14 +260,14 @@ impl Vm {
                 _ => None,
             }
         };
-        let Some((sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info else {
+        let Some((impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info else {
             return Ok(None);
         };
 
         let mut full_args = captured;
         full_args.extend(args);
 
-        let adapt = Some((sam_desc, impl_desc.clone()));
+        let adapt = Some((descriptor.to_owned(), impl_desc.clone()));
 
         let mut fi = if ref_kind == 5 || ref_kind == 7 || ref_kind == 9 {
             // Virtual/interface dispatch on receiver.

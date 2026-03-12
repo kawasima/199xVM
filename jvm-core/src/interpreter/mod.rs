@@ -472,11 +472,20 @@ impl Vm {
             monitor.wait_queue.push_back(thread_id);
 
             // If there are threads blocked on entry, transfer ownership to the first one.
+            // If the waiter was previously wait()-woken, restore its saved reentrant count.
             if let Some(waiting_id) = monitor.entry_queue.pop_front() {
-                monitor.owner = Some(waiting_id);
-                monitor.count = 1;
-                // Wake the entry waiter.
                 if let Some(t) = self.scheduler.thread_mut(waiting_id) {
+                    if let ThreadState::WaitingOnCondition(wait_obj_id) = t.state {
+                        if wait_obj_id == id && t.saved_monitor_count > 0 {
+                            monitor.count = t.saved_monitor_count;
+                            t.saved_monitor_count = 0;
+                        } else {
+                            monitor.count = 1;
+                        }
+                    } else {
+                        monitor.count = 1;
+                    }
+                    monitor.owner = Some(waiting_id);
                     t.state = ThreadState::Runnable;
                 }
             }
