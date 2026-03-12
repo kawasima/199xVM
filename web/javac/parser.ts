@@ -1034,6 +1034,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       advance();
       const resources: { name: string; type: Type; init: Expr }[] = [];
       if (match(TokenKind.LParen)) {
+        if (at(TokenKind.RParen)) {
+          throw new Error("try-with-resources requires at least one resource");
+        }
         while (!at(TokenKind.RParen) && !at(TokenKind.EOF)) {
           while (at(TokenKind.KwFinal)) advance();
           let resType: Type;

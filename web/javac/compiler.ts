@@ -2434,6 +2434,26 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         const elemType = inferType(ctx, stmt.target);
         const arrType = inferType(ctx, stmt.target.array);
         const indexType = inferType(ctx, stmt.target.index);
+        const emitArrayLoad = (t: Type) => {
+          if (t === "int") emitter.emit(0x2e); // iaload
+          else if (t === "long") emitter.emit(0x2f); // laload
+          else if (t === "float") emitter.emit(0x30); // faload
+          else if (t === "double") emitter.emit(0x31); // daload
+          else if (t === "byte" || t === "boolean") emitter.emit(0x33); // baload
+          else if (t === "char") emitter.emit(0x34); // caload
+          else if (t === "short") emitter.emit(0x35); // saload
+          else emitter.emit(0x32); // aaload
+        };
+        const emitArrayStore = (t: Type) => {
+          if (t === "int") emitter.emit(0x4f); // iastore
+          else if (t === "long") emitter.emit(0x50); // lastore
+          else if (t === "float") emitter.emit(0x51); // fastore
+          else if (t === "double") emitter.emit(0x52); // dastore
+          else if (t === "byte" || t === "boolean") emitter.emit(0x54); // bastore
+          else if (t === "char") emitter.emit(0x55); // castore
+          else if (t === "short") emitter.emit(0x56); // sastore
+          else emitter.emit(0x53); // aastore
+        };
         // Evaluate array and index once
         compileExpr(ctx, emitter, stmt.target.array);
         const arrSlot = addLocal(ctx, tempName("$ca_arr_"), arrType);
@@ -2450,11 +2470,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         emitter.emitIstore(idxSlot);
         emitter.emitAload(arrSlot);
         emitter.emitIload(idxSlot);
-        if (elemType === "int" || elemType === "boolean" || elemType === "byte" || elemType === "short" || elemType === "char") {
-          emitter.emit(0x2e); // iaload
-        } else {
-          emitter.emit(0x32); // aaload
-        }
+        emitArrayLoad(elemType);
         emitter.adjustStackForArrayLoad();
         const leftName = tempName("$ca_left_");
         const leftSlot = addLocal(ctx, leftName, elemType);
@@ -2467,11 +2483,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         emitter.emitAload(arrSlot);
         emitter.emitIload(idxSlot);
         emitLoadLocalByType(emitter, resSlot, elemType);
-        if (elemType === "int" || elemType === "boolean" || elemType === "byte" || elemType === "short" || elemType === "char") {
-          emitter.emit(0x4f); // iastore
-        } else {
-          emitter.emit(0x53); // aastore
-        }
+        emitArrayStore(elemType);
       } else {
         throw new Error(`Unsupported compound assignment target of kind '${(stmt.target as Expr).kind}'`);
       }
@@ -2835,6 +2847,8 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         catchEndPatches.push(emitter.emitBranch(0xa7)); // goto end
       }
       if (stmt.finallyBody) {
+        // Disable this try's exitAction while emitting finally itself to avoid re-entry.
+        exitActions.pop();
         const finallyStart = emitter.pc;
         for (const p of catchEndPatches) emitter.patchBranch(p, finallyStart);
         withScopedLocals(ctx, () => {
@@ -2858,7 +2872,6 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
           }
         }
         emitter.patchBranch(patchAfterFinally, emitter.pc);
-        exitActions.pop();
       } else {
         for (const p of catchEndPatches) emitter.patchBranch(p, emitter.pc);
       }
