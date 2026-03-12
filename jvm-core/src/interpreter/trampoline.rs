@@ -224,6 +224,11 @@ impl Vm {
                                 // Main thread finished — drain remaining threads
                                 // then return the result.
                                 self.drain_non_main_threads()?;
+                                // Restore current thread to main so that
+                                // subsequent VM calls (pending_exception,
+                                // Thread.currentThread, monitors) see the
+                                // correct context.
+                                self.scheduler.current_thread_idx = 0;
                                 return Ok(val);
                             }
                         }
@@ -243,7 +248,12 @@ impl Vm {
                 ThreadState::Terminated => {
                     // Skip terminated threads.
                 }
-                ThreadState::Joining(_) | ThreadState::Sleeping
+                ThreadState::Yielded | ThreadState::Sleeping => {
+                    // Voluntary yield — set back to Runnable so this thread
+                    // can be scheduled again after other threads get a turn.
+                    self.scheduler.current_thread_mut().state = ThreadState::Runnable;
+                }
+                ThreadState::Joining(_)
                 | ThreadState::WaitingOnMonitor(_) | ThreadState::WaitingOnCondition(_) => {
                     // Blocked — skip to next thread.
                 }
@@ -285,8 +295,12 @@ impl Vm {
             }
 
             let state = self.scheduler.current_thread().state.clone();
-            if state != ThreadState::Runnable {
-                continue;
+            match state {
+                ThreadState::Yielded | ThreadState::Sleeping => {
+                    self.scheduler.current_thread_mut().state = ThreadState::Runnable;
+                }
+                ThreadState::Runnable => {}
+                _ => continue,
             }
 
             let mut call_stack = std::mem::take(

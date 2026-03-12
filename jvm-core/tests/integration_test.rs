@@ -290,3 +290,15 @@ fn thread_start_join_basic() {
     );
     assert_eq!(result, "ABC");
 }
+
+#[test]
+fn monitor_contention_two_threads() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "MonitorContentionTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "10");
+}

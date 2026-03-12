@@ -231,6 +231,10 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
+        // Reset scheduler to a clean single-main-thread state so that
+        // invoke_static_threaded can be called multiple times on the same Vm.
+        self.scheduler = super::Scheduler::new();
+
         let orig_args = args;
         let (resolved_desc, args) = match self.prepare_static_args(class_name, method_name, descriptor, orig_args.clone()) {
             Some(pair) => pair,

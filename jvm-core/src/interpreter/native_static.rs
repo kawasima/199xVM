@@ -394,13 +394,21 @@ impl super::Vm {
                 Some(JValue::Ref(Some(obj)))
             }
             ("java/lang/Thread", "yield", "()V") => {
-                // Cooperative yield — the scheduler will switch threads at the
-                // next time-slice boundary. No-op in single-thread mode.
+                // Cooperative yield — force immediate context switch by
+                // temporarily marking the thread as non-Runnable. The scheduler
+                // loop in run_all_threads will set it back to Runnable after
+                // switching to another thread.
+                use super::ThreadState;
+                if self.scheduler.threads.len() > 1 {
+                    self.scheduler.current_thread_mut().state = ThreadState::Yielded;
+                }
                 Some(JValue::Void)
             }
             ("java/lang/Thread", "sleep", "(J)V") => {
-                // In our cooperative model, sleep is a no-op yield.
-                // A full implementation would track wake-up time.
+                // In our cooperative model, sleep yields to other threads.
+                // A full implementation would track wake-up times.
+                use super::ThreadState;
+                self.scheduler.current_thread_mut().state = ThreadState::Sleeping;
                 Some(JValue::Void)
             }
             _ => None,

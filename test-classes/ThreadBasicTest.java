@@ -2,7 +2,6 @@
  * Tests basic green thread operations:
  * - Thread.start() spawns a new thread
  * - Thread.join() waits for thread completion
- * - Thread.currentThread() returns the running thread
  * - Execution order: A before start, B in child, C after join
  */
 public class ThreadBasicTest {
