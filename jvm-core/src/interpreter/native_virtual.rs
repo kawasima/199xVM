@@ -5,6 +5,7 @@ use std::rc::Rc;
 use crate::class_file::Attribute;
 use crate::heap::{JObject, JRef, JValue, NativePayload};
 
+use super::LazyClass;
 use super::descriptors::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -214,6 +215,51 @@ impl super::Vm {
                 };
                 let ok = if regex == ".*" { true } else { regex == input };
                 Some(JValue::Int(if ok { 1 } else { 0 }))
+            }
+            ("java/lang/ClassLoader", "loadClass") => {
+                let name = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let internal = Self::class_internal_name_from_runtime_name(&name);
+                self.ensure_class_ready(&internal);
+                if self.get_class(&internal).is_none() {
+                    self.throw_class_not_found(&name);
+                    return Some(JValue::Void);
+                }
+                Some(JValue::Ref(Some(self.class_object(internal))))
+            }
+            ("java/lang/ClassLoader", "findLoadedClass") => {
+                let name = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let internal = Self::class_internal_name_from_runtime_name(&name);
+                if matches!(self.classes.get(&internal), Some(LazyClass::Ready(_))) {
+                    Some(JValue::Ref(Some(self.class_object(internal))))
+                } else {
+                    Some(JValue::Ref(None))
+                }
+            }
+            ("java/lang/ClassLoader", "findClass") => {
+                let name = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let internal = Self::class_internal_name_from_runtime_name(&name);
+                self.ensure_class_ready(&internal);
+                if self.get_class(&internal).is_none() {
+                    self.throw_class_not_found(&name);
+                    return Some(JValue::Void);
+                }
+                Some(JValue::Ref(Some(self.class_object(internal))))
+            }
+            ("java/lang/ClassLoader", "defineClass") => {
+                // Dynamic bytecode injection is not supported; return null.
+                Some(JValue::Ref(None))
             }
             ("java/lang/Class", "getName") => {
                 let internal = self
