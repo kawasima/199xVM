@@ -102,7 +102,7 @@ impl Vm {
                 }
                 Ok(None) => {
                     // Check if a new frame was posted by an invoke opcode.
-                    if let Some(new_fi) = self.pending_frame.take() {
+                    if let Some(new_fi) = self.pending_frame_mut().take() {
                         call_stack.push(new_fi);
                     }
                 }
@@ -387,7 +387,7 @@ impl Vm {
             let ms = format!("{}.{method_name}{}", info.class_name, info.descriptor);
             let msg = self.intern_string(ms.clone());
             exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
-            self.pending_exception = Some(exc);
+            *self.pending_exception_mut() = Some(exc);
             return Err(format!("java/lang/AbstractMethodError: {ms}"));
         }
 
@@ -443,7 +443,7 @@ impl Vm {
             let ms = format!("{}.{method_name}{}", info.class_name, info.descriptor);
             let msg = self.intern_string(ms.clone());
             exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
-            self.pending_exception = Some(exc);
+            *self.pending_exception_mut() = Some(exc);
             return Err(format!("java/lang/AbstractMethodError: {ms}"));
         }
 

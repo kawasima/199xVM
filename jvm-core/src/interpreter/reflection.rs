@@ -13,7 +13,7 @@ impl Vm {
     }
 
     pub(super) fn raise_invocation_target_exception(&mut self, message: &str) {
-        let cause = self.pending_exception.take().unwrap_or_else(|| {
+        let cause = self.pending_exception_mut().take().unwrap_or_else(|| {
             let exc = JObject::new("java/lang/RuntimeException");
             exc.borrow_mut().fields.insert(
                 "detailMessage".to_owned(),
@@ -23,7 +23,7 @@ impl Vm {
         });
         let ite = JObject::new("java/lang/reflect/InvocationTargetException");
         ite.borrow_mut().fields.insert("target".to_owned(), JValue::Ref(Some(cause)));
-        self.pending_exception = Some(ite);
+        *self.pending_exception_mut() = Some(ite);
     }
 
     pub(super) fn make_class_array(&mut self, class_names: Vec<String>) -> JRef {

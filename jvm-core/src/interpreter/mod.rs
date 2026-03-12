@@ -82,6 +82,75 @@ extern "C" {
 }
 
 // ---------------------------------------------------------------------------
+// Thread types
+// ---------------------------------------------------------------------------
+
+pub type ThreadId = u64;
+
+/// The execution state of a green thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum ThreadState {
+    /// Ready to run (or currently running).
+    Runnable,
+    /// Terminated — run() method returned or threw.
+    Terminated,
+}
+
+/// Per-thread execution context.
+#[allow(dead_code)]
+pub(crate) struct ThreadContext {
+    pub id: ThreadId,
+    pub state: ThreadState,
+    /// Pending exception object — set by athrow, consumed by exception handler.
+    pub pending_exception: Option<JRef>,
+    /// Pending frame to be pushed by the trampoline after an invoke opcode.
+    pub pending_frame: Option<trampoline::FrameInfo>,
+}
+
+impl ThreadContext {
+    fn new(id: ThreadId) -> Self {
+        ThreadContext {
+            id,
+            state: ThreadState::Runnable,
+            pending_exception: None,
+            pending_frame: None,
+        }
+    }
+}
+
+/// Round-robin scheduler managing all green threads.
+#[allow(dead_code)]
+pub(crate) struct Scheduler {
+    pub threads: Vec<ThreadContext>,
+    pub current_thread_idx: usize,
+    pub next_thread_id: ThreadId,
+}
+
+impl Scheduler {
+    fn new() -> Self {
+        let main_thread = ThreadContext::new(0);
+        Scheduler {
+            threads: vec![main_thread],
+            current_thread_idx: 0,
+            next_thread_id: 1,
+        }
+    }
+
+    /// Get a mutable reference to the currently running thread.
+    #[inline]
+    pub fn current_thread_mut(&mut self) -> &mut ThreadContext {
+        &mut self.threads[self.current_thread_idx]
+    }
+
+    /// Get an immutable reference to the currently running thread.
+    #[inline]
+    pub fn current_thread(&self) -> &ThreadContext {
+        &self.threads[self.current_thread_idx]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VM state
 // ---------------------------------------------------------------------------
 
@@ -102,22 +171,18 @@ pub struct Vm {
     pub(in crate::interpreter) clinit_failed: HashSet<String>,
     /// Canonical Class objects keyed by internal class name or descriptor.
     pub(in crate::interpreter) class_pool: HashMap<String, JRef>,
-    /// Pending exception object — set by athrow, consumed by exception handler.
-    /// This preserves the full exception object (with message, cause, fields)
-    /// across the Err(String) propagation path.
-    pub(in crate::interpreter) pending_exception: Option<JRef>,
     /// Buffered `System.out.print` content until newline/println.
     pub(in crate::interpreter) stdout_buffer: String,
     /// Buffered `System.err.print` content until newline/println.
     pub(in crate::interpreter) stderr_buffer: String,
     /// Singleton system ClassLoader instance (created on first access).
     pub(in crate::interpreter) system_classloader: Option<JRef>,
-    /// Pending frame to be pushed by the trampoline after an invoke opcode.
-    pub(crate) pending_frame: Option<trampoline::FrameInfo>,
+    /// Green thread scheduler.
+    pub(crate) scheduler: Scheduler,
 }
 
 impl Vm {
-    /// Create an empty VM.
+    /// Create an empty VM with a main thread.
     pub fn new() -> Self {
         Vm {
             classes: HashMap::new(),
@@ -126,12 +191,23 @@ impl Vm {
             clinit_done: HashSet::new(),
             clinit_failed: HashSet::new(),
             class_pool: HashMap::new(),
-            pending_exception: None,
             stdout_buffer: String::new(),
             stderr_buffer: String::new(),
             system_classloader: None,
-            pending_frame: None,
+            scheduler: Scheduler::new(),
         }
+    }
+
+    /// Mutable access to the current thread's pending exception.
+    #[inline]
+    pub(in crate::interpreter) fn pending_exception_mut(&mut self) -> &mut Option<JRef> {
+        &mut self.scheduler.current_thread_mut().pending_exception
+    }
+
+    /// Mutable access to the current thread's pending frame.
+    #[inline]
+    pub(crate) fn pending_frame_mut(&mut self) -> &mut Option<trampoline::FrameInfo> {
+        &mut self.scheduler.current_thread_mut().pending_frame
     }
 
     /// Register a pre-parsed class file (always stored as `Ready`).
@@ -209,7 +285,7 @@ impl Vm {
     }
 
     fn pending_exception_err(&self) -> Option<String> {
-        self.pending_exception.as_ref().map(|r| {
+        self.scheduler.current_thread().pending_exception.as_ref().map(|r| {
             let b = r.borrow();
             let mut s = format!("Exception: {}", b.class_name);
             if let Some(JValue::Ref(Some(msg_ref))) = b.fields.get("detailMessage") {
@@ -240,7 +316,7 @@ impl Vm {
         let exc = JObject::new("java/lang/NoClassDefFoundError");
         let msg = self.intern_string(name.replace('/', "."));
         exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
-        self.pending_exception = Some(exc);
+        *self.pending_exception_mut() = Some(exc);
     }
 
     /// Set `pending_exception` to a new `ClassNotFoundException` for `name`.
@@ -249,7 +325,7 @@ impl Vm {
         let exc = JObject::new("java/lang/ClassNotFoundException");
         let msg = self.intern_string(name.to_owned());
         exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
-        self.pending_exception = Some(exc);
+        *self.pending_exception_mut() = Some(exc);
     }
 
     /// Set `pending_exception` to a `NullPointerException` with an optional detail message.
@@ -257,7 +333,7 @@ impl Vm {
         let exc = JObject::new("java/lang/NullPointerException");
         let msg = self.intern_string(detail.to_owned());
         exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
-        self.pending_exception = Some(exc);
+        *self.pending_exception_mut() = Some(exc);
     }
 
     /// Set `pending_exception` to a `BootstrapMethodError` with a detail message.
@@ -265,7 +341,7 @@ impl Vm {
         let exc = JObject::new("java/lang/BootstrapMethodError");
         let msg = self.intern_string(detail.to_owned());
         exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
-        self.pending_exception = Some(exc);
+        *self.pending_exception_mut() = Some(exc);
     }
 
     /// Set `pending_exception` to a `ClassFormatError` carrying the parse error message.
@@ -274,7 +350,7 @@ impl Vm {
         let exc = JObject::new("java/lang/ClassFormatError");
         let msg = self.intern_string(parse_msg.to_owned());
         exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
-        self.pending_exception = Some(exc);
+        *self.pending_exception_mut() = Some(exc);
     }
 
     fn class_object(&mut self, internal_name: impl Into<String>) -> JRef {
@@ -548,14 +624,14 @@ impl Vm {
             // JVMS §5.5: if <clinit> throws, wrap in ExceptionInInitializerError.
             if let Err(e) = self.invoke_static(class_name, "<clinit>", "()V", vec![]) {
                 // Preserve the original exception object as the "cause" field.
-                let cause = self.pending_exception.take();
+                let cause = self.pending_exception_mut().take();
                 let eiie = JObject::new("java/lang/ExceptionInInitializerError");
                 let msg = self.intern_string(e.clone());
                 eiie.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
                 if let Some(c) = cause {
                     eiie.borrow_mut().fields.insert("cause".to_owned(), JValue::Ref(Some(c)));
                 }
-                self.pending_exception = Some(eiie);
+                *self.pending_exception_mut() = Some(eiie);
                 // Remove from clinit_done so subsequent uses hit the clinit_failed path.
                 self.clinit_done.remove(class_name);
                 self.clinit_failed.insert(class_name.to_owned());
