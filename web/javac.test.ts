@@ -198,6 +198,15 @@ world
     assert.throws(() => lex("1__2"));
   });
 
+  test("invalid escape sequence is rejected", () => {
+    assert.throws(() => lex("\"\\q\""), /Invalid escape sequence/);
+    assert.throws(() => lex("'\\x'"), /Invalid escape sequence/);
+  });
+
+  test("text block opening without line terminator is rejected", () => {
+    assert.throws(() => lex("\"\"\"x\"\"\""), /Text block opening delimiter/);
+  });
+
   test("floating-point forms with dot/exponent are tokenized", () => {
     const tokens = lex(".5 1. 1e3 2.5f");
     assert.equal(tokens[0].kind, TokenKind.DoubleLiteral);
