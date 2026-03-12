@@ -102,8 +102,15 @@ impl Vm {
 
     /// Intern a Java string (returns same `JRef` for equal content).
     pub fn intern_string(&mut self, s: impl Into<String>) -> JRef {
+        use std::collections::hash_map::Entry;
         let s = s.into();
-        Rc::clone(self.string_pool.entry(s.clone()).or_insert_with(|| JObject::new_string(s)))
+        match self.string_pool.entry(s) {
+            Entry::Occupied(e) => Rc::clone(e.get()),
+            Entry::Vacant(e) => {
+                let jobj = JObject::new_string(e.key().clone());
+                Rc::clone(e.insert(jobj))
+            }
+        }
     }
 
     fn pending_exception_err(&self) -> Option<String> {
