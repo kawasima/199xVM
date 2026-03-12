@@ -58,6 +58,7 @@ export interface SwitchCase {
 export type Stmt =
   | { kind: "varDecl"; name: string; type: Type; init?: Expr }
   | { kind: "assign"; target: Expr; value: Expr }
+  | { kind: "compoundAssign"; target: Expr; op: string; value: Expr }
   | { kind: "exprStmt"; expr: Expr }
   | { kind: "return"; value?: Expr }
   | { kind: "yield"; value: Expr }

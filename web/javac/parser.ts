@@ -834,66 +834,41 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
     }
   }
 
-  function parseStmt(): Stmt {
-    function parseCompoundAssignTail(target: Expr): Stmt | null {
-      if (match(TokenKind.Assign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value };
-      }
-      if (match(TokenKind.PlusAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "+", left: target, right: value } };
-      }
-      if (match(TokenKind.MinusAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "-", left: target, right: value } };
-      }
-      if (match(TokenKind.StarAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "*", left: target, right: value } };
-      }
-      if (match(TokenKind.SlashAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "/", left: target, right: value } };
-      }
-      if (match(TokenKind.PercentAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "%", left: target, right: value } };
-      }
-      if (match(TokenKind.AndAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "&", left: target, right: value } };
-      }
-      if (match(TokenKind.OrAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "|", left: target, right: value } };
-      }
-      if (match(TokenKind.XorAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "^", left: target, right: value } };
-      }
-      if (match(TokenKind.ShiftLeftAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "<<", left: target, right: value } };
-      }
-      // >>= is tokenized as '>' '>='
-      if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Ge) {
-        advance();
-        advance();
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: ">>", left: target, right: value } };
-      }
-      // >>>= is tokenized as '>' '>' '>='
-      if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Gt && tokens[pos + 2]?.kind === TokenKind.Ge) {
-        advance();
-        advance();
-        advance();
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: ">>>", left: target, right: value } };
-      }
-      return null;
+  function parseAssignOrCompoundTail(target: Expr): Stmt | null {
+    if (match(TokenKind.Assign)) {
+      const value = parseExpr();
+      return { kind: "assign", target, value };
     }
+    function makeCompound(op: string): Stmt {
+      const value = parseExpr();
+      return { kind: "compoundAssign", target, op, value };
+    }
+    if (match(TokenKind.PlusAssign)) return makeCompound("+");
+    if (match(TokenKind.MinusAssign)) return makeCompound("-");
+    if (match(TokenKind.StarAssign)) return makeCompound("*");
+    if (match(TokenKind.SlashAssign)) return makeCompound("/");
+    if (match(TokenKind.PercentAssign)) return makeCompound("%");
+    if (match(TokenKind.AndAssign)) return makeCompound("&");
+    if (match(TokenKind.OrAssign)) return makeCompound("|");
+    if (match(TokenKind.XorAssign)) return makeCompound("^");
+    if (match(TokenKind.ShiftLeftAssign)) return makeCompound("<<");
+    // >>= is tokenized as '>' '>='
+    if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Ge) {
+      advance();
+      advance();
+      return makeCompound(">>");
+    }
+    // >>>= is tokenized as '>' '>' '>='
+    if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Gt && tokens[pos + 2]?.kind === TokenKind.Ge) {
+      advance();
+      advance();
+      advance();
+      return makeCompound(">>>");
+    }
+    return null;
+  }
 
+  function parseStmt(): Stmt {
     // Block
     if (at(TokenKind.LBrace)) {
       expect(TokenKind.LBrace);
@@ -1048,14 +1023,9 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       expect(TokenKind.LParen);
       const monitor = parseExpr();
       expect(TokenKind.RParen);
-      let body: Stmt[];
-      if (at(TokenKind.LBrace)) {
-        expect(TokenKind.LBrace);
-        body = parseBlock();
-        expect(TokenKind.RBrace);
-      } else {
-        body = [parseStmt()];
-      }
+      expect(TokenKind.LBrace);
+      const body = parseBlock();
+      expect(TokenKind.RBrace);
       return { kind: "synchronized", monitor, body };
     }
 
@@ -1111,13 +1081,14 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
         finallyBody = parseBlock();
         expect(TokenKind.RBrace);
       }
-      if (resources.length === 0) {
-        return { kind: "tryCatch", tryBody, catches, finallyBody };
-      }
-      // Desugar try-with-resources into nested try/finally close calls.
+      if (resources.length === 0) return { kind: "tryCatch", tryBody, catches, finallyBody };
+      // Desugar try-with-resources into nested try/catch wrappers.
+      // Each resource is declared as null first, then assigned inside try so that
+      // both normal and exceptional paths close already-acquired resources.
       let loweredTryBody = tryBody;
       for (let i = resources.length - 1; i >= 0; i--) {
         const r = resources[i];
+        const exName = `$twr_ex_${i}`;
         const closeStmt: Stmt = {
           kind: "if",
           cond: { kind: "binary", op: "!=", left: { kind: "ident", name: r.name }, right: { kind: "nullLit" } },
@@ -1127,15 +1098,26 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
           }],
         };
         loweredTryBody = [{
-          kind: "tryCatch",
-          tryBody: loweredTryBody,
-          catches: [],
-          finallyBody: [closeStmt],
+          kind: "block",
+          stmts: [
+            { kind: "varDecl", name: r.name, type: r.type, init: { kind: "nullLit" } },
+            {
+              kind: "tryCatch",
+              tryBody: [
+                { kind: "assign", target: { kind: "ident", name: r.name }, value: r.init },
+                ...loweredTryBody,
+                closeStmt,
+              ],
+              catches: [{
+                exType: "Throwable",
+                varName: exName,
+                body: [closeStmt, { kind: "throw", expr: { kind: "ident", name: exName } }],
+              }],
+            },
+          ],
         }];
       }
-      const stmts: Stmt[] = resources.map(r => ({ kind: "varDecl", name: r.name, type: r.type, init: r.init }));
-      stmts.push({ kind: "tryCatch", tryBody: loweredTryBody, catches, finallyBody });
-      return { kind: "block", stmts };
+      return { kind: "tryCatch", tryBody: loweredTryBody, catches, finallyBody };
     }
 
     // Break
@@ -1219,7 +1201,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
 
     // Expression statement (may be assignment)
     const expr = parseExpr();
-    const assignStmt = parseCompoundAssignTail(expr);
+    const assignStmt = parseAssignOrCompoundTail(expr);
     if (assignStmt) {
       expect(TokenKind.Semi);
       return assignStmt;
@@ -1229,63 +1211,6 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
   }
 
   function parseStmtNoSemi(): Stmt {
-    function parseCompoundAssignTail(target: Expr): Stmt | null {
-      if (match(TokenKind.Assign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value };
-      }
-      if (match(TokenKind.PlusAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "+", left: target, right: value } };
-      }
-      if (match(TokenKind.MinusAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "-", left: target, right: value } };
-      }
-      if (match(TokenKind.StarAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "*", left: target, right: value } };
-      }
-      if (match(TokenKind.SlashAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "/", left: target, right: value } };
-      }
-      if (match(TokenKind.PercentAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "%", left: target, right: value } };
-      }
-      if (match(TokenKind.AndAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "&", left: target, right: value } };
-      }
-      if (match(TokenKind.OrAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "|", left: target, right: value } };
-      }
-      if (match(TokenKind.XorAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "^", left: target, right: value } };
-      }
-      if (match(TokenKind.ShiftLeftAssign)) {
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: "<<", left: target, right: value } };
-      }
-      if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Ge) {
-        advance();
-        advance();
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: ">>", left: target, right: value } };
-      }
-      if (at(TokenKind.Gt) && tokens[pos + 1]?.kind === TokenKind.Gt && tokens[pos + 2]?.kind === TokenKind.Ge) {
-        advance();
-        advance();
-        advance();
-        const value = parseExpr();
-        return { kind: "assign", target, value: { kind: "binary", op: ">>>", left: target, right: value } };
-      }
-      return null;
-    }
-
     // For init/update — similar to parseStmt but no semicolon
     if (at(TokenKind.KwVar)) {
       advance();
@@ -1302,7 +1227,7 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       return { kind: "varDecl", name, type, init };
     }
     const expr = parseExpr();
-    const assignStmt = parseCompoundAssignTail(expr);
+    const assignStmt = parseAssignOrCompoundTail(expr);
     if (assignStmt) return assignStmt;
     if (match(TokenKind.PlusPlus)) {
       return { kind: "assign", target: expr, value: { kind: "binary", op: "+", left: expr, right: { kind: "intLit", value: 1 } } };

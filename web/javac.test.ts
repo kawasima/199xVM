@@ -1734,6 +1734,16 @@ describe("Runtime (WASM)", () => {
     assert.match(result, /^ERROR: Exception: java\/lang\/AssertionError:/);
   });
 
+  test("assert primitive message is boxed", async () => {
+    const result = await runSnippet(`public class AssertPrimitiveMsgRun {
+      public static String run() {
+        assert false : 1;
+        return "ng";
+      }
+    }`, "AssertPrimitiveMsgRun");
+    assert.match(result, /^ERROR: Exception: java\/lang\/AssertionError:/);
+  });
+
   test("synchronized block executes", async () => {
     const result = await runSnippet(`public class SyncRun {
       public static String run() {
@@ -1760,6 +1770,46 @@ describe("Runtime (WASM)", () => {
       }
     }`, "TwrRun");
     assert.equal(result, "1");
+  });
+
+  test("compound assignment evaluates array LHS once", async () => {
+    const result = await runSnippet(`public class CompoundArraySideEffectRun {
+      public static String run() {
+        int[] arr = { 1, 2 };
+        int i = 0;
+        arr[i++] += 4;
+        return "" + i + ":" + arr[0] + ":" + arr[1];
+      }
+    }`, "CompoundArraySideEffectRun");
+    assert.equal(result, "1:5:2");
+  });
+
+  test("compound assignment evaluates field receiver once", async () => {
+    const result = await runSnippet(`public class CompoundFieldSideEffectRun {
+      int x;
+      int calls;
+      CompoundFieldSideEffectRun getSelf() {
+        calls = calls + 1;
+        return this;
+      }
+      public static String run() {
+        CompoundFieldSideEffectRun o = new CompoundFieldSideEffectRun();
+        o.getSelf().x += 3;
+        return "" + o.calls + ":" + o.x;
+      }
+    }`, "CompoundFieldSideEffectRun");
+    assert.equal(result, "1:3");
+  });
+
+  test("compound assignment narrows to byte", async () => {
+    const result = await runSnippet(`public class CompoundNarrowByteRun {
+      public static String run() {
+        byte b = 1;
+        b += 130;
+        return "" + b;
+      }
+    }`, "CompoundNarrowByteRun");
+    assert.equal(result, "-125");
   });
 
 });
@@ -1923,6 +1973,16 @@ describe("Parser – new syntax", () => {
     assert.equal(body[1].kind, "synchronized");
   });
 
+  test("synchronized requires block body", () => {
+    const src = `public class BadSyncStmt {
+      public static String run() {
+        Object lock = new Object();
+        synchronized (lock) return "ng";
+      }
+    }`;
+    assert.throws(() => parse(lex(src)));
+  });
+
   test("try-with-resources parses and lowers", () => {
     const src = `public class TwrStmt {
       int closed;
@@ -1936,7 +1996,34 @@ describe("Parser – new syntax", () => {
     }`;
     const cls = parse(lex(src));
     const body = cls.methods.find(m => m.name === "run")!.body;
-    assert.equal(body[0].kind, "block");
+    assert.equal(body[0].kind, "tryCatch");
+    const tc = body[0] as any;
+    assert.equal(tc.tryBody[0].kind, "block");
+    assert.equal(tc.tryBody[0].stmts[0].kind, "varDecl");
+  });
+
+  test("try-with-resources lowering includes catch/rethrow close path", () => {
+    const src = `public class TwrStmtTwo {
+      static class Res {
+        Res(boolean fail) {}
+        void close() {}
+      }
+      public static String run() {
+        try (Res a = new Res(false); Res b = new Res(true)) {
+          return "ok";
+        }
+      }
+    }`;
+    const cls = parse(lex(src));
+    const body = cls.methods.find(m => m.name === "run")!.body;
+    const outer = body[0] as any;
+    assert.equal(outer.kind, "tryCatch");
+    const firstBlock = outer.tryBody[0];
+    assert.equal(firstBlock.kind, "block");
+    const innerTry = firstBlock.stmts[1];
+    assert.equal(innerTry.kind, "tryCatch");
+    assert.equal(innerTry.catches[0].exType, "Throwable");
+    assert.equal(innerTry.catches[0].body[1].kind, "throw");
   });
 
   test("enhanced for loop", () => {
