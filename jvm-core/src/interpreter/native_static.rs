@@ -150,7 +150,16 @@ impl super::Vm {
                     .and_then(|v| v.as_ref())
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))?;
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
+                self.ensure_class_ready(&internal);
+                if self.get_class(&internal).is_none() {
+                    self.throw_class_not_found(&runtime_name);
+                    return Some(JValue::Void);
+                }
                 Some(JValue::Ref(Some(self.class_object(internal))))
+            }
+            ("java/lang/ClassLoader", "getSystemClassLoader", _) => {
+                let cl = self.get_or_create_system_classloader();
+                Some(JValue::Ref(Some(cl)))
             }
             ("java/lang/System", "currentTimeMillis", "()J") => {
                 #[cfg(target_arch = "wasm32")]

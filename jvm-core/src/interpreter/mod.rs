@@ -105,6 +105,8 @@ pub struct Vm {
     pub(in crate::interpreter) stdout_buffer: String,
     /// Buffered `System.err.print` content until newline/println.
     pub(in crate::interpreter) stderr_buffer: String,
+    /// Singleton system ClassLoader instance (created on first access).
+    pub(in crate::interpreter) system_classloader: Option<JRef>,
 }
 
 impl Vm {
@@ -119,6 +121,7 @@ impl Vm {
             pending_exception: None,
             stdout_buffer: String::new(),
             stderr_buffer: String::new(),
+            system_classloader: None,
         }
     }
 
@@ -210,6 +213,27 @@ impl Vm {
             }
             s
         })
+    }
+
+    /// Return (or lazily create) the singleton system ClassLoader instance.
+    pub(in crate::interpreter) fn get_or_create_system_classloader(&mut self) -> JRef {
+        if let Some(ref cl) = self.system_classloader {
+            return Rc::clone(cl);
+        }
+        let cl = JObject::new("java/lang/ClassLoader");
+        self.system_classloader = Some(Rc::clone(&cl));
+        cl
+    }
+
+    /// Set `pending_exception` to a new `ClassNotFoundException` for `name`.
+    /// `name` should be the runtime (dot-separated) class name.
+    pub(in crate::interpreter) fn throw_class_not_found(&mut self, name: &str) {
+        let exc = JObject::new("java/lang/ClassNotFoundException");
+        exc.borrow_mut().fields.insert(
+            "detailMessage".to_owned(),
+            JValue::Ref(Some(self.intern_string(name.to_owned()))),
+        );
+        self.pending_exception = Some(exc);
     }
 
     fn class_object(&mut self, internal_name: impl Into<String>) -> JRef {
