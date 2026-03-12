@@ -16,7 +16,7 @@ impl Vm {
     ) -> Result<JValue, String> {
         match self.build_static_frame(class_name, method_name, descriptor, args.clone(), true)? {
             Some(fi) => {
-                let frame_owner = fi.class_name.clone();
+                let frame_owner = fi.frame_owner.clone();
                 let mut call_stack = vec![fi];
                 self.run_trampoline(&mut call_stack)
                     .map_err(|e| format!("{e}\n  at {frame_owner}"))
@@ -79,7 +79,10 @@ impl Vm {
                 return Ok(v);
             }
         }
-        Err(format!("Method not found: {class_name}.{method_name}{descriptor}"))
+        Err(format!(
+            "Native stub not found for: {}.{method_name}{}",
+            info.class_name, info.descriptor
+        ))
     }
 
     /// Execute an instance method with invokespecial semantics.
@@ -93,7 +96,7 @@ impl Vm {
     ) -> Result<JValue, String> {
         match self.build_special_frame_inner(this.clone(), class_name, method_name, descriptor, args.clone(), true)? {
             Some(fi) => {
-                let frame_owner = fi.class_name.clone();
+                let frame_owner = fi.frame_owner.clone();
                 let mut call_stack = vec![fi];
                 self.run_trampoline(&mut call_stack)
                     .map_err(|e| format!("{e}\n  at {frame_owner}"))
@@ -162,7 +165,7 @@ impl Vm {
         // Try to build a bytecode frame.
         match self.build_virtual_frame_inner(this.clone(), class_name, method_name, descriptor, args.clone(), true)? {
             Some(fi) => {
-                let frame_owner = fi.class_name.clone();
+                let frame_owner = fi.frame_owner.clone();
                 let mut call_stack = vec![fi];
                 self.run_trampoline(&mut call_stack)
                     .map_err(|e| format!("{e}\n  at {frame_owner}"))

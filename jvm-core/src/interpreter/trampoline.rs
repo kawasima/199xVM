@@ -16,7 +16,7 @@ pub(crate) struct FrameInfo {
     pub frame: Frame,
     pub code: Vec<u8>,
     pub cp: Rc<Vec<ConstantPoolEntry>>,
-    pub class_name: String,
+    pub frame_owner: String,
     pub bootstrap_methods: Vec<BootstrapMethod>,
     pub exception_table: Vec<ExceptionTableEntry>,
     /// Whether to push the return value onto the caller's operand stack.
@@ -26,6 +26,13 @@ pub(crate) struct FrameInfo {
 }
 
 /// Saved state for a StringConcatFactory recipe interrupted by toString().
+///
+/// Currently `concat_state` is never set to `Some` because `dispatch_invokedynamic`
+/// still uses the recursive path. This will be wired up when invokedynamic is
+/// migrated to the trampoline (Phase 2+), at which point concat recipes that call
+/// `toString()` on non-String objects will use this state machine to yield and
+/// resume after the toString() frame completes.
+#[allow(dead_code)]
 pub(crate) struct ConcatState {
     pub recipe_chars: Vec<char>,
     pub args: Vec<JValue>,
@@ -56,12 +63,12 @@ impl Vm {
 
             let fi = call_stack.last_mut().unwrap();
             if fi.frame.pc >= fi.code.len() {
-                // Fell off the end — implicit void return.
-                call_stack.pop();
-                if call_stack.is_empty() {
-                    return Ok(JValue::Void);
-                }
-                continue;
+                // Fell off the end of the method body: this indicates invalid
+                // bytecode or an interpreter bug, so surface it as an error.
+                return Err(format!(
+                    "Execution fell off the end of method {}",
+                    fi.frame_owner
+                ));
             }
 
             let opcode_pc = fi.frame.pc;
@@ -69,7 +76,7 @@ impl Vm {
             fi.frame.pc += 1;
 
             let result = self.execute_opcode(
-                &mut fi.frame, &fi.code, &fi.cp, &fi.class_name,
+                &mut fi.frame, &fi.code, &fi.cp, &fi.frame_owner,
                 &fi.bootstrap_methods, &fi.exception_table, opcode,
             );
 
@@ -131,7 +138,11 @@ impl Vm {
                 fi.frame.pc = handler_pc;
                 return Ok(());
             }
-            trace = format!("{err_msg}\n  at {}", fi.class_name);
+            if trace.is_empty() {
+                trace = format!("{err_msg}\n  at {}", fi.frame_owner);
+            } else {
+                trace = format!("{trace}\n  at {}", fi.frame_owner);
+            }
             call_stack.pop();
         }
         Err(if trace.is_empty() { err_msg.to_owned() } else { trace })
@@ -301,7 +312,7 @@ impl Vm {
         let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
         Ok(Some(FrameInfo {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
-            code: info.code, cp: info.cp, class_name: fo,
+            code: info.code, cp: info.cp, frame_owner: fo,
             bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
             push_return, concat_state: None,
         }))
@@ -384,7 +395,7 @@ impl Vm {
         let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
         Ok(Some(FrameInfo {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
-            code: info.code, cp: info.cp, class_name: fo,
+            code: info.code, cp: info.cp, frame_owner: fo,
             bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
             push_return, concat_state: None,
         }))
@@ -440,7 +451,7 @@ impl Vm {
         let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
         Ok(Some(FrameInfo {
             frame: Frame { locals, stack: Vec::new(), pc: 0 },
-            code: info.code, cp: info.cp, class_name: fo,
+            code: info.code, cp: info.cp, frame_owner: fo,
             bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
             push_return, concat_state: None,
         }))
