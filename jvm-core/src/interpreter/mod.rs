@@ -8,7 +8,7 @@
 //! - Integer / long / reference comparisons and control flow
 //! - Native stubs for `java.lang.*` and `java.util.*`
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 #[cfg(target_arch = "wasm32")]
@@ -113,9 +113,9 @@ pub(crate) struct Monitor {
     /// Reentrant lock count (0 when unlocked).
     pub count: usize,
     /// Threads blocked on `monitorenter` waiting to acquire this monitor.
-    pub entry_queue: Vec<ThreadId>,
+    pub entry_queue: VecDeque<ThreadId>,
     /// Threads blocked on `Object.wait()`.
-    pub wait_queue: Vec<ThreadId>,
+    pub wait_queue: VecDeque<ThreadId>,
 }
 
 /// Per-thread execution context.
@@ -223,7 +223,11 @@ impl Vm {
     }
 
     /// Get the object identity key for monitor operations.
-    /// Uses the `Rc` pointer address as a stable identity.
+    ///
+    /// Uses the `Rc` pointer address as a stable identity. This is safe as long
+    /// as the `Rc` is alive — which is guaranteed because the caller holds a
+    /// reference. In Phase 4+, we may switch to a per-object unique ID to avoid
+    /// address reuse after deallocation.
     fn object_id(obj: &JRef) -> usize {
         Rc::as_ptr(obj) as *const () as usize
     }
@@ -237,8 +241,8 @@ impl Vm {
         let monitor = self.monitors.entry(id).or_insert(Monitor {
             owner: None,
             count: 0,
-            entry_queue: Vec::new(),
-            wait_queue: Vec::new(),
+            entry_queue: VecDeque::new(),
+            wait_queue: VecDeque::new(),
         });
         match monitor.owner {
             None => {
@@ -251,9 +255,9 @@ impl Vm {
                 monitor.count += 1;
             }
             Some(_) => {
-                // Owned by another thread — block (Phase 4+).
-                // For now this shouldn't happen in single-threaded mode.
-                monitor.entry_queue.push(thread_id);
+                // Owned by another thread — proper blocking/yielding is not yet implemented.
+                // This should not occur in the current single-threaded mode; fail fast if it does.
+                panic!("monitor_enter: monitor contention is not supported yet (would need to block current thread)");
             }
         }
     }
@@ -274,8 +278,7 @@ impl Vm {
         if monitor.count == 0 {
             monitor.owner = None;
             // Wake one thread from the entry queue (Phase 4+).
-            if let Some(waiting_id) = monitor.entry_queue.first().copied() {
-                monitor.entry_queue.remove(0);
+            if let Some(waiting_id) = monitor.entry_queue.pop_front() {
                 // In Phase 4+, set the waiting thread's state to Runnable.
                 let _ = waiting_id;
             }
