@@ -139,10 +139,10 @@ impl Vm {
                 return Ok(());
             }
             if trace.is_empty() {
-                trace = format!("{err_msg}\n  at {}", fi.frame_owner);
-            } else {
-                trace = format!("{trace}\n  at {}", fi.frame_owner);
+                trace.push_str(err_msg);
             }
+            trace.push_str("\n  at ");
+            trace.push_str(&fi.frame_owner);
             call_stack.pop();
         }
         Err(if trace.is_empty() { err_msg.to_owned() } else { trace })
