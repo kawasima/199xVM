@@ -298,6 +298,11 @@ pub fn parse_class_name(data: &[u8]) -> Option<String> {
     read_u16(pos)?;
     // constant pool count
     let cp_count = read_u16(pos)? as usize;
+    // Sanity-check cp_count before allocating: the JVMS maximum is 65535, but a
+    // realistic class file needs at least ~10 bytes per entry.  Reject anything
+    // that would require more entries than the remaining bytes can possibly hold,
+    // preventing large allocations from malformed/adversarial input.
+    if cp_count > data.len() / 3 + 2 { return None; }
 
     // Scan the constant pool.
     // Utf8 entries: record (byte_offset, byte_len) — no String allocation yet.
@@ -645,5 +650,100 @@ mod tests {
     fn test_invalid_magic() {
         let data = [0xDE, 0xAD, 0xBE, 0xEF];
         assert!(parse(&data).is_err());
+    }
+
+    /// Build a minimal valid `.class` byte sequence whose `this_class` name is `class_name`.
+    /// Constant pool layout (1-based):
+    ///   #1 = Utf8  <class_name>
+    ///   #2 = Utf8  "java/lang/Object"
+    ///   #3 = Class #1  (this_class)
+    ///   #4 = Class #2  (super_class)
+    fn minimal_class_bytes(class_name: &str) -> Vec<u8> {
+        let mut b: Vec<u8> = Vec::new();
+        // magic
+        b.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
+        // minor, major (Java 17)
+        b.extend_from_slice(&[0x00, 0x00, 0x00, 0x3D]);
+        // cp_count = 5 (indices 1..=4)
+        b.extend_from_slice(&[0x00, 0x05]);
+        // #1 Utf8 <class_name>
+        let cn = class_name.as_bytes();
+        b.push(1);
+        b.push((cn.len() >> 8) as u8);
+        b.push(cn.len() as u8);
+        b.extend_from_slice(cn);
+        // #2 Utf8 "java/lang/Object"
+        let obj = b"java/lang/Object";
+        b.push(1);
+        b.push(0); b.push(obj.len() as u8);
+        b.extend_from_slice(obj);
+        // #3 Class -> #1
+        b.push(7); b.push(0); b.push(1);
+        // #4 Class -> #2
+        b.push(7); b.push(0); b.push(2);
+        // access_flags = ACC_PUBLIC | ACC_SUPER
+        b.extend_from_slice(&[0x00, 0x21]);
+        // this_class = #3
+        b.extend_from_slice(&[0x00, 0x03]);
+        // super_class = #4
+        b.extend_from_slice(&[0x00, 0x04]);
+        // interfaces_count = 0, fields_count = 0, methods_count = 0, attributes_count = 0
+        b.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        b
+    }
+
+    #[test]
+    fn test_parse_class_name_simple() {
+        let bytes = minimal_class_bytes("com/example/Hello");
+        assert_eq!(parse_class_name(&bytes), Some("com/example/Hello".to_owned()));
+    }
+
+    #[test]
+    fn test_parse_class_name_truncated() {
+        // Too short to contain a valid class file.
+        assert_eq!(parse_class_name(&[0xCA, 0xFE, 0xBA, 0xBE, 0x00]), None);
+    }
+
+    #[test]
+    fn test_parse_class_name_wrong_magic() {
+        let mut bytes = minimal_class_bytes("Foo");
+        bytes[0] = 0xDE; // corrupt magic
+        assert_eq!(parse_class_name(&bytes), None);
+    }
+
+    #[test]
+    fn test_parse_class_name_long_double_slots() {
+        // A class whose CP contains a Long constant (tag 5) occupying two slots.
+        // cp_count = 6: #1=Long, (slot #2 unusable), #3=Utf8 name, #4=Utf8 Object, #5=Class#3
+        let class_name = "pkg/LongSlot";
+        let cn = class_name.as_bytes();
+        let obj = b"java/lang/Object";
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x3D]);
+        // cp_count = 7 (indices 1..=6)
+        b.extend_from_slice(&[0x00, 0x07]);
+        // #1 Long (8 bytes) — occupies slots 1 and 2
+        b.push(5);
+        b.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        // #3 Utf8 class_name
+        b.push(1); b.push(0); b.push(cn.len() as u8); b.extend_from_slice(cn);
+        // #4 Utf8 "java/lang/Object"
+        b.push(1); b.push(0); b.push(obj.len() as u8); b.extend_from_slice(obj);
+        // #5 Class -> #3
+        b.push(7); b.push(0); b.push(3);
+        // #6 Class -> #4
+        b.push(7); b.push(0); b.push(4);
+        // access, this_class=#5, super=#6, counts
+        b.extend_from_slice(&[0x00, 0x21, 0x00, 0x05, 0x00, 0x06,
+                               0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(parse_class_name(&b), Some(class_name.to_owned()));
+    }
+
+    #[test]
+    fn test_parse_class_name_large_cp_count_rejected() {
+        // cp_count = 60000 on a tiny byte slice must not cause a large allocation.
+        let mut b: Vec<u8> = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x3D];
+        b.push(0xEA); b.push(0x60); // cp_count = 60000
+        assert_eq!(parse_class_name(&b), None);
     }
 }

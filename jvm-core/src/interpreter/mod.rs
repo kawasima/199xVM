@@ -457,8 +457,16 @@ impl Vm {
             self.ensure_class_init(&iface)?;
         }
 
-        // Check if the class has a <clinit> method.
-        let has_clinit = self.method_exists(class_name, "<clinit>", "()V");
+        // Check if THIS class (not superclasses) has a <clinit> method.
+        // <clinit> is not inherited, so we must not walk the super-chain here —
+        // doing so would re-execute a superclass <clinit> that was already run.
+        self.ensure_class_ready(class_name);
+        let has_clinit = self.get_class(class_name).map(|cf| {
+            cf.methods.iter().any(|m| {
+                cf.constant_pool.utf8(m.name_index) == "<clinit>"
+                    && cf.constant_pool.utf8(m.descriptor_index) == "()V"
+            })
+        }).unwrap_or(false);
         if has_clinit {
             self.invoke_static(class_name, "<clinit>", "()V", vec![])?;
         }
