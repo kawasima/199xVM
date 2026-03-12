@@ -186,11 +186,21 @@ describe("Lexer", () => {
     assert.throws(() => lex("a\\u0"), /Invalid Unicode escape sequence at line 1:2/);
   });
 
+  test("unicode escape line/col follows translated line terminator", () => {
+    assert.throws(() => lex("\\u000A\\u00G0"), /Invalid Unicode escape: \\u00G0 at line 2:1/);
+  });
+
   test("unicode identifier is accepted", () => {
     const tokens = lex("int 名前 = 1;");
     assert.equal(tokens[0].kind, TokenKind.KwInt);
     assert.equal(tokens[1].kind, TokenKind.Ident);
     assert.equal(tokens[1].value, "名前");
+  });
+
+  test("non-BMP unicode identifier is accepted", () => {
+    const tokens = lex("int 𩸽 = 1;");
+    assert.equal(tokens[1].kind, TokenKind.Ident);
+    assert.equal(tokens[1].value, "𩸽");
   });
 
   test("text block literal tokenizes as string literal", () => {
@@ -213,8 +223,18 @@ world
     assert.throws(() => lex("'\\x'"), /Invalid escape sequence/);
   });
 
+  test("invalid escape points to escape position, not literal start", () => {
+    assert.throws(() => lex("\"ab\\q\""), /Invalid escape sequence at line 1:4/);
+  });
+
   test("text block opening without line terminator is rejected", () => {
     assert.throws(() => lex("\"\"\"x\"\"\""), /Text block opening delimiter/);
+  });
+
+  test("text block opening allows horizontal whitespace before newline", () => {
+    const tokens = lex("\"\"\"   \nhi\n\"\"\"");
+    assert.equal(tokens[0].kind, TokenKind.StringLiteral);
+    assert.equal(tokens[0].value, "hi\n");
   });
 
   test("floating-point forms with dot/exponent are tokenized", () => {
@@ -825,6 +845,12 @@ describe("Parser", () => {
     const cls = parse(lex(src));
     assert.equal(cls.name, "GenericNest");
     assert.equal(cls.fields[0].name, "value");
+  });
+
+  test("unmatched generic closer reports parse error", () => {
+    assert.throws(() => parse(lex(`public class BadGeneric {
+      java.util.List<String>>> value;
+    }`)), /Unmatched '>' in generic type/);
   });
 
   test("constructor declaration ending with semicolon is rejected", () => {

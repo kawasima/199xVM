@@ -147,13 +147,30 @@ export interface Token {
 
 const IDENT_START_RE = /[$_\p{ID_Start}]/u;
 const IDENT_PART_RE = /[$_\u200C\u200D\p{ID_Continue}]/u;
+const NUM_DEC = "[0-9](?:_?[0-9])*";
+const NUM_NZ_DEC = "[1-9](?:_?[0-9])*";
+const NUM_HEX = "[0-9a-fA-F](?:_?[0-9a-fA-F])*";
+const NUM_BIN = "[01](?:_?[01])*";
+const NUM_EXP10 = `[eE][+-]?${NUM_DEC}`;
+const NUM_EXP2 = `[pP][+-]?${NUM_DEC}`;
+const NUMBER_PATTERNS: Array<{ re: RegExp; kind: TokenKind }> = [
+  { re: new RegExp(`^0[xX](?:${NUM_HEX}\\.(?:${NUM_HEX})?|(?:${NUM_HEX})?\\.${NUM_HEX})${NUM_EXP2}[fFdD]?`), kind: TokenKind.DoubleLiteral },
+  { re: new RegExp(`^0[xX]${NUM_HEX}${NUM_EXP2}[fFdD]?`), kind: TokenKind.DoubleLiteral },
+  { re: new RegExp(`^(?:${NUM_DEC}\\.(?:${NUM_DEC})?|\\.${NUM_DEC})(?:${NUM_EXP10})?[fFdD]?`), kind: TokenKind.DoubleLiteral },
+  { re: new RegExp(`^${NUM_DEC}${NUM_EXP10}[fFdD]?`), kind: TokenKind.DoubleLiteral },
+  { re: new RegExp(`^${NUM_DEC}[fFdD]`), kind: TokenKind.FloatLiteral },
+  { re: new RegExp(`^0[xX]${NUM_HEX}[lL]?`), kind: TokenKind.IntLiteral },
+  { re: new RegExp(`^0[bB]${NUM_BIN}[lL]?`), kind: TokenKind.IntLiteral },
+  { re: new RegExp("^0(?:_?[0-7])+[lL]?"), kind: TokenKind.IntLiteral },
+  { re: new RegExp(`^(?:0|${NUM_NZ_DEC})[lL]?`), kind: TokenKind.IntLiteral },
+];
 
-function isIdentifierStart(ch: string): boolean {
-  return ch !== "\0" && IDENT_START_RE.test(ch);
+function isIdentifierStart(cp: string): boolean {
+  return cp !== "\0" && IDENT_START_RE.test(cp);
 }
 
-function isIdentifierPart(ch: string): boolean {
-  return ch !== "\0" && IDENT_PART_RE.test(ch);
+function isIdentifierPart(cp: string): boolean {
+  return cp !== "\0" && IDENT_PART_RE.test(cp);
 }
 
 function preprocessUnicodeEscapes(input: string): string {
@@ -162,7 +179,7 @@ function preprocessUnicodeEscapes(input: string): string {
   let line = 1;
   let col = 1;
   const bump = (ch: string): void => {
-    if (ch === "\n") {
+    if (ch === "\n" || ch === "\r") {
       line++;
       col = 1;
     } else {
@@ -186,9 +203,9 @@ function preprocessUnicodeEscapes(input: string): string {
     if (j + 4 > input.length) throw new Error(`Invalid Unicode escape sequence at line ${line}:${col}`);
     const hex = input.slice(j, j + 4);
     if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error(`Invalid Unicode escape: \\u${hex} at line ${line}:${col}`);
-    out += String.fromCharCode(parseInt(hex, 16));
-    const consumed = j + 4 - i;
-    col += consumed;
+    const translated = String.fromCharCode(parseInt(hex, 16));
+    out += translated;
+    bump(translated);
     i = j + 3;
   }
   return out;
@@ -288,6 +305,18 @@ export function lex(source: string): Token[] {
   function peekN(n: number): string {
     return pos + n < source.length ? source[pos + n] : "\0";
   }
+  function peekCodePoint(): string {
+    const cp = source.codePointAt(pos);
+    return cp === undefined ? "\0" : String.fromCodePoint(cp);
+  }
+  function advanceCodePoint(): string {
+    const cp = source.codePointAt(pos);
+    if (cp === undefined) return "\0";
+    const s = String.fromCodePoint(cp);
+    pos += s.length;
+    col++;
+    return s;
+  }
   function parseEscape(startLine: number, startCol: number, inTextBlock: boolean): string {
     const esc = advance();
     switch (esc) {
@@ -322,27 +351,8 @@ export function lex(source: string): Token[] {
   }
   function parseNumberLiteral(startLine: number, startCol: number): { kind: TokenKind; value: string; len: number } | undefined {
     const rem = source.slice(pos);
-    const DEC = "[0-9](?:_?[0-9])*";
-    const NZDEC = "[1-9](?:_?[0-9])*";
-    const OCT = "[0-7](?:_?[0-7])*";
-    const HEX = "[0-9a-fA-F](?:_?[0-9a-fA-F])*";
-    const BIN = "[01](?:_?[01])*";
-    const EXP10 = `[eE][+-]?${DEC}`;
-    const EXP2 = `[pP][+-]?${DEC}`;
-    const patterns: Array<{ re: RegExp; kind: TokenKind }> = [
-      { re: new RegExp(`^0[xX](?:${HEX}\\.(?:${HEX})?|(?:${HEX})?\\.${HEX})${EXP2}[fFdD]?`), kind: TokenKind.DoubleLiteral },
-      { re: new RegExp(`^0[xX]${HEX}${EXP2}[fFdD]?`), kind: TokenKind.DoubleLiteral },
-      { re: new RegExp(`^(?:${DEC}\\.(?:${DEC})?|\\.${DEC})(?:${EXP10})?[fFdD]?`), kind: TokenKind.DoubleLiteral },
-      { re: new RegExp(`^${DEC}${EXP10}[fFdD]?`), kind: TokenKind.DoubleLiteral },
-      { re: new RegExp(`^${DEC}[fFdD]`), kind: TokenKind.FloatLiteral },
-      { re: new RegExp(`^0[xX]${HEX}[lL]?`), kind: TokenKind.IntLiteral },
-      { re: new RegExp(`^0[bB]${BIN}[lL]?`), kind: TokenKind.IntLiteral },
-      { re: new RegExp(`^0(?:_?[0-7])+[lL]?`), kind: TokenKind.IntLiteral },
-      { re: new RegExp(`^(?:0|${NZDEC})[lL]?`), kind: TokenKind.IntLiteral },
-    ];
-
     let best: { text: string; kind: TokenKind } | undefined;
-    for (const p of patterns) {
+    for (const p of NUMBER_PATTERNS) {
       const m = rem.match(p.re);
       if (!m) continue;
       const text = m[0];
@@ -420,6 +430,7 @@ export function lex(source: string): Token[] {
     // Text block literal
     if (ch === '"' && peekN(1) === '"' && peekN(2) === '"') {
       advance(); advance(); advance();
+      while (peek() === " " || peek() === "\t" || peek() === "\f") advance();
       if (!(peek() === "\n" || peek() === "\r")) {
         throw new Error(`Text block opening delimiter must be followed by line terminator at line ${startLine}:${startCol}`);
       }
@@ -439,8 +450,10 @@ export function lex(source: string): Token[] {
           break;
         }
         if (peek() === "\\") {
+          const escLine = line;
+          const escCol = col;
           advance();
-          s += parseEscape(startLine, startCol, true);
+          s += parseEscape(escLine, escCol, true);
         } else {
           s += advance();
         }
@@ -460,8 +473,10 @@ export function lex(source: string): Token[] {
           throw new Error(`Unterminated string literal at line ${startLine}:${startCol}`);
         }
         if (peek() === "\\") {
+          const escLine = line;
+          const escCol = col;
           advance();
-          s += parseEscape(startLine, startCol, false);
+          s += parseEscape(escLine, escCol, false);
         } else {
           s += advance();
         }
@@ -482,8 +497,10 @@ export function lex(source: string): Token[] {
       }
       let chValue = "";
       if (peek() === "\\") {
+        const escLine = line;
+        const escCol = col;
         advance();
-        chValue = parseEscape(startLine, startCol, false);
+        chValue = parseEscape(escLine, escCol, false);
       } else {
         chValue = advance();
       }
@@ -519,9 +536,10 @@ export function lex(source: string): Token[] {
     }
 
     // Identifier / keyword
-    if (isIdentifierStart(ch)) {
+    const firstCp = peekCodePoint();
+    if (isIdentifierStart(firstCp)) {
       let ident = "";
-      while (isIdentifierPart(peek())) ident += advance();
+      while (isIdentifierPart(peekCodePoint())) ident += advanceCodePoint();
       if (ident === "_") {
         throw new Error(`'_' is a reserved keyword and cannot be used as an identifier at line ${startLine}:${startCol}`);
       }
