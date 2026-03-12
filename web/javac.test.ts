@@ -274,6 +274,37 @@ world
     assert.throws(() => lex("0x"), /Malformed number literal/);
   });
 
+  test("valid underscored numerics are accepted", () => {
+    const tokens = lex("1_000 0xCAFE_BABE 0b1010_0001 07_7 1_2.3_4e5_6");
+    assert.equal(tokens[0].kind, TokenKind.IntLiteral);
+    assert.equal(tokens[1].kind, TokenKind.IntLiteral);
+    assert.equal(tokens[2].kind, TokenKind.IntLiteral);
+    assert.equal(tokens[3].kind, TokenKind.IntLiteral);
+    assert.equal(tokens[4].kind, TokenKind.DoubleLiteral);
+  });
+
+  test("invalid underscore placement around exponent/suffix is rejected", () => {
+    assert.throws(() => lex("1e_1"), /Malformed number literal/);
+    assert.throws(() => lex("1e1_"), /Malformed number literal/);
+    assert.throws(() => lex("0x1p_1"), /Malformed number literal/);
+    assert.throws(() => lex("0x1p1_"), /Malformed number literal/);
+  });
+
+  test("char literal supports octal escape", () => {
+    const tokens = lex("'\\141'");
+    assert.equal(tokens[0].kind, TokenKind.CharLiteral);
+    assert.equal(tokens[0].value, String("a".charCodeAt(0)));
+  });
+
+  test("text block line continuation escape is accepted", () => {
+    const tokens = lex(`"""
+abc\\
+def
+"""`);
+    assert.equal(tokens[0].kind, TokenKind.StringLiteral);
+    assert.equal(tokens[0].value, "abcdef\n");
+  });
+
   test("operators", () => {
     const tokens = lex("== != <= >= && || ++ -- ::");
     const kinds = tokens.slice(0, -1).map(t => t.kind);
