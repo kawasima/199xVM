@@ -1520,6 +1520,29 @@ describe("Code generator", () => {
     }`), /compound assignment target not found/);
   });
 
+  test("compound assignment rejects non-lvalue target", () => {
+    assert.throws(() => compile(`public class BadCompoundLvalue {
+      public static int run() {
+        int a = 1;
+        int b = 2;
+        (a + b) += 3;
+        return 0;
+      }
+    }`), /Unsupported compound assignment target/);
+  });
+
+  test("compound assignment accepts long array index via narrowing conversion", async () => {
+    const result = await runSnippet(`public class LongIndexCompoundRun {
+      public static String run() {
+        int[] arr = new int[2];
+        long i = 0;
+        arr[i] += 1;
+        return "" + arr[0];
+      }
+    }`, "LongIndexCompoundRun");
+    assert.equal(result, "1");
+  });
+
   test("assignment allows subtype to supertype in known hierarchy", () => {
     assert.doesNotThrow(() => compile(`
       public class A {}
@@ -2029,16 +2052,21 @@ describe("Parser – new syntax", () => {
     assert.equal(outer.kind, "tryCatch");
     const firstBlock = outer.tryBody[0];
     assert.equal(firstBlock.kind, "block");
-    const innerTry = firstBlock.stmts[1];
+    assert.equal(firstBlock.stmts[1].kind, "varDecl");
+    const innerTry = firstBlock.stmts[2];
     assert.equal(innerTry.kind, "tryCatch");
     assert.equal(innerTry.catches[0].exType, "Throwable");
     assert.ok(innerTry.finallyBody && innerTry.finallyBody.length > 0);
-    const closeWithSuppressed = innerTry.catches[0].body[0];
-    assert.equal(closeWithSuppressed.kind, "if");
-    const nestedCloseTry = closeWithSuppressed.then[0];
+    const caughtBody = innerTry.catches[0].body;
+    assert.equal(caughtBody[0].kind, "assign");
+    assert.equal(caughtBody[1].kind, "throw");
+    const closeWithPrimary = innerTry.finallyBody[0];
+    assert.equal(closeWithPrimary.kind, "if");
+    const primaryGuard = closeWithPrimary.then[0];
+    assert.equal(primaryGuard.kind, "if");
+    const nestedCloseTry = primaryGuard.then[0];
     assert.equal(nestedCloseTry.kind, "tryCatch");
     assert.equal(nestedCloseTry.catches[0].body[0].kind, "exprStmt");
-    assert.equal(innerTry.catches[0].body[1].kind, "throw");
   });
 
   test("enhanced for loop", () => {

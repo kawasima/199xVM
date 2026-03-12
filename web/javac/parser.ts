@@ -1088,44 +1088,48 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
       let loweredTryBody = tryBody;
       for (let i = resources.length - 1; i >= 0; i--) {
         const r = resources[i];
-        const exName = `$twr_ex_${i}`;
-        const closeExName = `$twr_close_ex_${i}`;
-        const closeNormal: Stmt = {
+        const exName = `\u0001twr_ex_${i}`;
+        const closeExName = `\u0001twr_close_ex_${i}`;
+        const primaryName = `\u0001twr_primary_${i}`;
+        const closeWithPrimary: Stmt = {
           kind: "if",
           cond: { kind: "binary", op: "!=", left: { kind: "ident", name: r.name }, right: { kind: "nullLit" } },
-          then: [{
-            kind: "exprStmt",
-            expr: { kind: "call", object: { kind: "ident", name: r.name }, method: "close", args: [] },
-          }],
-        };
-        const closeWithSuppressed: Stmt = {
-          kind: "if",
-          cond: { kind: "binary", op: "!=", left: { kind: "ident", name: r.name }, right: { kind: "nullLit" } },
-          then: [{
-            kind: "tryCatch",
-            tryBody: [{
-              kind: "exprStmt",
-              expr: { kind: "call", object: { kind: "ident", name: r.name }, method: "close", args: [] },
-            }],
-            catches: [{
-              exType: "Throwable",
-              varName: closeExName,
-              body: [{
-                kind: "exprStmt",
-                expr: {
-                  kind: "call",
-                  object: { kind: "ident", name: exName },
-                  method: "addSuppressed",
-                  args: [{ kind: "ident", name: closeExName }],
-                },
+          then: [
+            {
+              kind: "if",
+              cond: { kind: "binary", op: "!=", left: { kind: "ident", name: primaryName }, right: { kind: "nullLit" } },
+              then: [{
+                kind: "tryCatch",
+                tryBody: [{
+                  kind: "exprStmt",
+                  expr: { kind: "call", object: { kind: "ident", name: r.name }, method: "close", args: [] },
+                }],
+                catches: [{
+                  exType: "Throwable",
+                  varName: closeExName,
+                  body: [{
+                    kind: "exprStmt",
+                    expr: {
+                      kind: "call",
+                      object: { kind: "ident", name: primaryName },
+                      method: "addSuppressed",
+                      args: [{ kind: "ident", name: closeExName }],
+                    },
+                  }],
+                }],
               }],
-            }],
-          }],
+              else_: [{
+                kind: "exprStmt",
+                expr: { kind: "call", object: { kind: "ident", name: r.name }, method: "close", args: [] },
+              }],
+            },
+          ],
         };
         loweredTryBody = [{
           kind: "block",
           stmts: [
             { kind: "varDecl", name: r.name, type: r.type, init: { kind: "nullLit" } },
+            { kind: "varDecl", name: primaryName, type: { className: "java/lang/Throwable" }, init: { kind: "nullLit" } },
             {
               kind: "tryCatch",
               tryBody: [
@@ -1135,9 +1139,12 @@ export function parseAll(tokens: Token[]): ClassDecl[] {
               catches: [{
                 exType: "Throwable",
                 varName: exName,
-                body: [closeWithSuppressed, { kind: "throw", expr: { kind: "ident", name: exName } }],
+                body: [
+                  { kind: "assign", target: { kind: "ident", name: primaryName }, value: { kind: "ident", name: exName } },
+                  { kind: "throw", expr: { kind: "ident", name: exName } },
+                ],
               }],
-              finallyBody: [closeNormal],
+              finallyBody: [closeWithPrimary],
             },
           ],
         }];
