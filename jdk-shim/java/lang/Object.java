@@ -44,13 +44,16 @@ public class Object {
 
     protected native Object clone() throws CloneNotSupportedException;
 
-    public final void notify() {}
+    public final native void notify();
 
-    public final void notifyAll() {}
+    public final native void notifyAll();
 
-    public final void wait() throws InterruptedException {}
+    public final native void wait() throws InterruptedException;
 
-    public final void wait(long timeoutMillis) throws InterruptedException {}
+    public final native void wait(long timeoutMillis) throws InterruptedException;
 
-    public final void wait(long timeoutMillis, int nanos) throws InterruptedException {}
+    public final void wait(long timeoutMillis, int nanos) throws InterruptedException {
+        // Simplified: ignore nanos, delegate to wait(long).
+        wait(timeoutMillis);
+    }
 }

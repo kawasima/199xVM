@@ -302,3 +302,15 @@ fn monitor_contention_two_threads() {
     );
     assert_eq!(result, "10");
 }
+
+#[test]
+fn wait_notify_producer_consumer() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "WaitNotifyTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "produced:42,consumed:42");
+}

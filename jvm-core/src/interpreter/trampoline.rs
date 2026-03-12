@@ -200,9 +200,15 @@ impl Vm {
         use super::ThreadState;
         use super::TIME_SLICE;
 
+        let mut iter_count = 0usize;
         loop {
+            iter_count += 1;
             let current_id = self.scheduler.current_thread().id;
             let state = self.scheduler.current_thread().state;
+
+            if iter_count > 500_000 {
+                return Err(format!("Scheduler timeout: {} iterations, {}", iter_count, self.scheduler.alive_thread_summary()));
+            }
 
             match state {
                 ThreadState::Runnable => {
@@ -251,7 +257,8 @@ impl Vm {
                             if current_id == 0 {
                                 return Err(e);
                             }
-                            eprintln!("Thread {} terminated with exception: {e}", current_id);
+                            // Non-main thread terminated with unhandled exception — silently ignore.
+                            // (In a real JVM this would invoke UncaughtExceptionHandler.)
                         }
                     }
                 }
