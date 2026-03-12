@@ -414,6 +414,25 @@ pub fn parse(data: &[u8]) -> Result<ClassFile, String> {
         .map(|_| parse_attribute(&mut r, &constant_pool))
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Lightweight post-parse validation (JVMS §4.1 / §5.4.1):
+    // this_class must be a valid Class entry in the constant pool.
+    let cp_len = constant_pool.entries.len();
+    if this_class as usize >= cp_len {
+        return Err(format!("this_class index {this_class} out of CP bounds ({cp_len})"));
+    }
+    if !matches!(constant_pool.entries[this_class as usize], ConstantPoolEntry::Class { .. }) {
+        return Err(format!("this_class index {this_class} is not a Class entry"));
+    }
+    // super_class must be 0 (java/lang/Object) or a valid Class entry.
+    if super_class != 0 {
+        if super_class as usize >= cp_len {
+            return Err(format!("super_class index {super_class} out of CP bounds ({cp_len})"));
+        }
+        if !matches!(constant_pool.entries[super_class as usize], ConstantPoolEntry::Class { .. }) {
+            return Err(format!("super_class index {super_class} is not a Class entry"));
+        }
+    }
+
     Ok(ClassFile {
         minor_version,
         major_version,

@@ -225,6 +225,15 @@ impl Vm {
         cl
     }
 
+    /// Set `pending_exception` to a `NoClassDefFoundError` for `name`.
+    /// `name` should be the internal (slash-separated) class name.
+    pub(in crate::interpreter) fn throw_no_class_def_found(&mut self, name: &str) {
+        let exc = JObject::new("java/lang/NoClassDefFoundError");
+        let msg = self.intern_string(name.replace('/', "."));
+        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        self.pending_exception = Some(exc);
+    }
+
     /// Set `pending_exception` to a new `ClassNotFoundException` for `name`.
     /// `name` should be the runtime (dot-separated) class name.
     pub(in crate::interpreter) fn throw_class_not_found(&mut self, name: &str) {
@@ -511,7 +520,19 @@ impl Vm {
             })
         }).unwrap_or(false);
         if has_clinit {
-            self.invoke_static(class_name, "<clinit>", "()V", vec![])?;
+            // JVMS §5.5: if <clinit> throws, wrap in ExceptionInInitializerError.
+            if let Err(e) = self.invoke_static(class_name, "<clinit>", "()V", vec![]) {
+                // Preserve the original exception object as the "cause" field.
+                let cause = self.pending_exception.take();
+                let eiie = JObject::new("java/lang/ExceptionInInitializerError");
+                let msg = self.intern_string(e.clone());
+                eiie.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+                if let Some(c) = cause {
+                    eiie.borrow_mut().fields.insert("cause".to_owned(), JValue::Ref(Some(c)));
+                }
+                self.pending_exception = Some(eiie);
+                return Err(e);
+            }
         }
         Ok(())
     }
