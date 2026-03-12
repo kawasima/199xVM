@@ -178,12 +178,21 @@ function preprocessUnicodeEscapes(input: string): string {
   let out = "";
   let line = 1;
   let col = 1;
+  let lastWasCR = false;
   const bump = (ch: string): void => {
-    if (ch === "\n" || ch === "\r") {
+    if (ch === "\r") {
       line++;
       col = 1;
+      lastWasCR = true;
+    } else if (ch === "\n") {
+      if (!lastWasCR) {
+        line++;
+        col = 1;
+      }
+      lastWasCR = false;
     } else {
       col++;
+      lastWasCR = false;
     }
   };
   for (let i = 0; i < input.length; i++) {
@@ -314,7 +323,7 @@ export function lex(source: string): Token[] {
     if (cp === undefined) return "\0";
     const s = String.fromCodePoint(cp);
     pos += s.length;
-    col++;
+    col += s.length;
     return s;
   }
   function parseEscape(startLine: number, startCol: number, inTextBlock: boolean): string {
@@ -329,10 +338,6 @@ export function lex(source: string): Token[] {
       case "'": return "'";
       case "\\": return "\\";
       case "s": return " ";
-      case "\r":
-        if (!inTextBlock) throw new Error(`Invalid escape sequence at line ${startLine}:${startCol}`);
-        if (peek() === "\n") advance();
-        return "";
       case "\n":
         if (!inTextBlock) throw new Error(`Invalid escape sequence at line ${startLine}:${startCol}`);
         return "";
@@ -431,15 +436,10 @@ export function lex(source: string): Token[] {
     if (ch === '"' && peekN(1) === '"' && peekN(2) === '"') {
       advance(); advance(); advance();
       while (peek() === " " || peek() === "\t" || peek() === "\f") advance();
-      if (!(peek() === "\n" || peek() === "\r")) {
+      if (peek() !== "\n") {
         throw new Error(`Text block opening delimiter must be followed by line terminator at line ${startLine}:${startCol}`);
       }
-      if (peek() === "\r") {
-        advance();
-        if (peek() === "\n") advance();
-      } else {
-        advance();
-      }
+      advance();
       let s = "";
       let closed = false;
       while (pos < source.length) {
@@ -469,7 +469,7 @@ export function lex(source: string): Token[] {
       advance();
       let s = "";
       while (peek() !== '"' && peek() !== "\0") {
-        if (peek() === "\n" || peek() === "\r") {
+        if (peek() === "\n") {
           throw new Error(`Unterminated string literal at line ${startLine}:${startCol}`);
         }
         if (peek() === "\\") {
@@ -492,7 +492,7 @@ export function lex(source: string): Token[] {
     // Char literal
     if (ch === "'") {
       advance(); // opening '
-      if (peek() === "'" || peek() === "\n" || peek() === "\r" || peek() === "\0") {
+      if (peek() === "'" || peek() === "\n" || peek() === "\0") {
         throw new Error(`Malformed char literal at line ${startLine}:${startCol}`);
       }
       let chValue = "";

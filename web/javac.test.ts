@@ -190,6 +190,10 @@ describe("Lexer", () => {
     assert.throws(() => lex("\\u000A\\u00G0"), /Invalid Unicode escape: \\u00G0 at line 2:1/);
   });
 
+  test("unicode escape line/col treats CRLF as single line terminator", () => {
+    assert.throws(() => lex("\\u000D\n\\u00G0"), /Invalid Unicode escape: \\u00G0 at line 2:1/);
+  });
+
   test("unicode identifier is accepted", () => {
     const tokens = lex("int 名前 = 1;");
     assert.equal(tokens[0].kind, TokenKind.KwInt);
@@ -201,6 +205,8 @@ describe("Lexer", () => {
     const tokens = lex("int 𩸽 = 1;");
     assert.equal(tokens[1].kind, TokenKind.Ident);
     assert.equal(tokens[1].value, "𩸽");
+    assert.equal(tokens[2].kind, TokenKind.Assign);
+    assert.equal(tokens[2].col, 8); // 'int ' (4) + surrogate pair (2) + space + '='
   });
 
   test("text block literal tokenizes as string literal", () => {
@@ -235,6 +241,12 @@ world
     const tokens = lex("\"\"\"   \nhi\n\"\"\"");
     assert.equal(tokens[0].kind, TokenKind.StringLiteral);
     assert.equal(tokens[0].value, "hi\n");
+  });
+
+  test("CRLF-normalized text block opening still accepted", () => {
+    const tokens = lex("\"\"\"\r\nok\r\n\"\"\"");
+    assert.equal(tokens[0].kind, TokenKind.StringLiteral);
+    assert.equal(tokens[0].value, "ok\n");
   });
 
   test("floating-point forms with dot/exponent are tokenized", () => {
