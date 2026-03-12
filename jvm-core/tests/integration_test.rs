@@ -196,11 +196,7 @@ fn clinit_exception_wrapped_in_eiie() {
         "run",
         "()Ljava/lang/String;",
     );
-    // Caught as ExceptionInInitializerError (or via Throwable fallback showing class name)
-    assert!(
-        result == "ExceptionInInitializerError" || result.contains("ExceptionInInitializerError"),
-        "expected ExceptionInInitializerError, got: {result}"
-    );
+    assert_eq!(result, "ExceptionInInitializerError");
 }
 
 // ---------------------------------------------------------------------------
@@ -217,4 +213,20 @@ fn concrete_interface_method_no_abstract_method_error() {
         "()Ljava/lang/String;",
     );
     assert_eq!(result, "hello");
+}
+
+// ---------------------------------------------------------------------------
+// JVMS §5.5: erroneous-state — second access throws NoClassDefFoundError
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clinit_erroneous_state_throws_ncdfe_on_second_access() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "ClinitErroneousStateTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "EIIE,NCDFE");
 }
