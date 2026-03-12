@@ -274,44 +274,19 @@ impl super::Vm {
             }
         }
         // ----- Object.wait/notify/notifyAll (inherited by ALL classes) -----
-        match (method_name, _descriptor) {
-            ("wait", "()V") | ("wait", "(J)V") => {
-                match self.monitor_wait(this) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        let msg = self.intern_string(&e);
-                        let exc = crate::heap::JObject::new("java/lang/IllegalMonitorStateException");
-                        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
-                        *self.pending_exception_mut() = Some(exc);
-                    }
+        {
+            let result = match (method_name, _descriptor) {
+                ("wait", "()V") | ("wait", "(J)V") => Some(self.monitor_wait(this)),
+                ("notify", "()V") => Some(self.monitor_notify(this)),
+                ("notifyAll", "()V") => Some(self.monitor_notify_all(this)),
+                _ => None,
+            };
+            if let Some(res) = result {
+                if let Err(e) = res {
+                    self.throw_illegal_monitor_state(&e);
                 }
                 return Some(JValue::Void);
             }
-            ("notify", "()V") => {
-                match self.monitor_notify(this) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        let msg = self.intern_string(&e);
-                        let exc = crate::heap::JObject::new("java/lang/IllegalMonitorStateException");
-                        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
-                        *self.pending_exception_mut() = Some(exc);
-                    }
-                }
-                return Some(JValue::Void);
-            }
-            ("notifyAll", "()V") => {
-                match self.monitor_notify_all(this) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        let msg = self.intern_string(&e);
-                        let exc = crate::heap::JObject::new("java/lang/IllegalMonitorStateException");
-                        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
-                        *self.pending_exception_mut() = Some(exc);
-                    }
-                }
-                return Some(JValue::Void);
-            }
-            _ => {}
         }
         // ----- java.lang.Thread native methods -----
         if this.borrow().class_name == "java/lang/Thread"

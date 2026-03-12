@@ -529,6 +529,14 @@ impl Vm {
         Ok(())
     }
 
+    /// Set a pending IllegalMonitorStateException from an error message.
+    pub(in crate::interpreter) fn throw_illegal_monitor_state(&mut self, err_msg: &str) {
+        let msg = self.intern_string(err_msg);
+        let exc = crate::heap::JObject::new("java/lang/IllegalMonitorStateException");
+        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        *self.pending_exception_mut() = Some(exc);
+    }
+
     /// Mutable access to the current thread's pending exception.
     #[inline]
     pub(in crate::interpreter) fn pending_exception_mut(&mut self) -> &mut Option<JRef> {
