@@ -7,6 +7,11 @@ export interface ClassDecl {
   interfaces?: string[];
   isRecord?: boolean;
   recordComponents?: ParamDecl[];
+  isFinal?: boolean;
+  isAbstract?: boolean;
+  isSealed?: boolean;
+  isNonSealed?: boolean;
+  permittedSubclasses?: string[]; // internal JVM names from permits clause
   fields: FieldDecl[];
   methods: MethodDecl[];
   nestedClasses: ClassDecl[];
@@ -22,6 +27,8 @@ export interface FieldDecl {
   isStatic: boolean;
   isPrivate?: boolean;
   isFinal?: boolean;
+  isVolatile?: boolean;
+  isTransient?: boolean;
   isEnumConstant?: boolean;
   initializer?: Expr;
 }
@@ -32,6 +39,8 @@ export interface MethodDecl {
   params: ParamDecl[];
   body: Stmt[];
   isStatic: boolean;
+  isPrivate?: boolean;
+  isFinal?: boolean;
   isAbstract?: boolean;
   isSynchronized?: boolean;
   throwsTypes?: string[];

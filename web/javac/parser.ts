@@ -152,7 +152,9 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     while (i < tokens.length && (
       tokens[i].kind === TokenKind.KwPublic ||
       tokens[i].kind === TokenKind.KwAbstract ||
-      tokens[i].kind === TokenKind.KwFinal
+      tokens[i].kind === TokenKind.KwFinal ||
+      tokens[i].kind === TokenKind.KwSealed ||
+      tokens[i].kind === TokenKind.KwNonSealed
     )) i++;
     const k = tokens[i]?.kind;
     return k === TokenKind.KwClass || k === TokenKind.KwInterface ||
@@ -197,15 +199,30 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
   }
 
   function parseOneClass(): ClassDecl {
-    // Skip modifiers before class/record
-    while (at(TokenKind.KwPublic) || at(TokenKind.KwAbstract) || at(TokenKind.KwFinal)) advance();
+    // Collect modifiers before class/record
+    let isFinal = false;
+    let isAbstract = false;
+    let isSealed = false;
+    let isNonSealed = false;
+    while (true) {
+      if (at(TokenKind.KwPublic)) { advance(); continue; }
+      if (at(TokenKind.KwAbstract)) { advance(); isAbstract = true; continue; }
+      if (at(TokenKind.KwFinal)) { advance(); isFinal = true; continue; }
+      if (at(TokenKind.KwSealed)) { advance(); isSealed = true; continue; }
+      if (at(TokenKind.KwNonSealed)) { advance(); isNonSealed = true; continue; }
+      break;
+    }
+
+    // Validate modifier combinations
+    if (isSealed && isFinal) throw new Error("'sealed' and 'final' cannot be combined");
+    if (isSealed && isNonSealed) throw new Error("'sealed' and 'non-sealed' cannot be combined");
 
     if (at(TokenKind.At) && tokens[pos + 1]?.kind === TokenKind.KwInterface) {
       return parseAnnotationDecl();
     }
 
     if (at(TokenKind.KwInterface)) {
-      return parseInterfaceDecl();
+      return parseInterfaceDecl(isAbstract, isFinal, isSealed, isNonSealed);
     }
 
     if (at(TokenKind.KwEnum)) {
@@ -344,6 +361,11 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     if (match(TokenKind.KwImplements)) {
       interfaces.push(...parseTypeNameList());
     }
+    let permittedSubclasses: string[] | undefined;
+    if (match(TokenKind.KwPermits)) {
+      if (!isSealed) throw new Error("'permits' clause requires 'sealed' modifier");
+      permittedSubclasses = parseTypeNameList();
+    }
 
     expect(TokenKind.LBrace);
 
@@ -363,6 +385,11 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       interfaces,
       isRecord: false,
       recordComponents: [],
+      isFinal: isFinal || undefined,
+      isAbstract: isAbstract || undefined,
+      isSealed: isSealed || undefined,
+      isNonSealed: isNonSealed || undefined,
+      permittedSubclasses,
       fields,
       methods,
       nestedClasses,
@@ -372,13 +399,23 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     };
   }
 
-  function parseInterfaceDecl(): ClassDecl {
+  function parseInterfaceDecl(
+    isAbstract = false,
+    isFinal = false,
+    isSealed = false,
+    isNonSealed = false,
+  ): ClassDecl {
     expect(TokenKind.KwInterface);
     const name = expect(TokenKind.Ident).value;
     skipTypeParametersIfPresent();
     const interfaces: string[] = [];
     if (match(TokenKind.KwExtends)) {
       interfaces.push(...parseTypeNameList());
+    }
+    let permittedSubclasses: string[] | undefined;
+    if (match(TokenKind.KwPermits)) {
+      if (!isSealed) throw new Error("'permits' clause requires 'sealed' modifier");
+      permittedSubclasses = parseTypeNameList();
     }
     expect(TokenKind.LBrace);
     const fields: FieldDecl[] = [];
@@ -393,6 +430,9 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       kind: "interface",
       superClass: "java/lang/Object",
       interfaces,
+      isSealed: isSealed || undefined,
+      isNonSealed: isNonSealed || undefined,
+      permittedSubclasses,
       fields,
       methods,
       nestedClasses,
@@ -529,7 +569,12 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     let isStatic = false;
     let isAbstract = ownerKind === "interface" || ownerKind === "annotation";
     let isPrivate = false;
+    let isFinal = false;
+    let isVolatile = false;
+    let isTransient = false;
     let isSynchronized = false;
+    let isSealed = false;
+    let isNonSealed = false;
 
     // Consume modifiers
     while (true) {
@@ -537,8 +582,12 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       if (at(TokenKind.KwPrivate)) { advance(); isPrivate = true; continue; }
       if (at(TokenKind.KwStatic)) { advance(); isStatic = true; continue; }
       if (at(TokenKind.KwAbstract)) { advance(); isAbstract = true; continue; }
-      if (at(TokenKind.KwFinal)) { advance(); continue; }
+      if (at(TokenKind.KwFinal)) { advance(); isFinal = true; continue; }
+      if (at(TokenKind.KwVolatile)) { advance(); isVolatile = true; continue; }
+      if (at(TokenKind.KwTransient)) { advance(); isTransient = true; continue; }
       if (at(TokenKind.KwDefault)) { advance(); continue; }
+      if (at(TokenKind.KwSealed)) { advance(); isSealed = true; continue; }
+      if (at(TokenKind.KwNonSealed)) { advance(); isNonSealed = true; continue; }
       if (at(TokenKind.KwSynchronized)) {
         if (ownerKind === "interface" || ownerKind === "annotation") {
           throw new Error("'synchronized' is not allowed on interface or annotation members");
@@ -547,6 +596,10 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       }
       break;
     }
+
+    // Validate modifier combinations for nested sealed types
+    if (isSealed && isFinal) throw new Error("'sealed' and 'final' cannot be combined");
+    if (isSealed && isNonSealed) throw new Error("'sealed' and 'non-sealed' cannot be combined");
 
     // Nested type declaration: class/interface Inner { ... }
     // Nested interfaces are implicitly static in Java.
@@ -570,6 +623,11 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         if (nestedKind === "class" && match(TokenKind.KwImplements)) {
           nestedInterfaces.push(...parseTypeNameList());
         }
+        let nestedPermitted: string[] | undefined;
+        if (match(TokenKind.KwPermits)) {
+          if (!isSealed) throw new Error("'permits' clause requires 'sealed' modifier");
+          nestedPermitted = parseTypeNameList();
+        }
         expect(TokenKind.LBrace);
         const nf: FieldDecl[] = [];
         const nm: MethodDecl[] = [];
@@ -587,6 +645,11 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
           interfaces: nestedInterfaces,
           isRecord: false,
           recordComponents: [],
+          isFinal: isFinal || undefined,
+          isAbstract: (isAbstract && nestedKind !== "interface") || undefined,
+          isSealed: isSealed || undefined,
+          isNonSealed: isNonSealed || undefined,
+          permittedSubclasses: nestedPermitted,
           fields: nf,
           methods: nm,
           nestedClasses: nnc,
@@ -611,6 +674,11 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       if (match(TokenKind.KwImplements)) {
         nestedInterfaces.push(...parseTypeNameList());
       }
+      let nestedPermitted: string[] | undefined;
+      if (match(TokenKind.KwPermits)) {
+        if (!isSealed) throw new Error("'permits' clause requires 'sealed' modifier");
+        nestedPermitted = parseTypeNameList();
+      }
       expect(TokenKind.LBrace);
       const nf: FieldDecl[] = [];
       const nm: MethodDecl[] = [];
@@ -628,6 +696,11 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         interfaces: nestedInterfaces,
         isRecord: false,
         recordComponents: [],
+        isFinal: isFinal || undefined,
+        isAbstract: isAbstract || undefined,
+        isSealed: isSealed || undefined,
+        isNonSealed: isNonSealed || undefined,
+        permittedSubclasses: nestedPermitted,
         fields: nf,
         methods: nm,
         nestedClasses: nnc,
@@ -688,7 +761,7 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         advance(); // default
         parseExpr(); // ignore default value for now
         expect(TokenKind.Semi);
-        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: true, isSynchronized, throwsTypes });
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isPrivate: isPrivate || undefined, isFinal: isFinal || undefined, isAbstract: true, isSynchronized, throwsTypes });
         return;
       }
       if (match(TokenKind.Semi)) {
@@ -696,12 +769,12 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         if (!inInterfaceLike && !isAbstract) {
           throw new Error("Method declarations in classes, enums, and records must have a body unless declared abstract.");
         }
-        methods.push({ name, returnType: retType, params, body: [], isStatic, isAbstract: inInterfaceLike || isAbstract, isSynchronized, throwsTypes });
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isPrivate: isPrivate || undefined, isFinal: isFinal || undefined, isAbstract: inInterfaceLike || isAbstract, isSynchronized, throwsTypes });
       } else {
         expect(TokenKind.LBrace);
         const body = parseBlock();
         expect(TokenKind.RBrace);
-        methods.push({ name, returnType: retType, params, body, isStatic, isAbstract: false, isSynchronized, throwsTypes });
+        methods.push({ name, returnType: retType, params, body, isStatic, isPrivate: isPrivate || undefined, isFinal: isFinal || undefined, isAbstract: false, isSynchronized, throwsTypes });
       }
     } else {
       // Field
@@ -718,7 +791,9 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         isStatic: inInterfaceLike || isStatic,
         initializer: init,
         isPrivate: inInterfaceLike ? false : inRecord && !isStatic ? true : isPrivate,
-        isFinal: inRecord && !isStatic ? true : inInterfaceLike ? true : undefined,
+        isFinal: inRecord && !isStatic ? true : inInterfaceLike ? true : isFinal || undefined,
+        isVolatile: isVolatile || undefined,
+        isTransient: isTransient || undefined,
       });
     }
   }
