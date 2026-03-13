@@ -184,9 +184,11 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     while (!at(TokenKind.EOF)) {
       parseMember(fields, methods, nestedClasses, className, "class");
     }
-    // In implicit classes, main() is implicitly static (JEP 463)
+    // In implicit classes, void main() is implicitly static (JEP 463)
     for (const m of methods) {
-      if (m.name === "main") m.isStatic = true;
+      if (m.name === "main" && !m.isStatic && m.params.length === 0 && m.returnType === "void") {
+        m.isStatic = true;
+      }
     }
     return {
       name: className,
