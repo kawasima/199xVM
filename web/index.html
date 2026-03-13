@@ -474,7 +474,8 @@
   </script>
 
   <script type="module">
-    import { compile, disassemble, parseBundleMeta, buildMethodRegistry, setMethodRegistry, readJar, classFilesToBundle } from "./javac.js?v=__BUILD_TIMESTAMP__";
+    const _javacVer = (typeof "__BUILD_TIMESTAMP__" === "string" && "__BUILD_TIMESTAMP__".startsWith("__")) ? Date.now() : "__BUILD_TIMESTAMP__";
+    const { compile, disassemble, parseBundleMeta, buildMethodRegistry, setMethodRegistry, readJar, classFilesToBundle } = await import(`./javac.js?v=${_javacVer}`);
 
     // CodeMirror 6
     import { EditorState } from "https://esm.sh/@codemirror/state@6";
