@@ -1,5 +1,5 @@
 
-use crate::heap::{JRef, JValue, NativePayload};
+use crate::heap::{JObject, JRef, JValue, NativePayload};
 
 use super::Vm;
 use super::descriptors::*;
@@ -147,6 +147,12 @@ impl Vm {
                         JValue::Ref(Some(r)) => self.invoke_virtual(r, &impl_class, &impl_method, &impl_desc, full_args),
                         _ => Err(format!("Lambda invoke_virtual: expected Ref for this, got {recv:?}")),
                     }
+                } else if ref_kind == 8 {
+                    // newinvokespecial — constructor reference (e.g. Age::new)
+                    self.ensure_class_init(&impl_class)?;
+                    let obj = JObject::new(&impl_class);
+                    self.invoke_special(obj.clone(), &impl_class, &impl_method, &impl_desc, full_args)?;
+                    Ok(JValue::Ref(Some(obj)))
                 } else {
                     self.invoke_static(&impl_class, &impl_method, &impl_desc, full_args)
                 }?;
