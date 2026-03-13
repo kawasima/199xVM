@@ -9,3 +9,8 @@ raoh-classes/
 jdk-shim/bundle.bin
 jdk-shim/out/
 web/javac.js
+web/raoh.jar
+web/raoh-json.jar
+web/jackson-core.jar
+web/jackson-databind.jar
+web/jackson-annotations.jar
