@@ -1167,6 +1167,48 @@ describe("Parser", () => {
     const cls = parse(lex(src));
     assert.equal(cls.methods[0].isPrivate, true);
   });
+
+  test("final interface is rejected", () => {
+    assert.throws(() => parse(lex(`public final interface Foo { }`)),
+      /final.*not allowed on interface/i);
+  });
+
+  test("conflicting access modifiers are rejected", () => {
+    assert.throws(() => parse(lex(`public class X { public private void m() {} }`)),
+      /only one of.*public.*protected.*private/i);
+  });
+
+  test("protected on interface method is rejected", () => {
+    assert.throws(() => parse(lex(`public interface Foo { protected void m(); }`)),
+      /protected.*not allowed on interface/i);
+  });
+
+  test("final on interface method is rejected", () => {
+    assert.throws(() => parse(lex(`public interface Foo { final void m(); }`)),
+      /final.*not allowed on interface/i);
+  });
+
+  test("final constructor is rejected", () => {
+    assert.throws(() => parse(lex(`public class Foo { final Foo() {} }`)),
+      /final.*not allowed on constructors/i);
+  });
+
+  test("abstract constructor is rejected", () => {
+    assert.throws(() => parse(lex(`public class Foo { abstract Foo() {} }`)),
+      /abstract.*not allowed on constructors/i);
+  });
+
+  test("private constructor visibility is tracked", () => {
+    const cls = parse(lex(`public class Foo { private Foo() {} }`));
+    const ctor = cls.methods.find(m => m.name === "<init>");
+    assert.equal(ctor!.isPrivate, true);
+  });
+
+  test("protected constructor visibility is tracked", () => {
+    const cls = parse(lex(`public class Foo { protected Foo() {} }`));
+    const ctor = cls.methods.find(m => m.name === "<init>");
+    assert.equal(ctor!.isProtected, true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3201,6 +3243,26 @@ describe("Parser – new syntax", () => {
     const info = parseClassFile(bytes);
     assert.equal(info.fieldFlags.get("x")! & 0x0004, 0x0004, "ACC_PROTECTED should be set");
     assert.ok(!(info.fieldFlags.get("x")! & 0x0001), "ACC_PUBLIC should not be set");
+  });
+
+  test("private constructor emits ACC_PRIVATE flag", () => {
+    const bytes = compile(`public class PrivCtor {
+      private PrivCtor() {}
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.methodFlags.get("<init>")! & 0x0002, 0x0002, "ACC_PRIVATE should be set");
+    assert.ok(!(info.methodFlags.get("<init>")! & 0x0001), "ACC_PUBLIC should not be set");
+  });
+
+  test("protected constructor emits ACC_PROTECTED flag", () => {
+    const bytes = compile(`public class ProtCtor {
+      protected ProtCtor() {}
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.methodFlags.get("<init>")! & 0x0004, 0x0004, "ACC_PROTECTED should be set");
+    assert.ok(!(info.methodFlags.get("<init>")! & 0x0001), "ACC_PUBLIC should not be set");
   });
 
   test("regular class does not have ACC_FINAL or ACC_ABSTRACT", () => {
