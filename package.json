@@ -24,6 +24,7 @@
     "build:javac": "esbuild web/javac.ts --bundle --format=esm --outfile=web/javac.js --target=es2020",
     "watch:javac": "esbuild web/javac.ts --bundle --format=esm --outfile=web/javac.js --target=es2020 --watch",
     "build:dist": "npm run build:javac && mkdir -p dist && cp web/javac.js dist/ && sed \"s/__BUILD_TIMESTAMP__/$(date +%s)/g\" web/index.html > dist/index.html",
+    "fetch:jars": "mvn dependency:copy -Dartifact=net.unit8.raoh:raoh:0.4.0 -DoutputDirectory=web -Dmdep.stripVersion=false && mvn dependency:copy -Dartifact=net.unit8.raoh:raoh-json:0.4.0 -DoutputDirectory=web -Dmdep.stripVersion=false && mvn dependency:copy -Dartifact=com.fasterxml.jackson.core:jackson-annotations:3.0-rc5 -DoutputDirectory=web -Dmdep.stripVersion=false && mvn dependency:copy -Dartifact=tools.jackson.core:jackson-core:3.1.0 -DoutputDirectory=web -Dmdep.stripVersion=false && mvn dependency:copy -Dartifact=tools.jackson.core:jackson-databind:3.1.0 -DoutputDirectory=web -Dmdep.stripVersion=false",
     "test": "npm run build:javac && node --experimental-strip-types --test web/javac.test.ts"
   },
   "keywords": [],
