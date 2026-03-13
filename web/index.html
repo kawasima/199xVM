@@ -386,12 +386,15 @@
         <div class="cat-item">
           Raoh <span class="arrow">&#9654;</span>
           <div class="cat-submenu">
-            <div class="snippet-item" data-key="raoh_object_string">ObjectDecoders: string</div>
-            <div class="snippet-item" data-key="raoh_object_number">ObjectDecoders: int/decimal</div>
-            <div class="snippet-item" data-key="raoh_map_fields">MapDecoders: field decode</div>
-            <div class="snippet-item" data-key="raoh_map_combine">MapDecoders: combine</div>
-            <div class="snippet-item" data-key="raoh_json_fields">JsonDecoders: field decode</div>
-            <div class="snippet-item" data-key="raoh_json_combine">JsonDecoders: combine</div>
+            <div class="snippet-item" data-key="raoh_primitives">Primitives &amp; constraints</div>
+            <div class="snippet-item" data-key="raoh_domain_map">Map to domain type</div>
+            <div class="snippet-item" data-key="raoh_combine">combine + field</div>
+            <div class="snippet-item" data-key="raoh_nested">Nested objects</div>
+            <div class="snippet-item" data-key="raoh_list">List decode</div>
+            <div class="snippet-item" data-key="raoh_optional">Optional / Nullable</div>
+            <div class="snippet-item" data-key="raoh_enum">Enum + withDefault</div>
+            <div class="snippet-item" data-key="raoh_errors">Error accumulation</div>
+            <div class="snippet-item" data-key="raoh_json">JSON decode</div>
           </div>
         </div>
         <div class="cat-item">
@@ -833,102 +836,267 @@ public class RecordModernDemo {
     }
 }
 `,
-      raoh_object_string: `import net.unit8.raoh.Result;
+      raoh_primitives: `import net.unit8.raoh.Result;
 import static net.unit8.raoh.ObjectDecoders.*;
 
-public class RaohObjectString {
+public class RaohPrimitives {
     public static String run() {
-        Result r = string().decode("raoh");
-        return "decoded=" + r.getOrThrow();
-    }
-}
-`,
-      raoh_object_number: `import net.unit8.raoh.Result;
-import static net.unit8.raoh.ObjectDecoders.*;
-
-public class RaohObjectNumber {
-    public static String run() {
+        // Basic decoding
+        Result s = string().decode("hello");
         Result i = int_().decode(42);
-        Result d = decimal().decode("123.45");
-        return "int=" + i.getOrThrow() + " decimal=" + d.getOrThrow();
+        Result b = bool().decode(true);
+        Result d = decimal().decode(19.99);
+
+        // String constraints: trim + lowercase + email
+        Result email = string().trim().toLowerCase().email()
+                .decode("  USER@Example.COM  ");
+
+        // Numeric constraint: range
+        Result age = int_().range(0, 150).decode(25);
+
+        // Type mismatch → error
+        Result bad = int_().decode("not a number");
+
+        // String length constraint
+        Result tooShort = string().minLength(3).maxLength(20).decode("ab");
+
+        return s + " | " + i + " | " + b + " | " + d
+                + "\\nemail=" + email
+                + "\\nage=" + age
+                + "\\nbad=" + bad
+                + "\\ntooShort=" + tooShort;
     }
 }
 `,
-      raoh_map_fields: `import java.util.HashMap;
-import java.util.Map;
-import net.unit8.raoh.Result;
+      raoh_domain_map: `import net.unit8.raoh.Result;
+import static net.unit8.raoh.ObjectDecoders.*;
+
+record Email(String value) {}
+record Age(int value) {}
+
+public class RaohDomainMap {
+    public static String run() {
+        // map() converts raw values to domain types at the boundary
+        var emailDec = string().trim().toLowerCase().email().map(Email::new);
+        var ageDec = int_().range(0, 150).map(Age::new);
+
+        Result email = emailDec.decode("  ALICE@example.com  ");
+        Result age = ageDec.decode(25);
+        Result badAge = ageDec.decode(300);
+
+        return email + "\\n" + age + "\\n" + badAge;
+    }
+}
+`,
+      raoh_combine: `import java.util.Map;
+import net.unit8.raoh.*;
 import static net.unit8.raoh.ObjectDecoders.*;
 import static net.unit8.raoh.map.MapDecoders.*;
 
-public class RaohMapFields {
-    public static String run() {
-        Map m = new HashMap();
-        m.put("name", "alice");
-        m.put("age", 41);
+record User(String name, int age) {}
 
-        Result name = field("name", string()).decode(m);
-        Result age = field("age", int_()).decode(m);
-        return name.getOrThrow() + ":" + age.getOrThrow();
+public class RaohCombine {
+    public static String run() {
+        // combine assembles multiple fields — errors accumulate
+        var userDec = combine(
+                field("name", string().nonBlank()),
+                field("age", int_().range(0, 150))
+        ).map(User::new);
+
+        // Success case
+        Result ok = userDec.decode(Map.of("name", "alice", "age", 30));
+
+        // Both fields invalid → both errors returned at once
+        Result errs = userDec.decode(Map.of("name", "", "age", 300));
+
+        return ok + "\\n" + errs;
     }
 }
 `,
-      raoh_map_combine: `import java.util.HashMap;
-import java.util.Map;
-import net.unit8.raoh.Decoder;
-import net.unit8.raoh.Result;
+      raoh_nested: `import java.util.Map;
+import net.unit8.raoh.*;
 import static net.unit8.raoh.ObjectDecoders.*;
 import static net.unit8.raoh.map.MapDecoders.*;
 
-public class RaohMapCombine {
+record Address(String city, String zip) {}
+record Customer(String name, Address address) {}
+
+public class RaohNested {
     public static String run() {
-        Map m = new HashMap();
-        m.put("name", "mika");
-        m.put("age", 20);
+        // Nested object decoder — error paths compose as /address/city
+        var addressDec = combine(
+                field("city", string().nonBlank()),
+                field("zip", string().nonBlank())
+        ).map(Address::new);
 
-        Decoder decoder = combine(
-            field("name", string()),
-            field("age", int_())
-        ).map((name, age) -> ((String) name).toUpperCase() + ":" + age);
+        var customerDec = combine(
+                field("name", string().nonBlank()),
+                field("address", nested(addressDec))
+        ).map(Customer::new);
 
-        Result r = decoder.decode(m);
-        return (String) r.getOrThrow();
+        Result ok = customerDec.decode(Map.of(
+                "name", "Alice",
+                "address", Map.of("city", "Tokyo", "zip", "100-0001")
+        ));
+
+        Result bad = customerDec.decode(Map.of(
+                "name", "",
+                "address", Map.of("city", "", "zip", "")
+        ));
+
+        return ok + "\\n" + bad;
     }
 }
 `,
-      raoh_json_fields: `import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.json.JsonMapper;
-import net.unit8.raoh.Result;
-import static net.unit8.raoh.json.JsonDecoders.*;
+      raoh_list: `import java.util.List;
+import java.util.Map;
+import net.unit8.raoh.*;
+import static net.unit8.raoh.ObjectDecoders.*;
+import static net.unit8.raoh.map.MapDecoders.*;
 
-public class RaohJsonFields {
-    public static String run() throws Exception {
-        JsonMapper mapper = JsonMapper.builder().build();
-        JsonNode node = mapper.readTree("{\\"name\\":\\"ren\\",\\"age\\":28}");
+record OrderItem(String productId, int quantity) {}
 
-        Result name = field("name", string()).decode(node);
-        Result age = field("age", int_()).decode(node);
-        return name.getOrThrow() + ":" + age.getOrThrow();
+public class RaohList {
+    public static String run() {
+        // List elements are all checked — errors include index paths
+        var itemDec = combine(
+                field("productId", string().nonBlank()),
+                field("quantity", int_().positive())
+        ).map(OrderItem::new);
+
+        var itemsDec = field("items", list(nested(itemDec)).nonempty());
+
+        Result ok = itemsDec.decode(Map.of("items", List.of(
+                Map.of("productId", "A001", "quantity", 3),
+                Map.of("productId", "B002", "quantity", 1)
+        )));
+
+        // Second item has errors → paths show /items/1/productId, /items/1/quantity
+        Result bad = itemsDec.decode(Map.of("items", List.of(
+                Map.of("productId", "A001", "quantity", 3),
+                Map.of("productId", "", "quantity", -1)
+        )));
+
+        return ok + "\\n" + bad;
     }
 }
 `,
-      raoh_json_combine: `import tools.jackson.databind.JsonNode;
+      raoh_optional: `import java.util.HashMap;
+import java.util.Map;
+import net.unit8.raoh.*;
+import static net.unit8.raoh.ObjectDecoders.*;
+import static net.unit8.raoh.map.MapDecoders.*;
+
+public class RaohOptional {
+    public static String run() {
+        // Three states: present / null / absent
+        // optionalField → Optional.empty when field absent
+        Result absent = optionalField("middleName", string())
+                .decode(Map.of());
+
+        // nullable → allows explicit null
+        var m = new HashMap<String, Object>();
+        m.put("nickname", null);
+        Result nullable = field("nickname", nullable(string()))
+                .decode(m);
+
+        // optionalNullableField → Presence (Present / PresentNull / Absent)
+        Result present = optionalNullableField("bio", string())
+                .decode(Map.of("bio", "hello"));
+
+        var m2 = new HashMap<String, Object>();
+        m2.put("bio", null);
+        Result presentNull = optionalNullableField("bio", string())
+                .decode(m2);
+
+        Result absentField = optionalNullableField("bio", string())
+                .decode(Map.of());
+
+        return "absent=" + absent
+                + "\\nnullable=" + nullable
+                + "\\npresent=" + present
+                + "\\npresentNull=" + presentNull
+                + "\\nabsentField=" + absentField;
+    }
+}
+`,
+      raoh_enum: `import java.util.Map;
+import net.unit8.raoh.*;
+import static net.unit8.raoh.ObjectDecoders.*;
+import static net.unit8.raoh.map.MapDecoders.*;
+import static net.unit8.raoh.Decoders.*;
+
+enum Role { ADMIN, MEMBER, GUEST }
+
+public class RaohEnum {
+    public static String run() {
+        // Case-insensitive enum decoding
+        Result admin = field("role", enumOf(Role.class))
+                .decode(Map.of("role", "admin"));
+
+        // withDefault when field missing
+        Result defaultRole = field("role", withDefault(enumOf(Role.class), Role.MEMBER))
+                .decode(Map.of());
+
+        // Invalid value → error
+        Result bad = field("role", enumOf(Role.class))
+                .decode(Map.of("role", "superadmin"));
+
+        return admin + "\\n" + defaultRole + "\\n" + bad;
+    }
+}
+`,
+      raoh_errors: `import java.util.Map;
+import net.unit8.raoh.*;
+import static net.unit8.raoh.ObjectDecoders.*;
+import static net.unit8.raoh.map.MapDecoders.*;
+
+public class RaohErrors {
+    public static String run() {
+        // All errors accumulate — not short-circuited
+        var dec = combine(
+                field("email", string().email()),
+                field("age", int_().range(0, 150)),
+                field("name", string().nonBlank())
+        ).map((e, a, n) -> e + ":" + a + ":" + n);
+
+        Result result = dec.decode(Map.of("email", "bad", "age", 300, "name", ""));
+
+        // flatten() → path-keyed error map for form display
+        String flat = "";
+        if (result instanceof Err err) {
+            flat = err.issues().flatten().toString();
+        }
+
+        // Also show the result itself
+        return result + "\\nflatten=" + flat;
+    }
+}
+`,
+      raoh_json: `import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
-import net.unit8.raoh.Decoder;
-import net.unit8.raoh.Result;
+import net.unit8.raoh.*;
 import static net.unit8.raoh.json.JsonDecoders.*;
 
-public class RaohJsonCombine {
+record Person(String name, int age) {}
+
+public class RaohJson {
     public static String run() throws Exception {
         JsonMapper mapper = JsonMapper.builder().build();
-        JsonNode node = mapper.readTree("{\\"name\\":\\"alice\\",\\"age\\":42}");
 
-        Decoder decoder = combine(
-            field("name", string()),
-            field("age", int_())
-        ).map((name, age) -> name + ":" + age);
+        // Same decoder pattern, but reads from JSON
+        var personDec = combine(
+                field("name", string().nonBlank()),
+                field("age", int_().range(0, 150))
+        ).map(Person::new);
 
-        Result r = decoder.decode(node);
-        return (String) r.getOrThrow();
+        JsonNode ok = mapper.readTree("{\\"name\\":\\"alice\\",\\"age\\":30}");
+        Result valid = personDec.decode(ok);
+
+        JsonNode bad = mapper.readTree("{\\"name\\":\\"\\",\\"age\\":300}");
+        Result invalid = personDec.decode(bad);
+
+        return valid + "\\n" + invalid;
     }
 }
 `,
