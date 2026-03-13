@@ -43,6 +43,7 @@ import java.util.function.ToDoubleFunction;
 
 public class StreamImpl<T> implements Stream<T> {
     private final List<T> elements;
+    private Runnable closeHandler;
 
     public StreamImpl(List<T> elements) {
         this.elements = elements;
@@ -352,10 +353,20 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public Stream<T> onClose(Runnable closeHandler) {
+        if (this.closeHandler == null) {
+            this.closeHandler = closeHandler;
+        } else {
+            Runnable existing = this.closeHandler;
+            this.closeHandler = () -> { existing.run(); closeHandler.run(); };
+        }
         return this;
     }
 
     @Override
     public void close() {
+        if (closeHandler != null) {
+            closeHandler.run();
+            closeHandler = null;
+        }
     }
 }
