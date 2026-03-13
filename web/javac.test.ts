@@ -1577,6 +1577,25 @@ describe("Code generator", () => {
     } finally { resetMethodRegistry(); reloadShimRegistry(); }
   });
 
+  test("unimported class does not fall back to java/lang/ package", () => {
+    // DateTimeFormatter is in java.time.format, not java.lang.
+    // Without an explicit import, resolveClassName should return the bare name
+    // rather than silently emitting java/lang/DateTimeFormatter.
+    const bytes = compile(`
+      public class UnimportedClass {
+        public static String run() {
+          return DateTimeFormatter.ofPattern("yyyy");
+        }
+      }
+    `);
+    assertValidClassFile(bytes);
+    const text = new TextDecoder().decode(bytes);
+    assert.ok(!text.includes("java/lang/DateTimeFormatter"),
+      "must NOT emit java/lang/DateTimeFormatter for unimported class");
+    assert.ok(!text.includes("java/lang/DateTimeForm"),
+      "no java/lang/ prefix on DateTimeFormatter");
+  });
+
   test("named import resolves class reference", () => {
     const bytes = compile(`
       import net.unit8.raoh.Ok;
