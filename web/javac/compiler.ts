@@ -3308,7 +3308,7 @@ function resolveClassNameInDecl(classDecl: ClassDecl, classDecls: Map<string, Cl
       const candidate = `${pkg}/${name}`;
       if (hasKnownMethodOwnerPrefix(candidate)) return candidate;
     }
-    return `${classDecl.packageImports[0]}/${name}`;
+    return name;
   }
   return name;
 }
