@@ -338,11 +338,32 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         });
       }
       if (!recordMethods.some(m => m.name === "toString" && m.params.length === 0)) {
+        // Build "RecordName[f1=<v1>, f2=<v2>]" via string concatenation AST.
+        let toStringExpr: Expr = { kind: "stringLit", value: `${recordName}[` };
+        for (let ci = 0; ci < components.length; ci++) {
+          const c = components[ci];
+          const prefix = ci === 0 ? `${c.name}=` : `, ${c.name}=`;
+          toStringExpr = {
+            kind: "binary", op: "+",
+            left: toStringExpr,
+            right: { kind: "stringLit", value: prefix },
+          };
+          toStringExpr = {
+            kind: "binary", op: "+",
+            left: toStringExpr,
+            right: { kind: "fieldAccess", object: { kind: "this" }, field: c.name },
+          };
+        }
+        toStringExpr = {
+          kind: "binary", op: "+",
+          left: toStringExpr,
+          right: { kind: "stringLit", value: "]" },
+        };
         recordMethods.push({
           name: "toString",
           returnType: "String",
           params: [],
-          body: [{ kind: "return", value: { kind: "stringLit", value: `${recordName}[]` } }],
+          body: [{ kind: "return", value: toStringExpr }],
           isStatic: false,
         });
       }

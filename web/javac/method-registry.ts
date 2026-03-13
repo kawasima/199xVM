@@ -6,6 +6,7 @@ export interface MethodSig {
   paramTypes: Type[];
   isInterface?: boolean;
   isStatic?: boolean;
+  isAbstract?: boolean;
 }
 
 const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
@@ -296,6 +297,9 @@ export function findKnownFunctionalInterface(owner: string): FunctionalSig | und
     if (methodName === "<init>" || OBJECT_PUBLIC_INSTANCE_METHODS.has(signatureKey)) continue;
     const sig = knownMethods[key];
     if (!sig.isInterface || sig.isStatic) continue;
+    // Skip default (non-abstract) methods — only the SAM (abstract) method counts.
+    // isAbstract===false means the registry explicitly marked it as non-abstract.
+    if (sig.isAbstract === false) continue;
     candidates.push({ name: methodName, sig });
   }
   if (candidates.length !== 1) return undefined;

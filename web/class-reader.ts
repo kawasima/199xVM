@@ -255,11 +255,15 @@ export function buildMethodRegistry(classes: ClassMeta[]): Record<string, Method
       const { params } = parseMethodDescriptor(m.descriptor);
       const ret = descriptorToType(retDesc);
 
+      const isStatic = (m.accessFlags & 0x0008) !== 0;
+      const isAbstract = (m.accessFlags & 0x0400) !== 0;
       registry[key] = {
         owner: cls.name,
         returnType: ret,
         paramTypes: params,
         ...(isInterface ? { isInterface: true } : {}),
+        ...(isStatic ? { isStatic: true } : {}),
+        isAbstract,
       };
     }
   }
