@@ -171,6 +171,8 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/time/format/DecimalStyle.java"
   "$SHIM_SRC/java/time/format/DateTimeFormatter.java"
   "$SHIM_SRC/java/time/format/DateTimeFormatterBuilder.java"
+  "$SHIM_SRC/java/time/InstantSource.java"
+  "$SHIM_SRC/java/time/Clock.java"
   "$SHIM_SRC/java/time/Instant.java"
   "$SHIM_SRC/java/time/LocalDate.java"
   "$SHIM_SRC/java/time/LocalTime.java"
