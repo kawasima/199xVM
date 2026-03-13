@@ -552,7 +552,9 @@ function resolveClassName(ctx: CompileContext, name: string): string {
       const candidate = `${pkg}/${name}`;
       if (hasKnownMethodOwnerPrefix(candidate)) return candidate;
     }
-    return `${ctx.packageImports[0]}/${name}`;
+    // No package resolved — return the bare name rather than defaulting to
+    // java/lang/, which would silently mangle unimported class references.
+    return name;
   }
   return name;
 }
