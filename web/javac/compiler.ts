@@ -3884,6 +3884,24 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         compileStmt(initCtx, emitter, stmt);
       }
 
+      // Compact canonical constructors: synthesize field assignments after user body
+      if (method.isCompactConstructor && classDecl.isRecord && classDecl.recordComponents) {
+        for (const c of classDecl.recordComponents) {
+          const desc = typeToDescriptor(c.type);
+          const slot = initCtx.locals.find(l => l.name === c.name)?.slot;
+          if (slot === undefined) throw new Error(`Compact constructor: component ${c.name} not found in locals`);
+          emitter.emitAload(0); // this
+          if (desc === "J") emitter.emitLload(slot);
+          else if (desc === "F") emitter.emitFload(slot);
+          else if (desc === "D") emitter.emitDload(slot);
+          else if (desc === "I" || desc === "Z" || desc === "B" || desc === "C" || desc === "S") emitter.emitIload(slot);
+          else emitter.emitAload(slot);
+          const fRef = cp.addFieldref(classDecl.name, c.name, desc);
+          emitter.emit(0xb5); // putfield
+          emitter.emitU16(fRef);
+        }
+      }
+
       emitter.emit(0xb1); // return
       compiledMethods.push({
         nameIdx, descIdx, accessFlags,

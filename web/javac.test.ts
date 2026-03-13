@@ -1795,6 +1795,24 @@ public class VarInfer {
     assert.ok(text.includes("second"), "record component 'second'");
   });
 
+  test("compact canonical constructor parses", () => {
+    const src = `record R(int x, int y) { R { if (x < 0) x = 0; } }`;
+    const tokens = lex(src);
+    const decls = parseAll(tokens);
+    assert.equal(decls.length, 1);
+    assert.equal(decls[0].name, "R");
+    const init = decls[0].methods.find(m => m.name === "<init>");
+    assert.ok(init, "<init> method present");
+    assert.equal(init!.params.length, 2, "canonical constructor has 2 params");
+  });
+
+  test("compact canonical constructor compiles", () => {
+    const bytes = compile(`record R(int x, int y) { R { if (x < 0) x = 0; } }`);
+    assertValidClassFile(bytes);
+    const output = disassemble(bytes);
+    assert.ok(output.includes("putfield"), "compact constructor emits putfield for field assignment");
+  });
+
   // --- New feature tests ---
 
   test("compiles ternary expression", () => {
@@ -3850,6 +3868,25 @@ public class RecordToStringTest {
     assert.ok(!output.includes(`"Age[]"`), "toString must not be a literal 'Age[]', got: " + output);
     // Should reference the value field access
     assert.ok(output.includes("value") || output.includes("getfield"), "toString must access field value");
+  });
+
+  test("compact canonical constructor clamps field value at runtime", async () => {
+    const src = `
+record R(int x, int y) {
+    R {
+        if (x < 0) x = 0;
+    }
+}
+
+public class CompactCtorTest {
+    public static String run() {
+        R clamped = new R(-5, 3);
+        R normal  = new R(7, 3);
+        return clamped.x() + "," + normal.x();
+    }
+}`;
+    const result = await runSnippet(src, "CompactCtorTest");
+    assert.equal(result, "0,7");
   });
 
   test("RaohDomainMap compiles chain trim().toLowerCase().email().map() with invokevirtual", () => {
