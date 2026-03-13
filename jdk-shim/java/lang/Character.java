@@ -10661,13 +10661,12 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.7
      */
     public static boolean isAlphabetic(int codePoint) {
-        return (((((1 << Character.UPPERCASE_LETTER) |
+        return ((((1 << Character.UPPERCASE_LETTER) |
             (1 << Character.LOWERCASE_LETTER) |
             (1 << Character.TITLECASE_LETTER) |
             (1 << Character.MODIFIER_LETTER) |
             (1 << Character.OTHER_LETTER) |
-            (1 << Character.LETTER_NUMBER)) >> getType(codePoint)) & 1) != 0) ||
-            false;
+            (1 << Character.LETTER_NUMBER)) >> getType(codePoint)) & 1) != 0;
     }
 
     /**
@@ -11841,14 +11840,56 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @see     Character#UNASSIGNED UNASSIGNED
      * @see     Character#UPPERCASE_LETTER UPPERCASE_LETTER
      * @since   1.5
+     *
+     * <p><b>Shim note:</b> This implementation covers ASCII, Latin-1 Supplement,
+     * Latin Extended-A/B, Greek, Cyrillic, CJK Unified Ideographs, Hiragana,
+     * Katakana, Hangul syllables, and fullwidth forms. Characters outside these
+     * ranges return {@link #UNASSIGNED}.
      */
     public static int getType(int codePoint) {
+        // ASCII
         if (codePoint >= 'a' && codePoint <= 'z') return LOWERCASE_LETTER;
         if (codePoint >= 'A' && codePoint <= 'Z') return UPPERCASE_LETTER;
         if (codePoint >= '0' && codePoint <= '9') return DECIMAL_DIGIT_NUMBER;
         if (codePoint == ' ') return SPACE_SEPARATOR;
         if (codePoint >= 0x0000 && codePoint <= 0x001F) return CONTROL;
         if (codePoint >= 0x007F && codePoint <= 0x009F) return CONTROL;
+        // Latin-1 Supplement uppercase (À–Ö, Ø–Þ)
+        if ((codePoint >= 0x00C0 && codePoint <= 0x00D6) ||
+            (codePoint >= 0x00D8 && codePoint <= 0x00DE)) return UPPERCASE_LETTER;
+        // Latin-1 Supplement lowercase (à–ö, ø–ÿ) + ß
+        if (codePoint == 0x00DF ||
+            (codePoint >= 0x00E0 && codePoint <= 0x00F6) ||
+            (codePoint >= 0x00F8 && codePoint <= 0x00FF)) return LOWERCASE_LETTER;
+        // Latin Extended-A/B (U+0100–U+024F): alternating upper/lower pairs
+        if (codePoint >= 0x0100 && codePoint <= 0x024F) {
+            if (codePoint == 0x0131 || codePoint == 0x0138 || codePoint == 0x0149 ||
+                codePoint == 0x017F) return LOWERCASE_LETTER;
+            return (codePoint & 1) == 0 ? UPPERCASE_LETTER : LOWERCASE_LETTER;
+        }
+        // Greek and Coptic uppercase (Α–Ω)
+        if (codePoint >= 0x0391 && codePoint <= 0x03A9) return UPPERCASE_LETTER;
+        // Greek lowercase (α–ω)
+        if (codePoint >= 0x03B1 && codePoint <= 0x03C9) return LOWERCASE_LETTER;
+        // Cyrillic uppercase (А–Я)
+        if (codePoint >= 0x0410 && codePoint <= 0x042F) return UPPERCASE_LETTER;
+        // Cyrillic lowercase (а–я + ё)
+        if (codePoint >= 0x0430 && codePoint <= 0x044F) return LOWERCASE_LETTER;
+        if (codePoint == 0x0451) return LOWERCASE_LETTER;
+        // CJK Unified Ideographs
+        if (codePoint >= 0x4E00 && codePoint <= 0x9FFF) return OTHER_LETTER;
+        if (codePoint >= 0x3400 && codePoint <= 0x4DBF) return OTHER_LETTER;
+        if (codePoint >= 0xF900 && codePoint <= 0xFAFF) return OTHER_LETTER;
+        // Hiragana / Katakana
+        if (codePoint >= 0x3041 && codePoint <= 0x3096) return OTHER_LETTER;
+        if (codePoint >= 0x30A1 && codePoint <= 0x30FA) return OTHER_LETTER;
+        // Hangul syllables
+        if (codePoint >= 0xAC00 && codePoint <= 0xD7A3) return OTHER_LETTER;
+        // Fullwidth digits (０–９)
+        if (codePoint >= 0xFF10 && codePoint <= 0xFF19) return DECIMAL_DIGIT_NUMBER;
+        // Fullwidth Latin uppercase (Ａ–Ｚ) / lowercase (ａ–ｚ)
+        if (codePoint >= 0xFF21 && codePoint <= 0xFF3A) return UPPERCASE_LETTER;
+        if (codePoint >= 0xFF41 && codePoint <= 0xFF5A) return LOWERCASE_LETTER;
         return UNASSIGNED;
     }
 
