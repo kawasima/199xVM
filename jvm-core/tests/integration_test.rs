@@ -382,3 +382,19 @@ fn compact_source_file() {
     );
     assert_eq!(result, "ok");
 }
+
+// ---------------------------------------------------------------------------
+// Lambda default method dispatch
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lambda_default_method() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "LambdaDefaultMethodTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "hello:default");
+}
