@@ -486,94 +486,71 @@
     // Snippet library
     // -------------------------------------------------------------------------
     const SNIPPETS = {
-      hello: `public class Hello {
-    public static String run() {
-        return "Hello, World!";
-    }
+      hello: `void main() {
+    IO.println("Hello, World!");
 }
 `,
-      arithmetic: `public class Arithmetic {
-    public static String run() {
-        int a = 10;
-        int b = 3;
-        int sum = a + b;
-        int diff = a - b;
-        int prod = a * b;
-        int quot = a / b;
-        int rem = a % b;
-        return sum + " " + diff + " " + prod + " " + quot + " " + rem;
-    }
+      arithmetic: `void main() {
+    int a = 10;
+    int b = 3;
+    IO.println(a + b);
+    IO.println(a - b);
+    IO.println(a * b);
+    IO.println(a / b);
+    IO.println(a % b);
 }
 `,
-      strings: `public class StringOps {
-    public static String run() {
-        String s = "Hello, Java!";
-        int len = s.length();
-        String upper = s.toUpperCase();
-        String sub = s.substring(7);
-        boolean starts = s.startsWith("Hello");
-        return "len=" + len + " upper=" + upper + " sub=" + sub + " starts=" + starts;
-    }
+      strings: `void main() {
+    String s = "Hello, Java!";
+    IO.println("len=" + s.length());
+    IO.println("upper=" + s.toUpperCase());
+    IO.println("sub=" + s.substring(7));
+    IO.println("starts=" + s.startsWith("Hello"));
 }
 `,
-      text_block: `public class TextBlockDemo {
-    public static String run() {
-        String json = """
-                {
-                  "name": "199xVM",
-                  "kind": "demo"
-                }
-                """;
-        return json.trim();
-    }
+      text_block: `void main() {
+    String json = """
+            {
+              "name": "199xVM",
+              "kind": "demo"
+            }
+            """;
+    IO.println(json.trim());
 }
 `,
-      string_format: `public class StringFormat {
-    public static String run() {
-        String name = "Java";
-        int year = 1995;
-        return "Hello, %s! Born in %d.".formatted(name, year);
-    }
+      string_format: `void main() {
+    String name = "Java";
+    int year = 1995;
+    IO.println("Hello, %s! Born in %d.".formatted(name, year));
 }
 `,
-      loop: `public class LoopTest {
-    public static String run() {
-        int sum = 0;
-        for (int i = 1; i <= 10; i++) {
-            sum = sum + i;
-        }
-        return "sum(1..10)=" + sum;
+      loop: `void main() {
+    int sum = 0;
+    for (int i = 1; i <= 10; i++) {
+        sum = sum + i;
     }
+    IO.println("sum(1..10)=" + sum);
 }
 `,
-      while_loop: `public class WhileLoop {
-    public static String run() {
-        int n = 1;
-        int product = 1;
-        while (n <= 5) {
-            product = product * n;
-            n = n + 1;
-        }
-        return "5!=" + product;
+      while_loop: `void main() {
+    int n = 1;
+    int product = 1;
+    while (n <= 5) {
+        product = product * n;
+        n = n + 1;
     }
+    IO.println("5!=" + product);
 }
 `,
-      nested_if: `public class NestedIf {
-    public static String classify(int n) {
-        if (n < 0) {
-            return "negative";
-        } else if (n == 0) {
-            return "zero";
-        } else if (n % 2 == 0) {
-            return "positive even";
-        } else {
-            return "positive odd";
-        }
-    }
+      nested_if: `String classify(int n) {
+    if (n < 0) return "negative";
+    else if (n == 0) return "zero";
+    else if (n % 2 == 0) return "positive even";
+    else return "positive odd";
+}
 
-    public static String run() {
-        return classify(-3) + ", " + classify(0) + ", " + classify(4) + ", " + classify(7);
-    }
+void main() {
+    IO.println(classify(-3) + ", " + classify(0) + ", " + classify(4) + ", " + classify(7));
 }
 `,
       class_fields: `public class Counter {
@@ -652,179 +629,158 @@ public class EnumDemo {
     }
 }
 `,
-      static_method: `public class MathUtils {
-    public static int square(int n) {
-        return n * n;
-    }
+      static_method: `int square(int n) {
+    return n * n;
+}
 
-    public static int cube(int n) {
-        return n * n * n;
-    }
+int cube(int n) {
+    return n * n * n;
+}
 
-    public static int max(int a, int b) {
-        return a > b ? a : b;
-    }
+int max(int a, int b) {
+    return a > b ? a : b;
+}
 
-    public static String run() {
-        return "sq(7)=" + square(7) + " cube(3)=" + cube(3) + " max(4,9)=" + max(4, 9);
-    }
+void main() {
+    IO.println("sq(7)=" + square(7) + " cube(3)=" + cube(3) + " max(4,9)=" + max(4, 9));
 }
 `,
-      fibonacci: `public class Fibonacci {
-    public static int fib(int n) {
-        if (n <= 1) return n;
-        return fib(n - 1) + fib(n - 2);
-    }
+      fibonacci: `int fib(int n) {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
 
-    public static String run() {
-        return "fib(10)=" + fib(10);
-    }
+void main() {
+    IO.println("fib(10)=" + fib(10));
 }
 `,
-      fibonacci_iter: `public class FibIter {
-    public static String run() {
-        int a = 0;
-        int b = 1;
-        for (int i = 0; i < 10; i++) {
-            int tmp = a + b;
-            a = b;
-            b = tmp;
-        }
-        return "fib(10)=" + a;
+      fibonacci_iter: `void main() {
+    int a = 0;
+    int b = 1;
+    for (int i = 0; i < 10; i++) {
+        int tmp = a + b;
+        a = b;
+        b = tmp;
     }
+    IO.println("fib(10)=" + a);
 }
 `,
-      factorial: `public class Factorial {
-    public static long fact(int n) {
-        long result = 1;
-        for (int i = 2; i <= n; i++) {
-            result = result * i;
-        }
-        return result;
+      factorial: `long fact(int n) {
+    long result = 1;
+    for (int i = 2; i <= n; i++) {
+        result = result * i;
     }
+    return result;
+}
 
-    public static String run() {
-        return "10!=" + fact(10) + " 15!=" + fact(15);
-    }
+void main() {
+    IO.println("10!=" + fact(10) + " 15!=" + fact(15));
 }
 `,
-      gcd: `public class GCD {
-    public static int gcd(int a, int b) {
-        while (b != 0) {
-            int tmp = b;
-            b = a % b;
-            a = tmp;
-        }
-        return a;
+      gcd: `int gcd(int a, int b) {
+    while (b != 0) {
+        int tmp = b;
+        b = a % b;
+        a = tmp;
     }
+    return a;
+}
 
-    public static String run() {
-        return "gcd(48,18)=" + gcd(48, 18) + " gcd(100,75)=" + gcd(100, 75);
-    }
+void main() {
+    IO.println("gcd(48,18)=" + gcd(48, 18) + " gcd(100,75)=" + gcd(100, 75));
 }
 `,
-      bubble_sort: `public class BubbleSort {
-    public static String run() {
-        int[] arr = {5, 3, 8, 1, 9, 2, 7, 4, 6};
-        int n = arr.length;
-        for (int i = 0; i < n - 1; i++) {
-            for (int j = 0; j < n - i - 1; j++) {
-                if (arr[j] > arr[j + 1]) {
-                    int tmp = arr[j];
-                    arr[j] = arr[j + 1];
-                    arr[j + 1] = tmp;
-                }
+      bubble_sort: `void main() {
+    int[] arr = {5, 3, 8, 1, 9, 2, 7, 4, 6};
+    int n = arr.length;
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = 0; j < n - i - 1; j++) {
+            if (arr[j] > arr[j + 1]) {
+                int tmp = arr[j];
+                arr[j] = arr[j + 1];
+                arr[j + 1] = tmp;
             }
         }
-        String result = "";
-        for (int i = 0; i < n; i++) {
-            if (i > 0) result = result + ",";
-            result = result + arr[i];
-        }
-        return "[" + result + "]";
     }
+    StringBuilder result = new StringBuilder("[");
+    for (int i = 0; i < n; i++) {
+        if (i > 0) result.append(",");
+        result.append(arr[i]);
+    }
+    result.append("]");
+    IO.println(result.toString());
 }
 `,
-      binary_search: `public class BinarySearch {
-    public static int search(int[] arr, int target) {
-        int lo = 0;
-        int hi = arr.length - 1;
-        while (lo <= hi) {
-            int mid = (lo + hi) / 2;
-            if (arr[mid] == target) return mid;
-            else if (arr[mid] < target) lo = mid + 1;
-            else hi = mid - 1;
-        }
-        return -1;
+      binary_search: `int search(int[] arr, int target) {
+    int lo = 0;
+    int hi = arr.length - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (arr[mid] == target) return mid;
+        else if (arr[mid] < target) lo = mid + 1;
+        else hi = mid - 1;
     }
+    return -1;
+}
 
-    public static String run() {
-        int[] arr = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19};
-        return "idx(7)=" + search(arr, 7) + " idx(10)=" + search(arr, 10);
-    }
+void main() {
+    int[] arr = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19};
+    IO.println("idx(7)=" + search(arr, 7) + " idx(10)=" + search(arr, 10));
 }
 `,
       arraylist: `import java.util.ArrayList;
 
-public class ArrayListDemo {
-    public static String run() {
-        ArrayList<String> list = new ArrayList<>();
-        list.add("apple");
-        list.add("banana");
-        list.add("cherry");
-        int size = list.size();
-        String first = list.get(0);
-        list.remove(1);
-        return "size=" + size + " first=" + first + " after-remove=" + list.size();
-    }
+void main() {
+    ArrayList<String> list = new ArrayList<>();
+    list.add("apple");
+    list.add("banana");
+    list.add("cherry");
+    IO.println("size=" + list.size());
+    IO.println("first=" + list.get(0));
+    list.remove(1);
+    IO.println("after-remove=" + list.size());
 }
 `,
       list_ops: `import java.util.ArrayList;
 
-public class ListOps {
-    public static String run() {
-        ArrayList<String> list = new ArrayList<>();
-        list.add("alpha");
-        list.add("beta");
-        list.add("gamma");
-        list.add("delta");
+void main() {
+    ArrayList<String> list = new ArrayList<>();
+    list.add("alpha");
+    list.add("beta");
+    list.add("gamma");
+    list.add("delta");
 
-        String second = list.get(1);
-        list.remove(2);
-        list.set(0, "ALPHA");
+    String second = list.get(1);
+    list.remove(2);
+    list.set(0, "ALPHA");
 
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < list.size(); i++) {
-            if (i > 0) sb.append(", ");
-            sb.append(list.get(i));
-        }
-        return second + " | " + sb.toString();
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < list.size(); i++) {
+        if (i > 0) sb.append(", ");
+        sb.append(list.get(i));
     }
+    IO.println(second + " | " + sb.toString());
 }
 `,
       lambda_method_ref: `import java.util.function.Function;
 import java.util.function.Supplier;
 
-public class LambdaMethodRef {
-    public static String run() {
-        Function upper = x -> ((String) x).toUpperCase();
-        Function len = String::length;
-        Supplier bound = "method-ref"::toString;
-        return upper.apply("lambda") + " len=" + len.apply("abcde") + " bound=" + bound.get();
-    }
+void main() {
+    Function upper = x -> ((String) x).toUpperCase();
+    Function len = String::length;
+    Supplier bound = "method-ref"::toString;
+    IO.println(upper.apply("lambda") + " len=" + len.apply("abcde") + " bound=" + bound.get());
 }
 `,
-      switch_expr: `public class SwitchExprDemo {
-    public static String run() {
-        String kind = "release";
-        int score = switch (kind) {
-            case "alpha" -> 1;
-            case "beta" -> 2;
-            case "release" -> 3;
-            default -> 0;
-        };
-        return "kind=" + kind + " score=" + score;
-    }
+      switch_expr: `void main() {
+    String kind = "release";
+    int score = switch (kind) {
+        case "alpha" -> 1;
+        case "beta" -> 2;
+        case "release" -> 3;
+        default -> 0;
+    };
+    IO.println("kind=" + kind + " score=" + score);
 }
 `,
       pattern_matching: `record Point(int x, int y) {}
@@ -857,12 +813,10 @@ public class RecordModernDemo {
     }
 }
 `,
-      assert_stmt: `public class AssertDemo {
-    public static String run() {
-        int x = 2 + 2;
-        assert x == 4 : "math is broken";
-        return "assert-ok";
-    }
+      assert_stmt: `void main() {
+    int x = 2 + 2;
+    assert x == 4 : "math is broken";
+    IO.println("assert-ok");
 }
 `,
       try_with_resources: `public class TwrDemo {
@@ -991,29 +945,24 @@ public class JvmReflectionRecord {
       jvm_bigdecimal: `import java.math.BigDecimal;
 import java.math.BigInteger;
 
-public class JvmBigDecimal {
-    public static String run() {
-        BigInteger a = new BigInteger("12345678901234567890");
-        BigInteger b = new BigInteger("9876543210");
-        BigInteger g = a.gcd(b);
+void main() {
+    BigInteger a = new BigInteger("12345678901234567890");
+    BigInteger b = new BigInteger("9876543210");
+    IO.println("gcd=" + a.gcd(b));
 
-        BigDecimal x = new BigDecimal("10.50");
-        BigDecimal y = new BigDecimal("3.20");
-        BigDecimal z = x.multiply(y).add(new BigDecimal("1.00"));
-        return "gcd=" + g + " money=" + z;
-    }
+    BigDecimal x = new BigDecimal("10.50");
+    BigDecimal y = new BigDecimal("3.20");
+    IO.println("money=" + x.multiply(y).add(new BigDecimal("1.00")));
 }
 `,
       jvm_completable_future: `import java.util.concurrent.CompletableFuture;
 
-public class JvmCompletableFuture {
-    public static String run() {
-        CompletableFuture f = CompletableFuture
-            .supplyAsync(() -> "199xvm")
-            .thenApply(s -> ((String) s).toUpperCase())
-            .thenApply(s -> s + ":OK");
-        return (String) f.join();
-    }
+void main() {
+    CompletableFuture f = CompletableFuture
+        .supplyAsync(() -> "199xvm")
+        .thenApply(s -> ((String) s).toUpperCase())
+        .thenApply(s -> s + ":OK");
+    IO.println((String) f.join());
 }
 `,
       jvm_forkjoin: `import java.util.concurrent.RecursiveTask;
