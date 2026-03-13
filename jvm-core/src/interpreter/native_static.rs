@@ -431,6 +431,29 @@ impl super::Vm {
                 self.scheduler.current_thread_mut().state = ThreadState::Sleeping;
                 Some(JValue::Void)
             }
+            // ── java.lang.Double / Float ─────────────────────────────
+            ("java/lang/Double", "toString", "(D)Ljava/lang/String;") => {
+                let d = _args[0].as_double();
+                let s = if d == d.floor() && d.is_finite() && d.abs() < 1e15 {
+                    format!("{:.1}", d)
+                } else {
+                    format!("{}", d)
+                };
+                Some(JValue::Ref(Some(self.intern_string(s))))
+            }
+            ("java/lang/Float", "toString", "(F)Ljava/lang/String;") => {
+                let f = match &_args[0] {
+                    JValue::Float(v) => *v,
+                    JValue::Int(v) => f32::from_bits(*v as u32),
+                    other => panic!("Expected Float, got {other:?}"),
+                };
+                let s = if f == f.floor() && f.is_finite() && f.abs() < 1e7 {
+                    format!("{:.1}", f)
+                } else {
+                    format!("{}", f)
+                };
+                Some(JValue::Ref(Some(self.intern_string(s))))
+            }
             // ── java.lang.StrictMath ──────────────────────────────────
             ("java/lang/StrictMath", "sin", "(D)D") => {
                 let a = _args[0].as_double();
