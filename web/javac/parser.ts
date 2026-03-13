@@ -303,6 +303,15 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       }
       expect(TokenKind.RBrace);
 
+      // Fill in params for compact canonical constructors
+      const compactInits = recordMethods.filter(m => m.isCompactConstructor);
+      if (compactInits.length > 1) {
+        throw new Error("A record can have at most one compact canonical constructor");
+      }
+      for (const m of compactInits) {
+        m.params = [...components];
+      }
+
       // Generate fields from components
       for (const c of components) {
         recordFields.push({ name: c.name, type: c.type, isStatic: false, isPrivate: true, isFinal: true });
@@ -761,6 +770,18 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     // For nested classes, match either the mangled name (Outer$Inner) or the simple name (Inner).
     const simpleOwnerName = ownerName.includes("$") ? ownerName.slice(ownerName.lastIndexOf("$") + 1) : ownerName;
     skipTypeParametersIfPresent();
+    // Compact canonical constructor: ClassName { ... } (record only, no parameter list)
+    if (ownerKind === "record"
+        && at(TokenKind.Ident)
+        && tokens[pos + 1]?.kind === TokenKind.LBrace
+        && (peek().value === ownerName || peek().value === simpleOwnerName)) {
+      advance(); // consume constructor name
+      expect(TokenKind.LBrace);
+      const body = parseBlock();
+      expect(TokenKind.RBrace);
+      methods.push({ name: "<init>", returnType: "void", params: [], body, isStatic: false, isCompactConstructor: true });
+      return;
+    }
     if ((ownerKind === "class" || ownerKind === "record" || ownerKind === "enum")
         && at(TokenKind.Ident)
         && tokens[pos + 1]?.kind === TokenKind.LParen

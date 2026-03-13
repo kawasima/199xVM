@@ -46,6 +46,7 @@ export interface MethodDecl {
   isAbstract?: boolean;
   isSynchronized?: boolean;
   throwsTypes?: string[];
+  isCompactConstructor?: boolean;
 }
 
 export interface ParamDecl {
