@@ -16,11 +16,19 @@
 
 ## Build Commands
 
-- `./build-shim.sh` — compile JDK shim classes → `jdk-shim/bundle.bin`
-- `./build-test-bundle.sh` — compile test classes → `test-classes/bundle.bin`
-- `npm run build:javac` — compile `web/javac.ts` → `web/javac.js` (esbuild)
-- `cargo test --package jvm-core` — run integration tests
-- `npm test` — run javac compiler tests (`web/javac.test.ts`)
+All build tasks are managed via `make`. Key targets:
+
+- `make dev-jars` — download versioned JARs to `web/` via Maven
+- `make shim` — compile JDK shim classes → `jdk-shim/bundle.bin`
+- `make test-bundle` — compile test classes → `test-classes/bundle.bin`
+- `make javac` — compile `web/javac.ts` → `web/javac.js` (esbuild)
+- `make wasm` — compile Rust core → `jvm-core/pkg/` (wasm-pack)
+- `make all` — dev-jars + shim + javac + wasm (full dev setup)
+- `make dist` — assemble `dist/` for deployment
+- `make deploy GCS=gs://bucket/path` — upload `dist/` to GCS
+- `make test` — run javac compiler tests (`web/javac.test.ts`)
+- `make clean` — remove generated artifacts
+- `cargo test --package jvm-core` — run Rust integration tests
 
 ## Testing
 
