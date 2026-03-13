@@ -311,6 +311,15 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       for (const m of compactInits) {
         m.params = [...components];
       }
+      // Reject duplicate: both a compact canonical constructor and an explicit canonical constructor
+      if (compactInits.length > 0) {
+        const hasExplicitCanonical = recordMethods.some(
+          m => !m.isCompactConstructor && m.name === "<init>" && m.params.length === components.length,
+        );
+        if (hasExplicitCanonical) {
+          throw new Error("A record cannot have both a compact canonical constructor and an explicit canonical constructor");
+        }
+      }
 
       // Generate fields from components
       for (const c of components) {
@@ -775,11 +784,18 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         && at(TokenKind.Ident)
         && tokens[pos + 1]?.kind === TokenKind.LBrace
         && (peek().value === ownerName || peek().value === simpleOwnerName)) {
+      if (isSynchronized) throw new Error("'synchronized' is not allowed on constructors");
+      if (isFinal) throw new Error("'final' is not allowed on constructors");
+      if (explicitAbstract) throw new Error("'abstract' is not allowed on constructors");
       advance(); // consume constructor name
       expect(TokenKind.LBrace);
       const body = parseBlock();
       expect(TokenKind.RBrace);
-      methods.push({ name: "<init>", returnType: "void", params: [], body, isStatic: false, isCompactConstructor: true });
+      // Compact canonical constructors must not contain explicit return statements
+      const hasReturn = (stmts: Stmt[]): boolean =>
+        stmts.some(s => s.kind === "return" || (s.kind === "block" && hasReturn(s.stmts)));
+      if (hasReturn(body)) throw new Error("compact canonical constructor must not contain a return statement");
+      methods.push({ name: "<init>", returnType: "void", params: [], body, isStatic: false, isCompactConstructor: true, isPrivate: isPrivate || undefined, isProtected: isProtected || undefined });
       return;
     }
     if ((ownerKind === "class" || ownerKind === "record" || ownerKind === "enum")
