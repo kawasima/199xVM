@@ -86,6 +86,87 @@ function readClassName(bytes: Uint8Array): string {
   return "";
 }
 
+/** Parse a class file and return access flags and constant pool info */
+function parseClassFile(bytes: Uint8Array) {
+  const cpCount = u16(bytes, 8);
+  let pos = 10;
+  const utf8Strings: Map<number, string> = new Map();
+  const classEntries: Map<number, number> = new Map();
+  const decoder = new TextDecoder();
+
+  for (let i = 1; i < cpCount; i++) {
+    const tag = bytes[pos++];
+    if (tag === 1) {
+      const len = u16(bytes, pos); pos += 2;
+      utf8Strings.set(i, decoder.decode(bytes.subarray(pos, pos + len)));
+      pos += len;
+    } else if (tag === 7) {
+      classEntries.set(i, u16(bytes, pos)); pos += 2;
+    } else if (tag === 8) { pos += 2;
+    } else if (tag === 9 || tag === 10 || tag === 11 || tag === 12) { pos += 4;
+    } else if (tag === 3 || tag === 4) { pos += 4;
+    } else if (tag === 5 || tag === 6) { pos += 8; i++;
+    } else if (tag === 15) { pos += 3;
+    } else if (tag === 16) { pos += 2;
+    } else if (tag === 17 || tag === 18) { pos += 4;
+    } else if (tag === 19 || tag === 20) { pos += 2;
+    } else { throw new Error(`unknown CP tag ${tag} at pos ${pos - 1}`);
+    }
+  }
+
+  const classAccessFlags = u16(bytes, pos);
+  pos += 2; // access_flags
+  pos += 2; // this_class
+  pos += 2; // super_class
+  const ifaceCount = u16(bytes, pos); pos += 2;
+  pos += ifaceCount * 2;
+
+  // fields
+  const fieldsCount = u16(bytes, pos); pos += 2;
+  const fieldFlags: Map<string, number> = new Map();
+  for (let i = 0; i < fieldsCount; i++) {
+    const af = u16(bytes, pos); pos += 2;
+    const nameIdx = u16(bytes, pos); pos += 2;
+    pos += 2; // descriptor
+    const attrCount = u16(bytes, pos); pos += 2;
+    for (let a = 0; a < attrCount; a++) {
+      pos += 2; // attr name
+      const attrLen = u32(bytes, pos); pos += 4;
+      pos += attrLen;
+    }
+    fieldFlags.set(utf8Strings.get(nameIdx) ?? "", af);
+  }
+
+  // methods
+  const methodsCount = u16(bytes, pos); pos += 2;
+  const methodFlags: Map<string, number> = new Map();
+  for (let i = 0; i < methodsCount; i++) {
+    const af = u16(bytes, pos); pos += 2;
+    const nameIdx = u16(bytes, pos); pos += 2;
+    pos += 2; // descriptor
+    const attrCount = u16(bytes, pos); pos += 2;
+    for (let a = 0; a < attrCount; a++) {
+      pos += 2;
+      const attrLen = u32(bytes, pos); pos += 4;
+      pos += attrLen;
+    }
+    methodFlags.set(utf8Strings.get(nameIdx) ?? "", af);
+  }
+
+  // class attributes
+  const classAttrCount = u16(bytes, pos); pos += 2;
+  const classAttrs: Map<string, Uint8Array> = new Map();
+  for (let i = 0; i < classAttrCount; i++) {
+    const attrNameIdx = u16(bytes, pos); pos += 2;
+    const attrLen = u32(bytes, pos); pos += 4;
+    const attrName = utf8Strings.get(attrNameIdx) ?? "";
+    classAttrs.set(attrName, bytes.slice(pos, pos + attrLen));
+    pos += attrLen;
+  }
+
+  return { classAccessFlags, fieldFlags, methodFlags, classAttrs, utf8Strings, classEntries };
+}
+
 let runtimeReady: Promise<void> | null = null;
 let shimBundle: Uint8Array | null = null;
 
@@ -948,6 +1029,208 @@ describe("Parser", () => {
     const cls = parse(lex(src));
     assert.ok(cls.nestedClasses.some(c => c.kind === "interface" && c.name.endsWith("$In")));
     assert.ok(cls.nestedClasses.some(c => c.kind === "class" && c.name.endsWith("$Impl")));
+  });
+
+  test("final class modifier is tracked", () => {
+    const cls = parse(lex(`public final class Immutable { }`));
+    assert.equal(cls.isFinal, true);
+  });
+
+  test("abstract class modifier is tracked", () => {
+    const cls = parse(lex(`public abstract class Base { abstract void m(); }`));
+    assert.equal(cls.isAbstract, true);
+  });
+
+  test("sealed class with permits clause", () => {
+    const src = `public sealed class Shape permits Circle, Square {
+      abstract double area();
+    }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.isSealed, true);
+    assert.deepStrictEqual(cls.permittedSubclasses, ["Circle", "Square"]);
+  });
+
+  test("sealed interface with permits clause", () => {
+    const src = `public sealed interface Node permits Leaf, Branch { }`;
+    const classes = parseAll(lex(src));
+    const cls = classes[0];
+    assert.equal(cls.kind, "interface");
+    assert.equal(cls.isSealed, true);
+    assert.deepStrictEqual(cls.permittedSubclasses, ["Leaf", "Branch"]);
+  });
+
+  test("non-sealed class modifier is tracked", () => {
+    const cls = parse(lex(`public non-sealed class Open extends Object { }`));
+    assert.equal(cls.isNonSealed, true);
+  });
+
+  test("sealed final combination is rejected", () => {
+    assert.throws(() => parse(lex(`public sealed final class X permits Y { }`)),
+      /sealed.*final/i);
+  });
+
+  test("permits without sealed is rejected", () => {
+    assert.throws(() => parse(lex(`public class X permits Y { }`)),
+      /permits.*sealed/i);
+  });
+
+  test("abstract final combination is rejected", () => {
+    assert.throws(() => parse(lex(`public abstract final class X { }`)),
+      /abstract.*final/i);
+  });
+
+  test("sealed class without permits is rejected", () => {
+    assert.throws(() => parse(lex(`public sealed class X { }`)),
+      /sealed.*permits/i);
+  });
+
+  test("volatile on method is rejected", () => {
+    assert.throws(() => parse(lex(`public class X { volatile void m() {} }`)),
+      /volatile.*method/i);
+  });
+
+  test("transient on method is rejected", () => {
+    assert.throws(() => parse(lex(`public class X { transient void m() {} }`)),
+      /transient.*method/i);
+  });
+
+  test("non-sealed on record is rejected", () => {
+    assert.throws(() => parse(lex(`public non-sealed record Point(int x, int y) { }`)),
+      /non-sealed.*not allowed on record/i);
+  });
+
+  test("nested sealed class with permits", () => {
+    const src = `public class Outer {
+      static sealed class Shape permits Circle {}
+      static class Circle extends Shape {}
+    }`;
+    const classes = parseAll(lex(src));
+    const shape = classes[0].nestedClasses.find(c => c.name.endsWith("$Shape"));
+    assert.ok(shape);
+    assert.equal(shape!.isSealed, true);
+    assert.ok(shape!.permittedSubclasses!.length > 0);
+  });
+
+  test("nested class in interface is not implicitly abstract", () => {
+    const src = `public interface Outer {
+      static class Inner {
+        public void m() {}
+      }
+    }`;
+    const classes = parseAll(lex(src));
+    const inner = classes[0].nestedClasses.find(c => c.name.endsWith("$Inner"));
+    assert.ok(inner);
+    assert.equal(inner!.isAbstract, undefined);
+  });
+
+  test("private method modifier is tracked", () => {
+    const cls = parse(lex(`public class Foo { private void secret() {} }`));
+    assert.equal(cls.methods[0].isPrivate, true);
+  });
+
+  test("final method modifier is tracked", () => {
+    const cls = parse(lex(`public class Foo { public final void locked() {} }`));
+    assert.equal(cls.methods[0].isFinal, true);
+  });
+
+  test("final field modifier is tracked", () => {
+    const cls = parse(lex(`public class Foo { final int x = 1; }`));
+    assert.equal(cls.fields[0].isFinal, true);
+  });
+
+  test("volatile field modifier is tracked", () => {
+    const cls = parse(lex(`public class Foo { volatile int counter = 0; }`));
+    assert.equal(cls.fields[0].isVolatile, true);
+  });
+
+  test("transient field modifier is tracked", () => {
+    const cls = parse(lex(`public class Foo { transient int temp = 0; }`));
+    assert.equal(cls.fields[0].isTransient, true);
+  });
+
+  test("protected method modifier is tracked", () => {
+    const cls = parse(lex(`public class Foo { protected void helper() {} }`));
+    assert.equal(cls.methods[0].isProtected, true);
+    assert.equal(cls.methods[0].isPrivate, undefined);
+  });
+
+  test("protected field modifier is tracked", () => {
+    const cls = parse(lex(`public class Foo { protected int x = 1; }`));
+    assert.equal(cls.fields[0].isProtected, true);
+    assert.equal(cls.fields[0].isPrivate, false);
+  });
+
+  test("abstract on record is rejected", () => {
+    assert.throws(() => parse(lex(`public abstract record Point(int x, int y) { }`)),
+      /abstract.*not allowed on record/i);
+  });
+
+  test("sealed on record is rejected", () => {
+    assert.throws(() => parse(lex(`public sealed record Point(int x, int y) permits SubPoint { }`)),
+      /sealed.*not allowed on record/i);
+  });
+
+  test("volatile on nested class is rejected", () => {
+    assert.throws(() => parse(lex(`public class Outer { volatile static class Inner {} }`)),
+      /volatile.*transient.*not allowed/i);
+  });
+
+  test("transient on nested interface is rejected", () => {
+    assert.throws(() => parse(lex(`public class Outer { transient interface Inner {} }`)),
+      /volatile.*transient.*not allowed/i);
+  });
+
+  test("private interface method without body is rejected", () => {
+    assert.throws(() => parse(lex(`public interface Foo { private void m(); }`)),
+      /private interface methods must have a body/i);
+  });
+
+  test("private interface method with body is accepted", () => {
+    const src = `public interface Foo { private void m() { } }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.methods[0].isPrivate, true);
+  });
+
+  test("final interface is rejected", () => {
+    assert.throws(() => parse(lex(`public final interface Foo { }`)),
+      /final.*not allowed on interface/i);
+  });
+
+  test("conflicting access modifiers are rejected", () => {
+    assert.throws(() => parse(lex(`public class X { public private void m() {} }`)),
+      /only one of.*public.*protected.*private/i);
+  });
+
+  test("protected on interface method is rejected", () => {
+    assert.throws(() => parse(lex(`public interface Foo { protected void m(); }`)),
+      /protected.*not allowed on interface/i);
+  });
+
+  test("final on interface method is rejected", () => {
+    assert.throws(() => parse(lex(`public interface Foo { final void m(); }`)),
+      /final.*not allowed on interface/i);
+  });
+
+  test("final constructor is rejected", () => {
+    assert.throws(() => parse(lex(`public class Foo { final Foo() {} }`)),
+      /final.*not allowed on constructors/i);
+  });
+
+  test("abstract constructor is rejected", () => {
+    assert.throws(() => parse(lex(`public class Foo { abstract Foo() {} }`)),
+      /abstract.*not allowed on constructors/i);
+  });
+
+  test("private constructor visibility is tracked", () => {
+    const cls = parse(lex(`public class Foo { private Foo() {} }`));
+    const ctor = cls.methods.find(m => m.name === "<init>");
+    assert.equal(ctor!.isPrivate, true);
+  });
+
+  test("protected constructor visibility is tracked", () => {
+    const cls = parse(lex(`public class Foo { protected Foo() {} }`));
+    const ctor = cls.methods.find(m => m.name === "<init>");
+    assert.equal(ctor!.isProtected, true);
   });
 });
 
@@ -2882,6 +3165,136 @@ describe("Parser – new syntax", () => {
     const cls = parse(lex(src));
     // Should parse without error
     assert.equal(cls.name, "BreakCont");
+  });
+
+  test("final class emits ACC_FINAL flag", () => {
+    const bytes = compile(`public final class FinalClass {
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.ok(info.classAccessFlags & 0x0010, "ACC_FINAL should be set");
+  });
+
+  test("abstract class emits ACC_ABSTRACT flag", () => {
+    const bytes = compile(`public abstract class AbstractClass {
+      public abstract void doSomething();
+    }`);
+    const info = parseClassFile(bytes);
+    assert.ok(info.classAccessFlags & 0x0400, "ACC_ABSTRACT should be set");
+    assert.ok(!(info.classAccessFlags & 0x0010), "ACC_FINAL should not be set");
+  });
+
+  test("private method emits ACC_PRIVATE flag", () => {
+    const bytes = compile(`public class PrivMethod {
+      private void secret() {}
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.methodFlags.get("secret")! & 0x0002, 0x0002, "ACC_PRIVATE should be set");
+    assert.ok(!(info.methodFlags.get("secret")! & 0x0001), "ACC_PUBLIC should not be set");
+  });
+
+  test("final method emits ACC_FINAL flag", () => {
+    const bytes = compile(`public class FinalMethod {
+      public final void locked() {}
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.methodFlags.get("locked")! & 0x0010, 0x0010, "ACC_FINAL should be set");
+  });
+
+  test("volatile field emits ACC_VOLATILE flag", () => {
+    const bytes = compile(`public class VolField {
+      volatile int counter = 0;
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.fieldFlags.get("counter")! & 0x0040, 0x0040, "ACC_VOLATILE should be set");
+  });
+
+  test("transient field emits ACC_TRANSIENT flag", () => {
+    const bytes = compile(`public class TransField {
+      transient int temp = 0;
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.fieldFlags.get("temp")! & 0x0080, 0x0080, "ACC_TRANSIENT should be set");
+  });
+
+  test("sealed class emits PermittedSubclasses attribute", () => {
+    const bytes = compile(`public sealed class Shape permits Circle, Square {
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.ok(info.classAttrs.has("PermittedSubclasses"), "should have PermittedSubclasses attribute");
+    const attrData = info.classAttrs.get("PermittedSubclasses")!;
+    const numClasses = u16(attrData, 0);
+    assert.equal(numClasses, 2, "should have 2 permitted subclasses");
+    // Verify the class indices point to valid class entries
+    const idx1 = u16(attrData, 2);
+    const idx2 = u16(attrData, 4);
+    const name1 = info.utf8Strings.get(info.classEntries.get(idx1)!);
+    const name2 = info.utf8Strings.get(info.classEntries.get(idx2)!);
+    assert.equal(name1, "Circle");
+    assert.equal(name2, "Square");
+  });
+
+  test("sealed class does not have ACC_FINAL", () => {
+    const bytes = compile(`public sealed class Shape permits Circle {
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.ok(!(info.classAccessFlags & 0x0010), "sealed class should not have ACC_FINAL");
+  });
+
+  test("protected method emits ACC_PROTECTED flag", () => {
+    const bytes = compile(`public class ProtMethod {
+      protected void helper() {}
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.methodFlags.get("helper")! & 0x0004, 0x0004, "ACC_PROTECTED should be set");
+    assert.ok(!(info.methodFlags.get("helper")! & 0x0001), "ACC_PUBLIC should not be set");
+    assert.ok(!(info.methodFlags.get("helper")! & 0x0002), "ACC_PRIVATE should not be set");
+  });
+
+  test("protected field emits ACC_PROTECTED flag", () => {
+    const bytes = compile(`public class ProtField {
+      protected int x = 0;
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.fieldFlags.get("x")! & 0x0004, 0x0004, "ACC_PROTECTED should be set");
+    assert.ok(!(info.fieldFlags.get("x")! & 0x0001), "ACC_PUBLIC should not be set");
+  });
+
+  test("private constructor emits ACC_PRIVATE flag", () => {
+    const bytes = compile(`public class PrivCtor {
+      private PrivCtor() {}
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.methodFlags.get("<init>")! & 0x0002, 0x0002, "ACC_PRIVATE should be set");
+    assert.ok(!(info.methodFlags.get("<init>")! & 0x0001), "ACC_PUBLIC should not be set");
+  });
+
+  test("protected constructor emits ACC_PROTECTED flag", () => {
+    const bytes = compile(`public class ProtCtor {
+      protected ProtCtor() {}
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.methodFlags.get("<init>")! & 0x0004, 0x0004, "ACC_PROTECTED should be set");
+    assert.ok(!(info.methodFlags.get("<init>")! & 0x0001), "ACC_PUBLIC should not be set");
+  });
+
+  test("regular class does not have ACC_FINAL or ACC_ABSTRACT", () => {
+    const bytes = compile(`public class Regular {
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.ok(!(info.classAccessFlags & 0x0010), "regular class should not have ACC_FINAL");
+    assert.ok(!(info.classAccessFlags & 0x0400), "regular class should not have ACC_ABSTRACT");
   });
 });
 

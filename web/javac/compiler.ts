@@ -3775,10 +3775,11 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       : methodDescriptor(method.params, method.returnType);
     const descIdx = cp.addUtf8(desc);
 
-    let accessFlags = 0x0001; // ACC_PUBLIC
+    let accessFlags = method.isPrivate ? 0x0002 : method.isProtected ? 0x0004 : 0x0001; // ACC_PRIVATE/ACC_PROTECTED/ACC_PUBLIC
     if (method.name === "<init>" && classDecl.kind === "enum") accessFlags = 0x0002; // ACC_PRIVATE
     if (method.isStatic) accessFlags |= 0x0008; // ACC_STATIC
     const methodIsAbstract = method.name !== "<init>" && !!method.isAbstract;
+    if (method.isFinal && !methodIsAbstract) accessFlags |= 0x0010; // ACC_FINAL (invalid on abstract)
     if (method.isSynchronized && !methodIsAbstract) accessFlags |= 0x0020; // ACC_SYNCHRONIZED
     if (methodIsAbstract) accessFlags |= 0x0400; // ACC_ABSTRACT
 
@@ -3955,9 +3956,11 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   for (const field of classDecl.fields) {
     const nameIdx = cp.addUtf8(field.name);
     const descIdx = cp.addUtf8(typeToDescriptor(field.type));
-    let accessFlags = field.isPrivate ? 0x0002 : 0x0001; // ACC_PRIVATE/ACC_PUBLIC
+    let accessFlags = field.isPrivate ? 0x0002 : field.isProtected ? 0x0004 : 0x0001; // ACC_PRIVATE/ACC_PROTECTED/ACC_PUBLIC
     if (field.isStatic) accessFlags |= 0x0008;
     if (field.isFinal) accessFlags |= 0x0010;
+    if (field.isVolatile) accessFlags |= 0x0040; // ACC_VOLATILE
+    if (field.isTransient) accessFlags |= 0x0080; // ACC_TRANSIENT
     if (isEnumClass && field.isEnumConstant) accessFlags |= 0x4000; // ACC_ENUM
     compiledFields.push({ nameIdx, descIdx, accessFlags });
   }
@@ -3966,6 +3969,13 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   const codeAttrName = cp.addUtf8("Code");
   const bootstrapAttrName = cp.addUtf8("BootstrapMethods");
   const recordAttrName = classDecl.isRecord ? cp.addUtf8("Record") : 0;
+  const permittedAttrName = classDecl.isSealed ? cp.addUtf8("PermittedSubclasses") : 0;
+  const permittedClassIndices: number[] = [];
+  if (classDecl.isSealed && classDecl.permittedSubclasses) {
+    for (const sub of classDecl.permittedSubclasses) {
+      permittedClassIndices.push(cp.addClass(sub));
+    }
+  }
 
   // Pre-register record component names/descriptors in the constant pool
   const recordComponentCpEntries: { nameIdx: number; descIdx: number }[] = [];
@@ -4010,6 +4020,11 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   else if (classDecl.kind === "enum") classFlags = 0x4031; // PUBLIC | SUPER | FINAL | ENUM
   else if (classDecl.isImplicit) classFlags = 0x0031; // implicit (compact source) classes are final
   else classFlags = classDecl.isRecord ? 0x0031 : 0x0021; // record classes are final
+  // Apply user-declared modifiers for regular classes
+  if (classDecl.kind === "class" && !classDecl.isRecord && !classDecl.isImplicit) {
+    if (classDecl.isFinal) classFlags |= 0x0010; // ACC_FINAL
+    if (classDecl.isAbstract) classFlags |= 0x0400; // ACC_ABSTRACT
+  }
   if (hasAbstractMethods && classDecl.kind !== "interface" && classDecl.kind !== "annotation") {
     classFlags &= ~0x0010; // clear FINAL
     classFlags |= 0x0400;  // set ABSTRACT
@@ -4070,6 +4085,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   let classAttrCount = 0;
   if (serializedBootstrapMethods.length > 0) classAttrCount++;
   if (classDecl.isRecord && recordComponentCpEntries.length > 0) classAttrCount++;
+  if (classDecl.isSealed && permittedClassIndices.length > 0) classAttrCount++;
   out.push((classAttrCount >> 8) & 0xff, classAttrCount & 0xff);
   if (serializedBootstrapMethods.length > 0) {
     out.push((bootstrapAttrName >> 8) & 0xff, bootstrapAttrName & 0xff);
@@ -4094,6 +4110,16 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       out.push((rc.nameIdx >> 8) & 0xff, rc.nameIdx & 0xff);
       out.push((rc.descIdx >> 8) & 0xff, rc.descIdx & 0xff);
       out.push(0x00, 0x00); // attributes_count = 0
+    }
+  }
+  // PermittedSubclasses attribute
+  if (classDecl.isSealed && permittedClassIndices.length > 0) {
+    out.push((permittedAttrName >> 8) & 0xff, permittedAttrName & 0xff);
+    const permBodyLen = 2 + permittedClassIndices.length * 2;
+    out.push((permBodyLen >> 24) & 0xff, (permBodyLen >> 16) & 0xff, (permBodyLen >> 8) & 0xff, permBodyLen & 0xff);
+    out.push((permittedClassIndices.length >> 8) & 0xff, permittedClassIndices.length & 0xff);
+    for (const ci of permittedClassIndices) {
+      out.push((ci >> 8) & 0xff, ci & 0xff);
     }
   }
 
