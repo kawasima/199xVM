@@ -26,4 +26,10 @@
 package java.time.zone;
 
 public class ZoneOffsetTransition {
+    public java.time.Duration getDuration() { throw new UnsupportedOperationException("stub"); }
+    public java.time.ZoneOffset getOffsetAfter() { throw new UnsupportedOperationException("stub"); }
+    public java.time.ZoneOffset getOffsetBefore() { throw new UnsupportedOperationException("stub"); }
+    public boolean isGap() { throw new UnsupportedOperationException("stub"); }
+    public boolean isOverlap() { throw new UnsupportedOperationException("stub"); }
+    public java.time.LocalDateTime getDateTimeAfter() { throw new UnsupportedOperationException("stub"); }
 }

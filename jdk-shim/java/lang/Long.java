@@ -60,6 +60,10 @@ public final class Long extends Number implements Comparable<Long> {
         return parseLong(s, 10);
     }
 
+    public static long parseLong(CharSequence s, int beginIndex, int endIndex, int radix) {
+        return parseLong(s.subSequence(beginIndex, endIndex).toString(), radix);
+    }
+
     public static long parseLong(String s, int radix) {
         if (s == null || s.isEmpty()) {
             throw new NumberFormatException("null or empty string");

@@ -30,7 +30,21 @@ public class ZoneRules {
 
     public static ZoneRules of() { return UTC; }
 
+    public static ZoneRules of(java.time.ZoneOffset offset) { return UTC; }
+
     public boolean isDaylightSavings(java.time.Instant instant) { return false; }
 
     public ZoneOffsetTransition getTransition(java.time.LocalDateTime ldt) { return null; }
+
+    public java.time.ZoneOffset getOffset(java.time.Instant instant) { return java.time.ZoneOffset.UTC; }
+
+    public java.time.ZoneOffset getOffset(java.time.LocalDateTime localDateTime) { return java.time.ZoneOffset.UTC; }
+
+    public java.util.List<java.time.ZoneOffset> getValidOffsets(java.time.LocalDateTime localDateTime) {
+        return java.util.List.of(java.time.ZoneOffset.UTC);
+    }
+
+    public boolean isValidOffset(java.time.LocalDateTime localDateTime, java.time.ZoneOffset offset) { return true; }
+
+    public boolean isFixedOffset() { return true; }
 }
