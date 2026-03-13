@@ -110,6 +110,7 @@ function parseClassFile(bytes: Uint8Array) {
     } else if (tag === 16) { pos += 2;
     } else if (tag === 17 || tag === 18) { pos += 4;
     } else if (tag === 19 || tag === 20) { pos += 2;
+    } else { throw new Error(`unknown CP tag ${tag} at pos ${pos - 1}`);
     }
   }
 
@@ -1086,6 +1087,28 @@ describe("Parser", () => {
   test("volatile on method is rejected", () => {
     assert.throws(() => parse(lex(`public class X { volatile void m() {} }`)),
       /volatile.*method/i);
+  });
+
+  test("transient on method is rejected", () => {
+    assert.throws(() => parse(lex(`public class X { transient void m() {} }`)),
+      /transient.*method/i);
+  });
+
+  test("non-sealed on record is rejected", () => {
+    assert.throws(() => parse(lex(`public non-sealed record Point(int x, int y) { }`)),
+      /non-sealed.*not allowed on record/i);
+  });
+
+  test("nested sealed class with permits", () => {
+    const src = `public class Outer {
+      static sealed class Shape permits Circle {}
+      static class Circle extends Shape {}
+    }`;
+    const classes = parseAll(lex(src));
+    const shape = classes[0].nestedClasses.find(c => c.name.endsWith("$Shape"));
+    assert.ok(shape);
+    assert.equal(shape!.isSealed, true);
+    assert.ok(shape!.permittedSubclasses!.length > 0);
   });
 
   test("nested class in interface is not implicitly abstract", () => {
