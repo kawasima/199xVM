@@ -122,6 +122,72 @@ impl Vm {
     ) -> Result<JValue, String> {
         let runtime_class = this.borrow().class_name.clone();
 
+        // RecordMethod dispatch — ObjectMethods bootstrap for toString/equals/hashCode.
+        let record_method_info = match &this.borrow().native {
+            NativePayload::RecordMethod { method, class_simple_name, component_names, getters } => {
+                Some((method.clone(), class_simple_name.clone(), component_names.clone(), getters.clone()))
+            }
+            _ => None,
+        };
+        if let Some((rm_method, class_simple_name, component_names, getters)) = record_method_info {
+            if method_name == rm_method || method_name == "toString" || method_name == "equals" || method_name == "hashCode" {
+                match rm_method.as_str() {
+                    "toString" => {
+                        // args[0] = the record instance
+                        let recv = args.into_iter().next().unwrap_or(JValue::Ref(None));
+                        if let JValue::Ref(Some(recv_ref)) = recv {
+                            let mut parts = Vec::new();
+                            for ((getter_class, getter_method, getter_desc), comp_name) in getters.iter().zip(component_names.iter()) {
+                                let val = self.invoke_virtual(recv_ref.clone(), getter_class, getter_method, getter_desc, vec![])?;
+                                let s = self.jvalue_to_string(val)?;
+                                parts.push(format!("{comp_name}={s}"));
+                            }
+                            let result = format!("{}[{}]", class_simple_name, parts.join(", "));
+                            return Ok(JValue::Ref(Some(JObject::new_string(result))));
+                        }
+                        return Ok(JValue::Ref(Some(JObject::new_string(format!("{}[]", class_simple_name)))));
+                    }
+                    "equals" => {
+                        // args[0] = this record, args[1] = other object
+                        let mut iter = args.into_iter();
+                        let recv = iter.next().unwrap_or(JValue::Ref(None));
+                        let other = iter.next().unwrap_or(JValue::Ref(None));
+                        let (recv_ref, other_ref) = match (recv, other) {
+                            (JValue::Ref(Some(a)), JValue::Ref(Some(b))) => (a, b),
+                            _ => return Ok(JValue::Int(0)),
+                        };
+                        // Must be same class.
+                        if recv_ref.borrow().class_name != other_ref.borrow().class_name {
+                            return Ok(JValue::Int(0));
+                        }
+                        for (getter_class, getter_method, getter_desc) in &getters {
+                            let v1 = self.invoke_virtual(recv_ref.clone(), getter_class, getter_method, getter_desc, vec![])?;
+                            let v2 = self.invoke_virtual(other_ref.clone(), getter_class, getter_method, getter_desc, vec![])?;
+                            if !self.jvalue_equals(&v1, &v2)? {
+                                return Ok(JValue::Int(0));
+                            }
+                        }
+                        return Ok(JValue::Int(1));
+                    }
+                    "hashCode" => {
+                        // args[0] = the record instance
+                        let recv = args.into_iter().next().unwrap_or(JValue::Ref(None));
+                        if let JValue::Ref(Some(recv_ref)) = recv {
+                            let mut hash: i32 = 0;
+                            for (getter_class, getter_method, getter_desc) in &getters {
+                                let val = self.invoke_virtual(recv_ref.clone(), getter_class, getter_method, getter_desc, vec![])?;
+                                let comp_hash = self.jvalue_hash(&val)?;
+                                hash = hash.wrapping_mul(31).wrapping_add(comp_hash);
+                            }
+                            return Ok(JValue::Int(hash));
+                        }
+                        return Ok(JValue::Int(0));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Lambda dispatch — handle inline.
         let lambda_info = match &this.borrow().native {
             NativePayload::BytecodeLambda { sam_method, sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured } => {
@@ -220,6 +286,82 @@ impl Vm {
             "F" => self.invoke_static("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;", vec![value]),
             "D" => self.invoke_static("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", vec![value]),
             _ => Ok(value),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Record method helpers
+    // ------------------------------------------------------------------
+
+    /// Convert a JValue to its Java string representation, calling toString() for objects.
+    pub(in crate::interpreter) fn jvalue_to_string(&mut self, val: JValue) -> Result<String, String> {
+        match val {
+            JValue::Void => Ok("null".to_owned()),
+            JValue::Int(v) => Ok(v.to_string()),
+            JValue::Long(v) => Ok(v.to_string()),
+            JValue::Float(v) => Ok(v.to_string()),
+            JValue::Double(v) => Ok(v.to_string()),
+            JValue::Ref(None) => Ok("null".to_owned()),
+            JValue::Ref(Some(r)) => {
+                if let Some(s) = r.borrow().as_java_string() {
+                    return Ok(s.to_owned());
+                }
+                let class_name = r.borrow().class_name.clone();
+                match self.invoke_virtual(r, &class_name, "toString", "()Ljava/lang/String;", vec![])? {
+                    JValue::Ref(Some(sr)) => Ok(sr.borrow().as_java_string().unwrap_or("").to_owned()),
+                    _ => Ok("null".to_owned()),
+                }
+            }
+            JValue::ReturnAddress(_) => Ok("?".to_owned()),
+        }
+    }
+
+    /// Check structural equality of two JValues (for record equals).
+    pub(in crate::interpreter) fn jvalue_equals(&mut self, a: &JValue, b: &JValue) -> Result<bool, String> {
+        match (a, b) {
+            (JValue::Int(x), JValue::Int(y)) => Ok(x == y),
+            (JValue::Long(x), JValue::Long(y)) => Ok(x == y),
+            (JValue::Float(x), JValue::Float(y)) => Ok(x == y),
+            (JValue::Double(x), JValue::Double(y)) => Ok(x == y),
+            (JValue::Ref(None), JValue::Ref(None)) => Ok(true),
+            (JValue::Ref(Some(ra)), JValue::Ref(Some(rb))) => {
+                // Try string equality first.
+                let sa = ra.borrow().as_java_string().map(|s| s.to_owned());
+                let sb = rb.borrow().as_java_string().map(|s| s.to_owned());
+                if let (Some(sa), Some(sb)) = (sa, sb) {
+                    return Ok(sa == sb);
+                }
+                // Fall back to invoking equals().
+                let result = self.invoke_virtual(ra.clone(), &ra.borrow().class_name.clone(), "equals", "(Ljava/lang/Object;)Z", vec![JValue::Ref(Some(rb.clone()))])?;
+                Ok(matches!(result, JValue::Int(1)))
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Compute a hash code for a JValue (for record hashCode).
+    pub(in crate::interpreter) fn jvalue_hash(&mut self, val: &JValue) -> Result<i32, String> {
+        match val {
+            JValue::Int(v) => Ok(*v),
+            JValue::Long(v) => Ok((v ^ (v >> 32)) as i32),
+            JValue::Float(v) => Ok(v.to_bits() as i32),
+            JValue::Double(v) => Ok((v.to_bits() ^ (v.to_bits() >> 32)) as i32),
+            JValue::Ref(None) => Ok(0),
+            JValue::Ref(Some(r)) => {
+                if let Some(s) = r.borrow().as_java_string() {
+                    let mut h: i32 = 0;
+                    for b in s.bytes() {
+                        h = h.wrapping_mul(31).wrapping_add(b as i32);
+                    }
+                    return Ok(h);
+                }
+                let class_name = r.borrow().class_name.clone();
+                match self.invoke_virtual(r.clone(), &class_name, "hashCode", "()I", vec![])? {
+                    JValue::Int(h) => Ok(h),
+                    _ => Ok(0),
+                }
+            }
+            _ => Ok(0),
         }
     }
 
