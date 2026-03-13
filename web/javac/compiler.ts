@@ -3888,8 +3888,9 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       if (method.isCompactConstructor && classDecl.isRecord && classDecl.recordComponents) {
         for (const c of classDecl.recordComponents) {
           const desc = typeToDescriptor(c.type);
-          const slot = initCtx.locals.find(l => l.name === c.name)?.slot;
-          if (slot === undefined) throw new Error(`Compact constructor: component ${c.name} not found in locals`);
+          const local = findLocal(initCtx, c.name);
+          if (!local) throw new Error(`Compact constructor: component ${c.name} not found in locals`);
+          const slot = local.slot;
           emitter.emitAload(0); // this
           if (desc === "J") emitter.emitLload(slot);
           else if (desc === "F") emitter.emitFload(slot);
