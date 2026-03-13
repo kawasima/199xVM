@@ -65,7 +65,6 @@ import static java.time.LocalTime.NANOS_PER_MINUTE;
 import static java.time.LocalTime.NANOS_PER_SECOND;
 import static java.time.LocalTime.NANOS_PER_MILLI;
 import java.util.Objects;
-import java.util.TimeZone;
 
 /**
  * A clock providing access to the current instant, date and time using a time-zone.
