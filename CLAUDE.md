@@ -49,6 +49,9 @@ All build tasks are managed via `make`. Key targets:
 
 ### Shim Implementation Policy
 
+- **JDK 25 source location**: `/Users/kawasima/Library/Java/JavaVirtualMachines/azul-25.0.2-1/Contents/Home/lib/src.zip`
+  - Extract with: `unzip -p <src.zip> java.base/java/time/Clock.java`
+
 1. **JDK 25ソースをコピーして始める。** `jdk.internal.*`、`sun.*`、nativeメソッドの部分だけ代替実装に置き換える。ゼロから書かない。
 2. **JDK元ファイルのヘッダ（copyright / license）を削除・改変しない。** SHIM追加・更新時は、コピー元JDKファイルのヘッダをそのまま保持する。ヘッダ欠落の新規作成は禁止。
 3. **String is native-backed**: `NativePayload::JavaString`（Rust String）で管理。JDKのcompact-string (byte[]) パスは使えない。`Integer.toString`、`AbstractStringBuilder`等は独自実装を維持。
