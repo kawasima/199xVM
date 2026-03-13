@@ -60,6 +60,10 @@ const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
     returnType: "void",
     paramTypes: [{ className: "java/lang/Throwable" }],
   },
+  // IO (java.lang.IO — JEP 463/512 compact source helper)
+  "java/lang/IO.println(Ljava/lang/Object;)": { owner: "java/lang/IO", returnType: "void", paramTypes: [{ className: "java/lang/Object" }], isStatic: true },
+  "java/lang/IO.println()": { owner: "java/lang/IO", returnType: "void", paramTypes: [], isStatic: true },
+  "java/lang/IO.print(Ljava/lang/Object;)": { owner: "java/lang/IO", returnType: "void", paramTypes: [{ className: "java/lang/Object" }], isStatic: true },
   // StringBuilder
   "java/lang/StringBuilder.<init>()": { owner: "java/lang/StringBuilder", returnType: "void", paramTypes: [] },
   "java/lang/StringBuilder.append(Ljava/lang/String;)": { owner: "java/lang/StringBuilder", returnType: { className: "java/lang/StringBuilder" }, paramTypes: ["String"] },
