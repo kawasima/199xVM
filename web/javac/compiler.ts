@@ -1183,12 +1183,21 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
     }
     case "staticCall": {
       const internalName = expr.className.replace(/\./g, "/");
-      const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
-      for (const arg of expr.args) compileExpr(ctx, emitter, arg);
-      const retType = inferType(ctx, expr);
-      const desc = "(" + argTypes.join("") + ")" + typeToDescriptor(retType);
-      const mRef = ctx.cp.addMethodref(internalName, expr.method, desc);
-      emitter.emitInvokestatic(mRef, expr.args.length, retType !== "void");
+      const resolved = resolveMethodCandidate(ctx, internalName, expr.method, expr.args, true);
+      if (resolved) {
+        expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, resolved.paramTypes[i] ?? { className: "java/lang/Object" }));
+        const sigArgDescs = resolved.paramTypes.map(typeToDescriptor).join("");
+        const desc = "(" + sigArgDescs + ")" + typeToDescriptor(resolved.returnType);
+        const mRef = ctx.cp.addMethodref(internalName, expr.method, desc);
+        emitter.emitInvokestatic(mRef, expr.args.length, resolved.returnType !== "void");
+      } else {
+        const argTypes = expr.args.map(a => typeToDescriptor(inferType(ctx, a)));
+        for (const arg of expr.args) compileExpr(ctx, emitter, arg);
+        const retType = inferType(ctx, expr);
+        const desc = "(" + argTypes.join("") + ")" + typeToDescriptor(retType);
+        const mRef = ctx.cp.addMethodref(internalName, expr.method, desc);
+        emitter.emitInvokestatic(mRef, expr.args.length, retType !== "void");
+      }
       break;
     }
     case "fieldAccess": {
@@ -1581,6 +1590,19 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
     }
     default:
       throw new Error(`Unsupported expression: ${(expr as Expr).kind}`);
+  }
+
+  // Auto-boxing: if caller expects a reference type but we just pushed a primitive, box it.
+  if (expectedType && isRefType(expectedType)) {
+    const actualType = inferType(ctx, expr);
+    if (isPrimitiveType(actualType)) {
+      const info = BOX_INFO[actualType as string];
+      if (info) {
+        const mRef = ctx.cp.addMethodref(info.wrapper, "valueOf", info.desc);
+        emitter.emit(0xb8); // invokestatic
+        emitter.emitU16(mRef);
+      }
+    }
   }
 }
 
@@ -3180,12 +3202,9 @@ function compileMethod(
     compileStmt(ctx, emitter, stmt);
   }
 
-  // If method doesn't explicitly return, add return
-  const lastByte = emitter.code.length > 0 ? emitter.code[emitter.code.length - 1] : -1;
-  const isReturn = lastByte === 0xb1 || lastByte === 0xac || lastByte === 0xb0 || lastByte === 0xad || lastByte === 0xae || lastByte === 0xaf;
-  if (!isReturn) {
-    emitter.emitReturn(method.returnType);
-  }
+  // Always emit a trailing return so the method never falls off the end.
+  // If the body already ends with an explicit return this becomes dead code, which is harmless.
+  emitter.emitReturn(method.returnType);
 
   return { code: emitter.code, maxStack: Math.max(emitter.maxStack, 4), maxLocals: emitter.maxLocals, exceptionTable: emitter.exceptionTable };
 }

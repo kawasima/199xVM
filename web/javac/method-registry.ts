@@ -88,6 +88,26 @@ const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
   "java/util/List.add(Ljava/lang/Object;)": { owner: "java/util/List", returnType: "boolean", paramTypes: [{ className: "java/lang/Object" }], isInterface: true },
   "java/util/List.get(I)": { owner: "java/util/List", returnType: { className: "java/lang/Object" }, paramTypes: ["int"], isInterface: true },
   "java/util/List.size()": { owner: "java/util/List", returnType: "int", paramTypes: [], isInterface: true },
+  "java/util/List.contains(Ljava/lang/Object;)": { owner: "java/util/List", returnType: "boolean", paramTypes: [{ className: "java/lang/Object" }], isInterface: true },
+  "java/util/Set.size()": { owner: "java/util/Set", returnType: "int", paramTypes: [], isInterface: true },
+  "java/util/Set.contains(Ljava/lang/Object;)": { owner: "java/util/Set", returnType: "boolean", paramTypes: [{ className: "java/lang/Object" }], isInterface: true },
+  // List/Set/Map factory methods (Java 9+)
+  "java/util/List.of()": { owner: "java/util/List", returnType: { className: "java/util/List" }, paramTypes: [], isInterface: true, isStatic: true },
+  "java/util/List.of(Ljava/lang/Object;)": { owner: "java/util/List", returnType: { className: "java/util/List" }, paramTypes: [{ className: "java/lang/Object" }], isInterface: true, isStatic: true },
+  "java/util/List.of(Ljava/lang/Object;Ljava/lang/Object;)": { owner: "java/util/List", returnType: { className: "java/util/List" }, paramTypes: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }], isInterface: true, isStatic: true },
+  "java/util/List.of(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)": { owner: "java/util/List", returnType: { className: "java/util/List" }, paramTypes: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }, { className: "java/lang/Object" }], isInterface: true, isStatic: true },
+  "java/util/List.copyOf(Ljava/util/Collection;)": { owner: "java/util/List", returnType: { className: "java/util/List" }, paramTypes: [{ className: "java/util/Collection" }], isInterface: true, isStatic: true },
+  "java/util/Set.of()": { owner: "java/util/Set", returnType: { className: "java/util/Set" }, paramTypes: [], isInterface: true, isStatic: true },
+  "java/util/Set.of(Ljava/lang/Object;)": { owner: "java/util/Set", returnType: { className: "java/util/Set" }, paramTypes: [{ className: "java/lang/Object" }], isInterface: true, isStatic: true },
+  "java/util/Set.of(Ljava/lang/Object;Ljava/lang/Object;)": { owner: "java/util/Set", returnType: { className: "java/util/Set" }, paramTypes: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }], isInterface: true, isStatic: true },
+  "java/util/Set.of(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)": { owner: "java/util/Set", returnType: { className: "java/util/Set" }, paramTypes: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }, { className: "java/lang/Object" }], isInterface: true, isStatic: true },
+  "java/util/Set.of(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)": { owner: "java/util/Set", returnType: { className: "java/util/Set" }, paramTypes: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }, { className: "java/lang/Object" }, { className: "java/lang/Object" }], isInterface: true, isStatic: true },
+  "java/util/Set.copyOf(Ljava/util/Collection;)": { owner: "java/util/Set", returnType: { className: "java/util/Set" }, paramTypes: [{ className: "java/util/Collection" }], isInterface: true, isStatic: true },
+  "java/util/Map.of()": { owner: "java/util/Map", returnType: { className: "java/util/Map" }, paramTypes: [], isInterface: true, isStatic: true },
+  "java/util/Map.of(Ljava/lang/Object;Ljava/lang/Object;)": { owner: "java/util/Map", returnType: { className: "java/util/Map" }, paramTypes: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }], isInterface: true, isStatic: true },
+  "java/util/Map.of(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)": { owner: "java/util/Map", returnType: { className: "java/util/Map" }, paramTypes: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }, { className: "java/lang/Object" }, { className: "java/lang/Object" }], isInterface: true, isStatic: true },
+  "java/util/Map.entry(Ljava/lang/Object;Ljava/lang/Object;)": { owner: "java/util/Map", returnType: { className: "java/util/Map$Entry" }, paramTypes: [{ className: "java/lang/Object" }, { className: "java/lang/Object" }], isInterface: true, isStatic: true },
+  "java/util/Map.copyOf(Ljava/util/Map;)": { owner: "java/util/Map", returnType: { className: "java/util/Map" }, paramTypes: [{ className: "java/util/Map" }], isInterface: true, isStatic: true },
   // Functional interfaces
   "java/util/function/Function.apply(Ljava/lang/Object;)": {
     owner: "java/util/function/Function",
@@ -277,7 +297,10 @@ export function lookupKnownMethod(owner: string, method: string, argDescs: strin
       if (a === b) return true;
       const aRef = a.startsWith("L") || a.startsWith("[");
       const bRef = b.startsWith("L") || b.startsWith("[");
-      return aRef && bRef;
+      if (aRef && bRef) return true;
+      // Autoboxing: primitive actual → reference param (e.g. int → Object)
+      if (aRef && !bRef) return true;
+      return false;
     });
     if (compatible) {
       firstCompatible = knownMethods[key];

@@ -1021,6 +1021,25 @@ describe("Parser", () => {
     assert.equal(cls.fields.length, 1);
     assert.equal(cls.methods.length, 1);
   });
+  test("compact source file: record before void main() is treated as compact source", () => {
+    const src = `record Email(String value) {}\nrecord Age(int value) {}\nvoid main() { var e = new Email("x"); }`;
+    const classes = parseAll(lex(src), "Main");
+    // Should produce Email class, Age class, and implicit Main class
+    assert.ok(classes.length >= 3, `expected ≥3 classes, got ${classes.length}`);
+    const names = classes.map(c => c.name);
+    assert.ok(names.includes("Email"), "Email class missing");
+    assert.ok(names.includes("Age"), "Age class missing");
+    assert.ok(names.includes("Main"), "Main implicit class missing");
+    const main = classes.find(c => c.name === "Main");
+    assert.equal(main?.isImplicit, true);
+  });
+  test("compact source file: enum alone (no void main) is explicit class", () => {
+    const src = `public enum Color { RED, GREEN, BLUE; }`;
+    const classes = parseAll(lex(src), "Main");
+    assert.equal(classes.length, 1);
+    assert.equal(classes[0].kind, "enum");
+    assert.equal(classes[0].name, "Color");
+  });
   test("synchronized method modifier", () => {
     const src = `public class Sync {
       public synchronized void foo() {}

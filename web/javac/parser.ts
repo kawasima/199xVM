@@ -146,10 +146,15 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     expect(TokenKind.Semi);
   }
 
-  // Detect compact source file: no class/interface/enum/record/annotation at top level
-  function isClassLikeKeyword(): boolean {
-    // skip modifiers to peek at the real keyword
+  // Detect compact source file (JEP 463/512):
+  // - If the file starts with class/interface/enum/record (with optional modifiers) AND contains
+  //   no void main(), it is a normal explicit class file.
+  // - If the file starts with record/enum but also has void main(), it is a compact source file
+  //   (record/enum are allowed alongside void main() in compact source — JEP 463).
+  // - If the file starts with something other than class/interface/enum/record, it is compact.
+  function isCompactSource(): boolean {
     let i = pos;
+    // Skip modifiers that can precede a class/interface/record/enum declaration
     while (i < tokens.length && (
       tokens[i].kind === TokenKind.KwPublic ||
       tokens[i].kind === TokenKind.KwAbstract ||
@@ -158,14 +163,28 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       tokens[i].kind === TokenKind.KwNonSealed
     )) i++;
     const k = tokens[i]?.kind;
-    return k === TokenKind.KwClass || k === TokenKind.KwInterface ||
-           k === TokenKind.KwRecord || k === TokenKind.KwEnum ||
-           (k === TokenKind.At && tokens[i + 1]?.kind === TokenKind.KwInterface);
+    // Definitely an explicit class file
+    if (k === TokenKind.KwClass || k === TokenKind.KwInterface ||
+        (k === TokenKind.At && tokens[i + 1]?.kind === TokenKind.KwInterface)) {
+      return false;
+    }
+    // Starts with record/enum: compact only if there is also a void main()
+    if (k === TokenKind.KwRecord || k === TokenKind.KwEnum) {
+      for (let j = i + 1; j < tokens.length - 1; j++) {
+        if (tokens[j].kind === TokenKind.KwVoid &&
+            tokens[j + 1]?.kind === TokenKind.Ident && tokens[j + 1]?.value === "main") {
+          return true;
+        }
+      }
+      return false; // record/enum alone, no void main() → explicit class
+    }
+    // Starts with something else (method/field/void main) → compact source
+    return true;
   }
 
-  if (!at(TokenKind.EOF) && !isClassLikeKeyword()) {
+  if (!at(TokenKind.EOF) && isCompactSource()) {
     // Compact source file — parse members directly and wrap in an implicit class
-    return [parseCompactSource(implicitClassName ?? "Main")];
+    return parseCompactSource(implicitClassName ?? "Main");
   }
 
   // Parse one or more class/record declarations
@@ -177,11 +196,20 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
 
   /// Parse a compact source file (JEP 463/512): top-level members without a class declaration.
   /// Wraps all parsed members in a synthetic final class with the given name.
-  function parseCompactSource(className: string): ClassDecl {
+  function parseCompactSource(className: string): ClassDecl[] {
     const fields: FieldDecl[] = [];
     const methods: MethodDecl[] = [];
     const nestedClasses: ClassDecl[] = [];
+    const siblings: ClassDecl[] = []; // top-level record/enum companions
     while (!at(TokenKind.EOF)) {
+      // record/enum at top level in compact source — parse as sibling (independent) classes
+      if (at(TokenKind.KwRecord) || at(TokenKind.KwEnum)) {
+        const sibling = parseOneClass();
+        // Register the simple name so the implicit class body can resolve it
+        importMap.set(sibling.name, sibling.name);
+        siblings.push(sibling);
+        continue;
+      }
       parseMember(fields, methods, nestedClasses, className, "class");
     }
     // In implicit classes, all methods are implicitly static (JEP 463)
@@ -192,7 +220,7 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     for (const f of fields) {
       f.isStatic = true;
     }
-    return {
+    const implicit: ClassDecl = {
       name: className,
       kind: "class",
       superClass: "java/lang/Object",
@@ -205,6 +233,7 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       staticWildcardImports,
       isImplicit: true,
     };
+    return [...siblings, implicit];
   }
 
   function parseOneClass(): ClassDecl {

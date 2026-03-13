@@ -370,6 +370,9 @@
           <div class="cat-submenu">
             <div class="snippet-item" data-key="arraylist">ArrayList</div>
             <div class="snippet-item" data-key="list_ops">List operations</div>
+            <div class="snippet-item" data-key="list_of">List.of / Set.of (Java 9+)</div>
+            <div class="snippet-item" data-key="map_of">Map.of (Java 9+)</div>
+            <div class="snippet-item" data-key="hashmap">HashMap</div>
           </div>
         </div>
         <div class="cat-item">
@@ -766,6 +769,70 @@ void main() {
     IO.println(second + " | " + sb.toString());
 }
 `,
+      list_of: `import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+
+void main() {
+    // Immutable factory methods — Java 9+
+    var fruits = List.of("apple", "banana", "cherry");
+    IO.println("list=" + fruits);
+    IO.println("size=" + fruits.size());
+
+    // Set.of — order not guaranteed, no duplicates
+    var primes = Set.of(2, 3, 5, 7);
+    IO.println("primes size=" + primes.size());
+    IO.println("contains 3=" + primes.contains(3));
+
+    // List.copyOf — defensive copy (Java 10)
+    var mutable = new ArrayList<String>();
+    mutable.add("x");
+    mutable.add("y");
+    var snapshot = List.copyOf(mutable);
+    mutable.add("z");  // snapshot unaffected
+    IO.println("snapshot=" + snapshot + " mutable=" + mutable);
+}
+`,
+      map_of: `import java.util.Map;
+
+void main() {
+    // Immutable map — Java 9+
+    var scores = Map.of("alice", 95, "bob", 87, "carol", 92);
+    IO.println("size=" + scores.size());
+    IO.println("alice=" + scores.get("alice"));
+
+    // Map.entry for explicit entries
+    var entry = Map.entry("key", "value");
+    IO.println("entry=" + entry.getKey() + "=" + entry.getValue());
+
+    // Empty and single-entry maps
+    var empty = Map.of();
+    var single = Map.of("x", 1);
+    IO.println("empty=" + empty.size() + " single=" + single.size());
+}
+`,
+      hashmap: `import java.util.HashMap;
+import java.util.Map;
+
+void main() {
+    var map = new HashMap<String, Integer>();
+    map.put("a", 1);
+    map.put("b", 2);
+    map.put("c", 3);
+
+    IO.println("size=" + map.size());
+    IO.println("b=" + map.get("b"));
+    IO.println("has-a=" + map.containsKey("a"));
+
+    map.remove("b");
+    IO.println("after-remove=" + map.size());
+
+    // putIfAbsent — only inserts when key absent
+    map.putIfAbsent("a", 99);
+    map.putIfAbsent("d", 4);
+    IO.println("a=" + map.get("a") + " d=" + map.get("d"));
+}
+`,
       lambda_method_ref: `import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -840,33 +907,30 @@ public class RecordModernDemo {
       raoh_primitives: `import net.unit8.raoh.Result;
 import static net.unit8.raoh.ObjectDecoders.*;
 
-public class RaohPrimitives {
-    public static String run() {
-        // Basic decoding
-        Result s = string().decode("hello");
-        Result i = int_().decode(42);
-        Result b = bool().decode(true);
-        Result d = decimal().decode(19.99);
+void main() {
+    // Basic decoding
+    Result s = string().decode("hello");
+    Result i = int_().decode(42);
+    Result b = bool().decode(true);
+    Result d = decimal().decode(19.99);
+    IO.println(s + " | " + i + " | " + b + " | " + d);
 
-        // String constraints: trim + lowercase + email
-        Result email = string().trim().toLowerCase().email()
-                .decode("  USER@Example.COM  ");
+    // String constraints: trim + lowercase + email
+    Result email = string().trim().toLowerCase().email()
+            .decode("  USER@Example.COM  ");
+    IO.println("email=" + email);
 
-        // Numeric constraint: range
-        Result age = int_().range(0, 150).decode(25);
+    // Numeric constraint: range
+    Result age = int_().range(0, 150).decode(25);
+    IO.println("age=" + age);
 
-        // Type mismatch → error
-        Result bad = int_().decode("not a number");
+    // Type mismatch → error
+    Result bad = int_().decode("not a number");
+    IO.println("bad=" + bad);
 
-        // String length constraint
-        Result tooShort = string().minLength(3).maxLength(20).decode("ab");
-
-        return s + " | " + i + " | " + b + " | " + d
-                + "\\nemail=" + email
-                + "\\nage=" + age
-                + "\\nbad=" + bad
-                + "\\ntooShort=" + tooShort;
-    }
+    // String length constraint
+    Result tooShort = string().minLength(3).maxLength(20).decode("ab");
+    IO.println("tooShort=" + tooShort);
 }
 `,
       raoh_domain_map: `import net.unit8.raoh.Result;
@@ -875,18 +939,18 @@ import static net.unit8.raoh.ObjectDecoders.*;
 record Email(String value) {}
 record Age(int value) {}
 
-public class RaohDomainMap {
-    public static String run() {
-        // map() converts raw values to domain types at the boundary
-        var emailDec = string().trim().toLowerCase().email().map(Email::new);
-        var ageDec = int_().range(0, 150).map(Age::new);
+void main() {
+    // map() converts raw values to domain types at the boundary
+    var emailDec = string().trim().toLowerCase().email().map(Email::new);
+    var ageDec = int_().range(0, 150).map(Age::new);
 
-        Result email = emailDec.decode("  ALICE@example.com  ");
-        Result age = ageDec.decode(25);
-        Result badAge = ageDec.decode(300);
+    Result email = emailDec.decode("  ALICE@example.com  ");
+    Result age = ageDec.decode(25);
+    Result badAge = ageDec.decode(300);
 
-        return email + "\\n" + age + "\\n" + badAge;
-    }
+    IO.println(email);
+    IO.println(age);
+    IO.println(badAge);
 }
 `,
       raoh_combine: `import java.util.Map;
@@ -896,22 +960,21 @@ import static net.unit8.raoh.map.MapDecoders.*;
 
 record User(String name, int age) {}
 
-public class RaohCombine {
-    public static String run() {
-        // combine assembles multiple fields — errors accumulate
-        var userDec = combine(
-                field("name", string().nonBlank()),
-                field("age", int_().range(0, 150))
-        ).map(User::new);
+void main() {
+    // combine assembles multiple fields — errors accumulate
+    var userDec = combine(
+            field("name", string().nonBlank()),
+            field("age", int_().range(0, 150))
+    ).map(User::new);
 
-        // Success case
-        Result ok = userDec.decode(Map.of("name", "alice", "age", 30));
+    // Success case
+    Result ok = userDec.decode(Map.of("name", "alice", "age", 30));
 
-        // Both fields invalid → both errors returned at once
-        Result errs = userDec.decode(Map.of("name", "", "age", 300));
+    // Both fields invalid → both errors returned at once
+    Result errs = userDec.decode(Map.of("name", "", "age", 300));
 
-        return ok + "\\n" + errs;
-    }
+    IO.println(ok);
+    IO.println(errs);
 }
 `,
       raoh_nested: `import java.util.Map;
@@ -922,31 +985,30 @@ import static net.unit8.raoh.map.MapDecoders.*;
 record Address(String city, String zip) {}
 record Customer(String name, Address address) {}
 
-public class RaohNested {
-    public static String run() {
-        // Nested object decoder — error paths compose as /address/city
-        var addressDec = combine(
-                field("city", string().nonBlank()),
-                field("zip", string().nonBlank())
-        ).map(Address::new);
+void main() {
+    // Nested object decoder — error paths compose as /address/city
+    var addressDec = combine(
+            field("city", string().nonBlank()),
+            field("zip", string().nonBlank())
+    ).map(Address::new);
 
-        var customerDec = combine(
-                field("name", string().nonBlank()),
-                field("address", nested(addressDec))
-        ).map(Customer::new);
+    var customerDec = combine(
+            field("name", string().nonBlank()),
+            field("address", nested(addressDec))
+    ).map(Customer::new);
 
-        Result ok = customerDec.decode(Map.of(
-                "name", "Alice",
-                "address", Map.of("city", "Tokyo", "zip", "100-0001")
-        ));
+    Result ok = customerDec.decode(Map.of(
+            "name", "Alice",
+            "address", Map.of("city", "Tokyo", "zip", "100-0001")
+    ));
 
-        Result bad = customerDec.decode(Map.of(
-                "name", "",
-                "address", Map.of("city", "", "zip", "")
-        ));
+    Result bad = customerDec.decode(Map.of(
+            "name", "",
+            "address", Map.of("city", "", "zip", "")
+    ));
 
-        return ok + "\\n" + bad;
-    }
+    IO.println(ok);
+    IO.println(bad);
 }
 `,
       raoh_list: `import java.util.List;
@@ -957,29 +1019,28 @@ import static net.unit8.raoh.map.MapDecoders.*;
 
 record OrderItem(String productId, int quantity) {}
 
-public class RaohList {
-    public static String run() {
-        // List elements are all checked — errors include index paths
-        var itemDec = combine(
-                field("productId", string().nonBlank()),
-                field("quantity", int_().positive())
-        ).map(OrderItem::new);
+void main() {
+    // List elements are all checked — errors include index paths
+    var itemDec = combine(
+            field("productId", string().nonBlank()),
+            field("quantity", int_().positive())
+    ).map(OrderItem::new);
 
-        var itemsDec = field("items", list(nested(itemDec)).nonempty());
+    var itemsDec = field("items", list(nested(itemDec)).nonempty());
 
-        Result ok = itemsDec.decode(Map.of("items", List.of(
-                Map.of("productId", "A001", "quantity", 3),
-                Map.of("productId", "B002", "quantity", 1)
-        )));
+    Result ok = itemsDec.decode(Map.of("items", List.of(
+            Map.of("productId", "A001", "quantity", 3),
+            Map.of("productId", "B002", "quantity", 1)
+    )));
 
-        // Second item has errors → paths show /items/1/productId, /items/1/quantity
-        Result bad = itemsDec.decode(Map.of("items", List.of(
-                Map.of("productId", "A001", "quantity", 3),
-                Map.of("productId", "", "quantity", -1)
-        )));
+    // Second item has errors → paths show /items/1/productId, /items/1/quantity
+    Result bad = itemsDec.decode(Map.of("items", List.of(
+            Map.of("productId", "A001", "quantity", 3),
+            Map.of("productId", "", "quantity", -1)
+    )));
 
-        return ok + "\\n" + bad;
-    }
+    IO.println(ok);
+    IO.println(bad);
 }
 `,
       raoh_optional: `import java.util.HashMap;
@@ -988,37 +1049,35 @@ import net.unit8.raoh.*;
 import static net.unit8.raoh.ObjectDecoders.*;
 import static net.unit8.raoh.map.MapDecoders.*;
 
-public class RaohOptional {
-    public static String run() {
-        // Three states: present / null / absent
-        // optionalField → Optional.empty when field absent
-        Result absent = optionalField("middleName", string())
-                .decode(Map.of());
+void main() {
+    // Three states: present / null / absent
+    // optionalField → Optional.empty when field absent
+    Result absent = optionalField("middleName", string())
+            .decode(Map.of());
 
-        // nullable → allows explicit null
-        var m = new HashMap<String, Object>();
-        m.put("nickname", null);
-        Result nullable = field("nickname", nullable(string()))
-                .decode(m);
+    // nullable → allows explicit null
+    var m = new HashMap<String, Object>();
+    m.put("nickname", null);
+    Result nullable = field("nickname", nullable(string()))
+            .decode(m);
 
-        // optionalNullableField → Presence (Present / PresentNull / Absent)
-        Result present = optionalNullableField("bio", string())
-                .decode(Map.of("bio", "hello"));
+    // optionalNullableField → Presence (Present / PresentNull / Absent)
+    Result present = optionalNullableField("bio", string())
+            .decode(Map.of("bio", "hello"));
 
-        var m2 = new HashMap<String, Object>();
-        m2.put("bio", null);
-        Result presentNull = optionalNullableField("bio", string())
-                .decode(m2);
+    var m2 = new HashMap<String, Object>();
+    m2.put("bio", null);
+    Result presentNull = optionalNullableField("bio", string())
+            .decode(m2);
 
-        Result absentField = optionalNullableField("bio", string())
-                .decode(Map.of());
+    Result absentField = optionalNullableField("bio", string())
+            .decode(Map.of());
 
-        return "absent=" + absent
-                + "\\nnullable=" + nullable
-                + "\\npresent=" + present
-                + "\\npresentNull=" + presentNull
-                + "\\nabsentField=" + absentField;
-    }
+    IO.println("absent=" + absent);
+    IO.println("nullable=" + nullable);
+    IO.println("present=" + present);
+    IO.println("presentNull=" + presentNull);
+    IO.println("absentField=" + absentField);
 }
 `,
       raoh_enum: `import java.util.Map;
@@ -1029,22 +1088,22 @@ import static net.unit8.raoh.Decoders.*;
 
 enum Role { ADMIN, MEMBER, GUEST }
 
-public class RaohEnum {
-    public static String run() {
-        // Case-insensitive enum decoding
-        Result admin = field("role", enumOf(Role.class))
-                .decode(Map.of("role", "admin"));
+void main() {
+    // Case-insensitive enum decoding
+    Result admin = field("role", enumOf(Role.class))
+            .decode(Map.of("role", "admin"));
 
-        // withDefault when field missing
-        Result defaultRole = field("role", withDefault(enumOf(Role.class), Role.MEMBER))
-                .decode(Map.of());
+    // withDefault when field missing
+    Result defaultRole = field("role", withDefault(enumOf(Role.class), Role.MEMBER))
+            .decode(Map.of());
 
-        // Invalid value → error
-        Result bad = field("role", enumOf(Role.class))
-                .decode(Map.of("role", "superadmin"));
+    // Invalid value → error
+    Result bad = field("role", enumOf(Role.class))
+            .decode(Map.of("role", "superadmin"));
 
-        return admin + "\\n" + defaultRole + "\\n" + bad;
-    }
+    IO.println(admin);
+    IO.println(defaultRole);
+    IO.println(bad);
 }
 `,
       raoh_errors: `import java.util.Map;
@@ -1052,26 +1111,24 @@ import net.unit8.raoh.*;
 import static net.unit8.raoh.ObjectDecoders.*;
 import static net.unit8.raoh.map.MapDecoders.*;
 
-public class RaohErrors {
-    public static String run() {
-        // All errors accumulate — not short-circuited
-        var dec = combine(
-                field("email", string().email()),
-                field("age", int_().range(0, 150)),
-                field("name", string().nonBlank())
-        ).map((e, a, n) -> e + ":" + a + ":" + n);
+void main() {
+    // All errors accumulate — not short-circuited
+    var dec = combine(
+            field("email", string().email()),
+            field("age", int_().range(0, 150)),
+            field("name", string().nonBlank())
+    ).map((e, a, n) -> e + ":" + a + ":" + n);
 
-        Result result = dec.decode(Map.of("email", "bad", "age", 300, "name", ""));
+    Result result = dec.decode(Map.of("email", "bad", "age", 300, "name", ""));
 
-        // flatten() → path-keyed error map for form display
-        String flat = "";
-        if (result instanceof Err err) {
-            flat = err.issues().flatten().toString();
-        }
-
-        // Also show the result itself
-        return result + "\\nflatten=" + flat;
+    // flatten() → path-keyed error map for form display
+    String flat = "";
+    if (result instanceof Err err) {
+        flat = err.issues().flatten().toString();
     }
+
+    IO.println(result);
+    IO.println("flatten=" + flat);
 }
 `,
       raoh_json: `import tools.jackson.databind.JsonNode;
@@ -1081,24 +1138,23 @@ import static net.unit8.raoh.json.JsonDecoders.*;
 
 record Person(String name, int age) {}
 
-public class RaohJson {
-    public static String run() throws Exception {
-        JsonMapper mapper = JsonMapper.builder().build();
+void main() throws Exception {
+    JsonMapper mapper = JsonMapper.builder().build();
 
-        // Same decoder pattern, but reads from JSON
-        var personDec = combine(
-                field("name", string().nonBlank()),
-                field("age", int_().range(0, 150))
-        ).map(Person::new);
+    // Same decoder pattern, but reads from JSON
+    var personDec = combine(
+            field("name", string().nonBlank()),
+            field("age", int_().range(0, 150))
+    ).map(Person::new);
 
-        JsonNode ok = mapper.readTree("{\\"name\\":\\"alice\\",\\"age\\":30}");
-        Result valid = personDec.decode(ok);
+    JsonNode ok = mapper.readTree("{\\"name\\":\\"alice\\",\\"age\\":30}");
+    Result valid = personDec.decode(ok);
 
-        JsonNode bad = mapper.readTree("{\\"name\\":\\"\\",\\"age\\":300}");
-        Result invalid = personDec.decode(bad);
+    JsonNode bad = mapper.readTree("{\\"name\\":\\"\\",\\"age\\":300}");
+    Result invalid = personDec.decode(bad);
 
-        return valid + "\\n" + invalid;
-    }
+    IO.println(valid);
+    IO.println(invalid);
 }
 `,
       jvm_reflection_record: `record Book(String title, int pages) {}
@@ -1642,9 +1698,10 @@ public class JvmInterfaceDefault implements Describable {
       if (runMatch) return runMatch[1];
       const all = [...source.matchAll(/public\s+class\s+(\w+)/g)];
       if (all.length > 0) return all[all.length - 1][1];
-      // Compact source file (JEP 463): no class/interface/record/enum declaration → implicit class
+      // Compact source file (JEP 463): record/enum are allowed alongside void main() in compact source.
+      // Only a standalone class/interface declaration (not record/enum) means it's an explicit class.
       // Only match no-arg void main() — void main(String[] args) is not supported in compact mode
-      if (!source.match(/\b(class|interface|record|enum)\s+\w+/) && source.match(/void\s+main\s*\(\s*\)/))
+      if (!source.match(/\bclass\s+\w+/) && !source.match(/\binterface\s+\w+/) && source.match(/void\s+main\s*\(\s*\)/))
         return "__implicit__";
       return null;
     }

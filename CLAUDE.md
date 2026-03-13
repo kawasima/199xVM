@@ -50,6 +50,13 @@ All build tasks are managed via `make`. Key targets:
 3. **String is native-backed**: `NativePayload::JavaString`（Rust String）で管理。JDKのcompact-string (byte[]) パスは使えない。`Integer.toString`、`AbstractStringBuilder`等は独自実装を維持。
 4. **削除してよいもの**: serialization (`readObject`/`writeObject`/`serialVersionUID`/`SharedSecrets`)、`Unsafe`（標準フィールドアクセスに置換）、JDK内部アノテーション (`@IntrinsicCandidate`/`@ForceInline`/`@Stable`/`@ValueBased`)。
 
+## Snippet Guidelines (`web/index.html`)
+
+- **Use compact source files by default**: Write snippets as `void main() { … }` (JEP 463) rather than `public class Foo { public static String run() { … } }`.
+- Use `IO.println(…)` for output instead of returning a String.
+- Exceptions can be declared: `void main() throws Exception { … }` is valid.
+- Only use the explicit class form when the snippet genuinely needs multiple top-level types that cannot be expressed as records/enums alongside `main()`, or when the class name itself is meaningful to the example.
+
 ## Web Compiler (`web/javac.ts`)
 
 - Import resolution: `resolveClassName(ctx, name)` converts short class names (e.g., `ArrayList`) to internal JVM names (e.g., `java/util/ArrayList`) using the import map. Always use this when emitting class references.
