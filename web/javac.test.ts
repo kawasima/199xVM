@@ -11,8 +11,32 @@ import { test, describe } from "node:test";
 import * as assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import initJvm, { run_static } from "../jvm-core/pkg/jvm_core.js";
-import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry, disassemble, setMethodRegistry, setClassInterfaces, resetMethodRegistry } from "./javac.js";
+import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, disassemble, setMethodRegistry, setClassInterfaces, resetMethodRegistry } from "./javac.js";
 import type { MethodSig } from "./javac/method-registry.js";
+
+// Pre-load shim method registry so compiler tests work without bundle.bin being
+// explicitly set up (mirrors index.html loadClassBundle).
+// Stored in module scope so resetAndReloadShim() can re-apply after resetMethodRegistry().
+let _shimRegistryCache: { reg: Record<string, import("./javac/method-registry.js").MethodSig>; ifaces: Record<string, string[]> } | null = null;
+
+function reloadShimRegistry(): void {
+  if (_shimRegistryCache) {
+    setMethodRegistry(_shimRegistryCache.reg);
+    setClassInterfaces(_shimRegistryCache.ifaces);
+  }
+}
+
+{
+  const shimPath = new URL("../jdk-shim/bundle.bin", import.meta.url);
+  try {
+    const shimBytes = new Uint8Array(await readFile(shimPath));
+    const metas = parseBundleMeta(shimBytes);
+    _shimRegistryCache = { reg: buildMethodRegistry(metas), ifaces: buildClassInterfaces(metas) };
+    reloadShimRegistry();
+  } catch {
+    // bundle.bin not available — run `make shim` first
+  }
+}
 
 // Minimal Raoh method registry for tests that reference Raoh classes.
 // In production these are built dynamically from loaded JARs via buildMethodRegistry().
@@ -205,6 +229,10 @@ async function ensureRuntimeReady(): Promise<void> {
       const wasmBytes = await readFile(new URL("../jvm-core/pkg/jvm_core_bg.wasm", import.meta.url));
       await initJvm({ module_or_path: wasmBytes });
       shimBundle = new Uint8Array(await readFile(new URL("../jdk-shim/bundle.bin", import.meta.url)));
+      // Re-register in case resetMethodRegistry() was called between tests
+      const metas = parseBundleMeta(shimBundle);
+      setMethodRegistry(buildMethodRegistry(metas));
+      setClassInterfaces(buildClassInterfaces(metas));
     })();
   }
   await runtimeReady;
@@ -1521,7 +1549,7 @@ describe("Code generator", () => {
       const text = new TextDecoder().decode(bytes);
       assert.ok(text.includes("ObjectDecoders"), "wildcard class in constant pool");
       assert.ok(text.includes("string"), "method name in constant pool");
-    } finally { resetMethodRegistry(); }
+    } finally { resetMethodRegistry(); reloadShimRegistry(); }
   });
 
   test("import static wildcard resolves same as import wildcard", () => {
@@ -1541,7 +1569,7 @@ describe("Code generator", () => {
       assert.ok(text.includes("ObjectDecoders"), "wildcard class in constant pool");
       // Must NOT contain 'staticnet' (the bug: static keyword prepended to class name)
       assert.ok(!text.includes("staticnet"), "no 'staticnet' corruption in constant pool");
-    } finally { resetMethodRegistry(); }
+    } finally { resetMethodRegistry(); reloadShimRegistry(); }
   });
 
   test("named import resolves class reference", () => {
@@ -3825,7 +3853,7 @@ public class RaohDomainMap {
       assert.ok(output.includes("invokevirtual") && output.includes("trim"), "trim must be invokevirtual");
       assert.ok(output.includes("toLowerCase"), "toLowerCase must appear in bytecode");
       assert.ok(output.includes("email"), "email must appear in bytecode");
-    } finally { resetMethodRegistry(); }
+    } finally { resetMethodRegistry(); reloadShimRegistry(); }
   });
 
   test("Decoder.decode emits invokeinterface not invokevirtual", () => {
@@ -3845,6 +3873,6 @@ public class DecoderInvokeTest {
       const output = disassemble(bytes);
       // The call to decode on a Decoder (interface) must use invokeinterface
       assert.ok(output.includes("invokeinterface"), "must emit invokeinterface for Decoder.decode, got: " + output);
-    } finally { resetMethodRegistry(); }
+    } finally { resetMethodRegistry(); reloadShimRegistry(); }
   });
 });
