@@ -371,7 +371,10 @@ impl super::Vm {
                     let anchored = format!("^(?:{regex})$");
                     regex::Regex::new(&anchored)
                         .map(|re| re.is_match(&input))
-                        .unwrap_or(false)
+                        .unwrap_or_else(|e| {
+                            eprintln!("Unsupported regex pattern '{regex}': {e}");
+                            false
+                        })
                 };
                 Some(JValue::Int(if ok { 1 } else { 0 }))
             }

@@ -239,6 +239,17 @@ function parseOneDescriptor(desc: string, start: number): [Type, number] {
 // Method registry builder
 // ---------------------------------------------------------------------------
 
+/** Build a class→interfaces map from loaded class metadata. */
+export function buildClassInterfaces(classes: ClassMeta[]): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const cls of classes) {
+    if (cls.interfaces.length > 0) {
+      result[cls.name] = cls.interfaces;
+    }
+  }
+  return result;
+}
+
 export function buildMethodRegistry(classes: ClassMeta[]): Record<string, MethodSig> {
   const registry: Record<string, MethodSig> = {};
   for (const cls of classes) {

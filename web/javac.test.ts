@@ -11,11 +11,20 @@ import { test, describe } from "node:test";
 import * as assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import initJvm, { run_static } from "../jvm-core/pkg/jvm_core.js";
-import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry, disassemble, setMethodRegistry, resetMethodRegistry } from "./javac.js";
+import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry, disassemble, setMethodRegistry, setClassInterfaces, resetMethodRegistry } from "./javac.js";
 import type { MethodSig } from "./javac/method-registry.js";
 
 // Minimal Raoh method registry for tests that reference Raoh classes.
 // In production these are built dynamically from loaded JARs via buildMethodRegistry().
+const RAOH_TEST_CLASS_INTERFACES: Record<string, string[]> = {
+  "net/unit8/raoh/builtin/StringDecoder": ["net/unit8/raoh/Decoder"],
+  "net/unit8/raoh/builtin/IntDecoder": ["net/unit8/raoh/Decoder"],
+  "net/unit8/raoh/builtin/DecimalDecoder": ["net/unit8/raoh/Decoder"],
+  "net/unit8/raoh/FieldDecoder": ["net/unit8/raoh/Decoder"],
+  "net/unit8/raoh/Ok": ["net/unit8/raoh/Result"],
+  "net/unit8/raoh/Err": ["net/unit8/raoh/Result"],
+};
+
 const RAOH_TEST_REGISTRY: Record<string, MethodSig> = {
   "net/unit8/raoh/ObjectDecoders.string()": { owner: "net/unit8/raoh/ObjectDecoders", returnType: { className: "net/unit8/raoh/builtin/StringDecoder" }, paramTypes: [], isStatic: true },
   "net/unit8/raoh/ObjectDecoders.int_()": { owner: "net/unit8/raoh/ObjectDecoders", returnType: { className: "net/unit8/raoh/builtin/IntDecoder" }, paramTypes: [], isStatic: true },
@@ -1479,6 +1488,7 @@ describe("Code generator", () => {
 
   test("wildcard import resolves unqualified static call to imported class", () => {
     setMethodRegistry(RAOH_TEST_REGISTRY);
+    setClassInterfaces(RAOH_TEST_CLASS_INTERFACES);
     try {
       const bytes = compile(`
         import net.unit8.raoh.ObjectDecoders.*;
@@ -1497,6 +1507,7 @@ describe("Code generator", () => {
 
   test("import static wildcard resolves same as import wildcard", () => {
     setMethodRegistry(RAOH_TEST_REGISTRY);
+    setClassInterfaces(RAOH_TEST_CLASS_INTERFACES);
     try {
       const bytes = compile(`
         import static net.unit8.raoh.ObjectDecoders.*;
@@ -3772,6 +3783,7 @@ public class RecordToStringTest {
 
   test("RaohDomainMap compiles chain trim().toLowerCase().email().map() with invokevirtual", () => {
     setMethodRegistry(RAOH_TEST_REGISTRY);
+    setClassInterfaces(RAOH_TEST_CLASS_INTERFACES);
     try {
       const src = `import net.unit8.raoh.Result;
 import static net.unit8.raoh.ObjectDecoders.*;
@@ -3799,6 +3811,7 @@ public class RaohDomainMap {
 
   test("Decoder.decode emits invokeinterface not invokevirtual", () => {
     setMethodRegistry(RAOH_TEST_REGISTRY);
+    setClassInterfaces(RAOH_TEST_CLASS_INTERFACES);
     try {
       const bytes = compile(`import net.unit8.raoh.*;
 import static net.unit8.raoh.ObjectDecoders.*;
