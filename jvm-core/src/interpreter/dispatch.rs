@@ -593,6 +593,100 @@ impl Vm {
                 Ok(JValue::Int(matched_idx))
             }
 
+            "java/lang/runtime/ObjectMethods" => {
+                // ObjectMethods bootstrap — used by Java records for toString/equals/hashCode.
+                //
+                // Bootstrap arguments layout (JVMS §6.5 + JDK source):
+                //   [0] = CONSTANT_Class   — the record class
+                //   [1] = CONSTANT_String  — component names, semicolon-separated
+                //   [2..] = MethodHandle   — one getter per component (invokeVirtual, ref_kind=5)
+                //
+                // The dynamic `method_name` is "toString", "equals", or "hashCode".
+                // We return a pseudo-lambda (RecordMethod payload) that the VM
+                // dispatches when the method is invoked on a record instance.
+                let n_args = count_args(&descriptor);
+                let _captured = pop_args(frame, n_args);
+
+                // Extract record class name from bootstrap arg[0].
+                let record_class = bm.bootstrap_arguments.first().and_then(|&idx| {
+                    match cp.get(idx as usize)? {
+                        ConstantPoolEntry::Class { name_index } => {
+                            match cp.get(*name_index as usize)? {
+                                ConstantPoolEntry::Utf8(s) => Some(s.clone()),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                }).unwrap_or_default();
+
+                // Simple class name (after last '/') for toString output.
+                let class_simple_name = record_class.split('/').last().unwrap_or(&record_class).to_owned();
+
+                // Component names from bootstrap arg[1] (semicolon-separated string).
+                let component_names: Vec<String> = bm.bootstrap_arguments.get(1).and_then(|&idx| {
+                    match cp.get(idx as usize)? {
+                        ConstantPoolEntry::String { string_index } => {
+                            match cp.get(*string_index as usize)? {
+                                ConstantPoolEntry::Utf8(s) => Some(s.clone()),
+                                _ => None,
+                            }
+                        }
+                        ConstantPoolEntry::Utf8(s) => Some(s.clone()),
+                        _ => None,
+                    }
+                }).map(|s| if s.is_empty() { vec![] } else { s.split(';').map(|c| c.to_owned()).collect() })
+                  .unwrap_or_default();
+
+                // Getter MethodHandles from bootstrap args[2..].
+                let getters: Vec<(String, String, String)> = bm.bootstrap_arguments.iter().skip(2).filter_map(|&arg_idx| {
+                    match cp.get(arg_idx as usize)? {
+                        ConstantPoolEntry::MethodHandle { reference_index, .. } => {
+                            match cp.get(*reference_index as usize)? {
+                                ConstantPoolEntry::Methodref { class_index, name_and_type_index } => {
+                                    let cls = match cp.get(*class_index as usize)? {
+                                        ConstantPoolEntry::Class { name_index } => {
+                                            match cp.get(*name_index as usize)? {
+                                                ConstantPoolEntry::Utf8(s) => s.clone(),
+                                                _ => return None,
+                                            }
+                                        }
+                                        _ => return None,
+                                    };
+                                    let (mname, mdesc) = match cp.get(*name_and_type_index as usize)? {
+                                        ConstantPoolEntry::NameAndType { name_index, descriptor_index } => {
+                                            let n = match cp.get(*name_index as usize)? {
+                                                ConstantPoolEntry::Utf8(s) => s.clone(), _ => return None,
+                                            };
+                                            let d = match cp.get(*descriptor_index as usize)? {
+                                                ConstantPoolEntry::Utf8(s) => s.clone(), _ => return None,
+                                            };
+                                            (n, d)
+                                        }
+                                        _ => return None,
+                                    };
+                                    Some((cls, mname, mdesc))
+                                }
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                }).collect();
+
+                let obj = Rc::new(RefCell::new(JObject {
+                    class_name: "$$RecordMethod".to_owned(),
+                    fields: std::collections::HashMap::new(),
+                    native: NativePayload::RecordMethod {
+                        method: method_name,
+                        class_simple_name,
+                        component_names,
+                        getters,
+                    },
+                }));
+                Ok(JValue::Ref(Some(obj)))
+            }
+
             _ => {
                 // Unknown bootstrap class — throw BootstrapMethodError per JVMS §6.5.
                 let detail = format!("unknown bootstrap class: {bm_class}");

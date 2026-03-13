@@ -1267,6 +1267,13 @@ impl super::Vm {
                             ref_kind: *ref_kind,
                             captured: captured.clone(),
                         },
+                    NativePayload::RecordMethod { method, class_simple_name, component_names, getters } =>
+                        NativePayload::RecordMethod {
+                            method: method.clone(),
+                            class_simple_name: class_simple_name.clone(),
+                            component_names: component_names.clone(),
+                            getters: getters.clone(),
+                        },
                 };
                 let cloned = Rc::new(RefCell::new(crate::heap::JObject {
                     class_name: src.class_name.clone(),

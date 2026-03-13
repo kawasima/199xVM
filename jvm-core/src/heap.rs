@@ -118,6 +118,20 @@ pub enum NativePayload {
         ref_kind: u8,
         captured: Vec<JValue>,
     },
+    /// A record method handle created by `java/lang/runtime/ObjectMethods` bootstrap.
+    ///
+    /// Implements `toString`, `equals`, or `hashCode` for a record class by
+    /// calling each component's getter (invokeVirtual ref_kind=5).
+    RecordMethod {
+        /// The method being implemented: "toString", "equals", or "hashCode".
+        method: String,
+        /// Simple class name used in toString output (e.g. "Present").
+        class_simple_name: String,
+        /// Component names in declaration order (used for toString).
+        component_names: Vec<String>,
+        /// Getter method handles: (class_name, method_name, descriptor).
+        getters: Vec<(String, String, String)>,
+    },
 }
 
 impl std::fmt::Debug for NativePayload {
@@ -133,6 +147,9 @@ impl std::fmt::Debug for NativePayload {
             NativePayload::Lambda(_) => write!(f, "Lambda(...)"),
             NativePayload::BytecodeLambda { impl_class, impl_method, .. } => {
                 write!(f, "BytecodeLambda({impl_class}::{impl_method})")
+            }
+            NativePayload::RecordMethod { method, class_simple_name, .. } => {
+                write!(f, "RecordMethod({class_simple_name}::{method})")
             }
         }
     }
