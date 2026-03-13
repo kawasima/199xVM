@@ -1,5 +1,9 @@
 # 199xVM
 
+## Language
+
+- All PR titles, PR bodies, and commit messages must be written in **English**.
+
 ## Git Workflow
 
 - The main integration branch is **`develop`**. All feature branches must be based on `develop` and PRs must target `develop`.
