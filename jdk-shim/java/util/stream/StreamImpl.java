@@ -152,6 +152,7 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public Stream<T> limit(long maxSize) {
+        if (maxSize < 0) throw new IllegalArgumentException(Long.toString(maxSize));
         List<T> result = new ArrayList<>();
         long count = 0;
         for (T e : elements) {
@@ -164,6 +165,7 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public Stream<T> skip(long n) {
+        if (n < 0) throw new IllegalArgumentException(Long.toString(n));
         List<T> result = new ArrayList<>();
         long count = 0;
         for (T e : elements) {

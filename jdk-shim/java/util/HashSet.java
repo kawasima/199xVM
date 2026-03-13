@@ -25,8 +25,6 @@
 
 package java.util;
 
-import java.io.InvalidObjectException;
-
 /**
  * This class implements the {@code Set} interface, backed by a hash table
  * (actually a {@code HashMap} instance).  It makes no guarantees as to the
