@@ -141,6 +141,31 @@ const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
     returnType: { className: "java/lang/Object" },
     paramTypes: [],
   },
+  // Raoh JSON decoders (net.unit8.raoh.json.JsonDecoders)
+  "net/unit8/raoh/json/JsonDecoders.string()": {
+    owner: "net/unit8/raoh/json/JsonDecoders",
+    returnType: { className: "net/unit8/raoh/builtin/StringDecoder" },
+    paramTypes: [],
+    isStatic: true,
+  },
+  "net/unit8/raoh/json/JsonDecoders.int_()": {
+    owner: "net/unit8/raoh/json/JsonDecoders",
+    returnType: { className: "net/unit8/raoh/builtin/IntDecoder" },
+    paramTypes: [],
+    isStatic: true,
+  },
+  "net/unit8/raoh/json/JsonDecoders.field(Ljava/lang/String;Lnet/unit8/raoh/Decoder;)": {
+    owner: "net/unit8/raoh/json/JsonDecoders",
+    returnType: { className: "net/unit8/raoh/FieldDecoder" },
+    paramTypes: ["String", { className: "net/unit8/raoh/Decoder" }],
+    isStatic: true,
+  },
+  "net/unit8/raoh/json/JsonDecoders.combine(Lnet/unit8/raoh/Decoder;Lnet/unit8/raoh/Decoder;)": {
+    owner: "net/unit8/raoh/json/JsonDecoders",
+    returnType: { className: "net/unit8/raoh/combinator/Combiner2" },
+    paramTypes: [{ className: "net/unit8/raoh/Decoder" }, { className: "net/unit8/raoh/Decoder" }],
+    isStatic: true,
+  },
   // Raoh core (baseline signatures to avoid load-order sensitivity)
   "net/unit8/raoh/ObjectDecoders.string()": {
     owner: "net/unit8/raoh/ObjectDecoders",
