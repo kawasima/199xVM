@@ -50,7 +50,7 @@ import java.util.Objects;
  *    private InstantSource source;  // dependency inject
  *    ...
  *    public void process(Instant endInstant) {
- *      if (source.instant().isAfter(endInstant) {
+ *      if (source.instant().isAfter(endInstant)) {
  *        ...
  *      }
  *    }
@@ -185,6 +185,7 @@ public interface InstantSource {
      * @return a clock based on this source with the specified time-zone, not null
      */
     default Clock withZone(ZoneId zone) {
+        Objects.requireNonNull(zone, "zone");
         return new SourceClock(this, zone);
     }
 
