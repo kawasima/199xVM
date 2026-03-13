@@ -1072,6 +1072,33 @@ describe("Parser", () => {
       /permits.*sealed/i);
   });
 
+  test("abstract final combination is rejected", () => {
+    assert.throws(() => parse(lex(`public abstract final class X { }`)),
+      /abstract.*final/i);
+  });
+
+  test("sealed class without permits is rejected", () => {
+    assert.throws(() => parse(lex(`public sealed class X { }`)),
+      /sealed.*permits/i);
+  });
+
+  test("volatile on method is rejected", () => {
+    assert.throws(() => parse(lex(`public class X { volatile void m() {} }`)),
+      /volatile.*method/i);
+  });
+
+  test("nested class in interface is not implicitly abstract", () => {
+    const src = `public interface Outer {
+      static class Inner {
+        public void m() {}
+      }
+    }`;
+    const classes = parseAll(lex(src));
+    const inner = classes[0].nestedClasses.find(c => c.name.endsWith("$Inner"));
+    assert.ok(inner);
+    assert.equal(inner!.isAbstract, undefined);
+  });
+
   test("private method modifier is tracked", () => {
     const cls = parse(lex(`public class Foo { private void secret() {} }`));
     assert.equal(cls.methods[0].isPrivate, true);
