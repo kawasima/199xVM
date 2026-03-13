@@ -1061,6 +1061,10 @@ impl Vm {
                 self.clinit_failed.insert(class_name.to_owned());
                 // Return an error string that encodes the wrapped exception type so that
                 // find_exception_handler sees ExceptionInInitializerError, not the original cause.
+                #[cfg(target_arch = "wasm32")]
+                console_error(&format!("[clinit-fail] {class_name}: {e}"));
+                #[cfg(not(target_arch = "wasm32"))]
+                eprintln!("[clinit-fail] {class_name}: {e}");
                 return Err("java/lang/ExceptionInInitializerError".to_owned());
             }
         }

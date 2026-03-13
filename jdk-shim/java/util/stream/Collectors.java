@@ -26,12 +26,14 @@
 package java.util.stream;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BinaryOperator;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -75,6 +77,37 @@ public final class Collectors {
             Supplier<Map<K, A>> mapFactory,
             Collector<? super T, A, D> downstream) {
         return new GroupingByCollector<>(classifier, mapFactory, downstream);
+    }
+
+    public static <T, K, U> Collector<T, Map<K, U>, Map<K, U>> toMap(
+            Function<? super T, ? extends K> keyMapper,
+            Function<? super T, ? extends U> valueMapper) {
+        return new ToMapCollector<>(keyMapper, valueMapper, HashMap::new);
+    }
+
+    public static <T, K, U> Collector<T, Map<K, U>, Map<K, U>> toMap(
+            Function<? super T, ? extends K> keyMapper,
+            Function<? super T, ? extends U> valueMapper,
+            BinaryOperator<U> mergeFunction,
+            Supplier<Map<K, U>> mapFactory) {
+        return new ToMapCollector<>(keyMapper, valueMapper, mapFactory);
+    }
+
+    public static <T, K, U> Collector<T, Map<K, U>, Map<K, U>> toUnmodifiableMap(
+            Function<? super T, ? extends K> keyMapper,
+            Function<? super T, ? extends U> valueMapper) {
+        return new ToUnmodifiableMapCollector<>(keyMapper, valueMapper);
+    }
+
+    public static <T, K, U> Collector<T, Map<K, U>, Map<K, U>> toUnmodifiableMap(
+            Function<? super T, ? extends K> keyMapper,
+            Function<? super T, ? extends U> valueMapper,
+            BinaryOperator<U> mergeFunction) {
+        return new ToUnmodifiableMapCollector<>(keyMapper, valueMapper);
+    }
+
+    public static <T> Collector<T, List<T>, List<T>> toUnmodifiableList() {
+        return new ToUnmodifiableListCollector<>();
     }
 
     private static class JoiningCollector implements Collector<CharSequence, StringBuilder, String> {
@@ -202,5 +235,63 @@ public final class Collectors {
             }
             return result;
         }
+    }
+
+    private static class ToMapCollector<T, K, U> implements Collector<T, Map<K, U>, Map<K, U>> {
+        private final Function<? super T, ? extends K> keyMapper;
+        private final Function<? super T, ? extends U> valueMapper;
+        private final Supplier<Map<K, U>> mapFactory;
+
+        ToMapCollector(Function<? super T, ? extends K> keyMapper,
+                       Function<? super T, ? extends U> valueMapper,
+                       Supplier<Map<K, U>> mapFactory) {
+            this.keyMapper = keyMapper;
+            this.valueMapper = valueMapper;
+            this.mapFactory = mapFactory;
+        }
+
+        @Override
+        public Map<K, U> supplier() { return mapFactory.get(); }
+
+        @Override
+        public void accumulator(Map<K, U> map, T element) {
+            map.put(keyMapper.apply(element), valueMapper.apply(element));
+        }
+
+        @Override
+        public Map<K, U> finisher(Map<K, U> map) { return map; }
+    }
+
+    private static class ToUnmodifiableMapCollector<T, K, U> implements Collector<T, Map<K, U>, Map<K, U>> {
+        private final Function<? super T, ? extends K> keyMapper;
+        private final Function<? super T, ? extends U> valueMapper;
+
+        ToUnmodifiableMapCollector(Function<? super T, ? extends K> keyMapper,
+                                   Function<? super T, ? extends U> valueMapper) {
+            this.keyMapper = keyMapper;
+            this.valueMapper = valueMapper;
+        }
+
+        @Override
+        public Map<K, U> supplier() { return new HashMap<>(); }
+
+        @Override
+        public void accumulator(Map<K, U> map, T element) {
+            map.put(keyMapper.apply(element), valueMapper.apply(element));
+        }
+
+        @Override
+        public Map<K, U> finisher(Map<K, U> map) { return Collections.unmodifiableMap(map); }
+    }
+
+    private static class ToUnmodifiableListCollector<T> implements Collector<T, List<T>, List<T>> {
+        @Override
+        public List<T> supplier() { return new ArrayList<>(); }
+
+        @Override
+        public void accumulator(List<T> list, T element) { list.add(element); }
+
+        @Override
+        public List<T> finisher(List<T> list) { return Collections.unmodifiableList(list); }
     }
 }
