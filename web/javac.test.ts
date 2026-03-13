@@ -92,12 +92,13 @@ function parseClassFile(bytes: Uint8Array) {
   let pos = 10;
   const utf8Strings: Map<number, string> = new Map();
   const classEntries: Map<number, number> = new Map();
+  const decoder = new TextDecoder();
 
   for (let i = 1; i < cpCount; i++) {
     const tag = bytes[pos++];
     if (tag === 1) {
       const len = u16(bytes, pos); pos += 2;
-      utf8Strings.set(i, new TextDecoder().decode(bytes.slice(pos, pos + len)));
+      utf8Strings.set(i, decoder.decode(bytes.subarray(pos, pos + len)));
       pos += len;
     } else if (tag === 7) {
       classEntries.set(i, u16(bytes, pos)); pos += 2;

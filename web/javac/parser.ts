@@ -689,59 +689,6 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       }
     }
 
-    // Static nested class: static class Inner { ... } (legacy path)
-    if (at(TokenKind.KwClass) && isStatic) {
-      advance(); // consume 'class'
-      const nestedName = expect(TokenKind.Ident).value;
-      const mangledName = ownerName + "$" + nestedName;
-      let nestedSuper = "java/lang/Object";
-      const nestedInterfaces: string[] = [];
-      if (match(TokenKind.KwExtends)) {
-        nestedSuper = parseResolvedTypeName();
-      }
-      if (match(TokenKind.KwImplements)) {
-        nestedInterfaces.push(...parseTypeNameList());
-      }
-      let nestedPermitted: string[] | undefined;
-      if (match(TokenKind.KwPermits)) {
-        if (!isSealed) throw new Error("'permits' clause requires 'sealed' modifier");
-        nestedPermitted = parseTypeNameList();
-      }
-      if (isSealed && !nestedPermitted) {
-        throw new Error("sealed type must have a 'permits' clause");
-      }
-      expect(TokenKind.LBrace);
-      const nf: FieldDecl[] = [];
-      const nm: MethodDecl[] = [];
-      const nnc: ClassDecl[] = [];
-      while (!at(TokenKind.RBrace) && !at(TokenKind.EOF)) {
-        parseMember(nf, nm, nnc, mangledName, "class");
-      }
-      expect(TokenKind.RBrace);
-      // Register simple name so outer class can refer to "Inner" as "Outer$Inner"
-      importMap.set(nestedName, mangledName);
-      nestedClasses.push({
-        name: mangledName,
-        kind: "class",
-        superClass: nestedSuper,
-        interfaces: nestedInterfaces,
-        isRecord: false,
-        recordComponents: [],
-        isFinal: isFinal || undefined,
-        isAbstract: explicitAbstract || undefined,
-        isSealed: isSealed || undefined,
-        isNonSealed: isNonSealed || undefined,
-        permittedSubclasses: nestedPermitted,
-        fields: nf,
-        methods: nm,
-        nestedClasses: nnc,
-        importMap,
-        packageImports,
-        staticWildcardImports,
-      });
-      return;
-    }
-
     // Constructor: modifiers followed by ClassName(...)
     // Detected by lookahead: current token is Ident and next is '('
     // For nested classes, match either the mangled name (Outer$Inner) or the simple name (Inner).
@@ -798,15 +745,14 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         return;
       }
       if (match(TokenKind.Semi)) {
-        const inInterfaceLike = ownerKind === "interface" || ownerKind === "annotation";
-        if (!inInterfaceLike && !isAbstract) {
+        if (!inInterfaceLikeOwner && !isAbstract) {
           throw new Error("Method declarations in classes, enums, and records must have a body unless declared abstract.");
         }
         // private/final interface methods must have a body
-        if (inInterfaceLike && isPrivate) {
+        if (inInterfaceLikeOwner && isPrivate) {
           throw new Error("private interface methods must have a body");
         }
-        methods.push({ name, returnType: retType, params, body: [], isStatic, isPrivate: isPrivate || undefined, isProtected: isProtected || undefined, isFinal: isFinal || undefined, isAbstract: inInterfaceLike || isAbstract, isSynchronized, throwsTypes });
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isPrivate: isPrivate || undefined, isProtected: isProtected || undefined, isFinal: isFinal || undefined, isAbstract: inInterfaceLikeOwner || isAbstract, isSynchronized, throwsTypes });
       } else {
         expect(TokenKind.LBrace);
         const body = parseBlock();
@@ -821,15 +767,14 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
       }
       expect(TokenKind.Semi);
       const inRecord = ownerKind === "record";
-      const inInterfaceLike = ownerKind === "interface" || ownerKind === "annotation";
       fields.push({
         name,
         type: retType,
-        isStatic: inInterfaceLike || isStatic,
+        isStatic: inInterfaceLikeOwner || isStatic,
         initializer: init,
-        isPrivate: inInterfaceLike ? false : inRecord && !isStatic ? true : isPrivate,
+        isPrivate: inInterfaceLikeOwner ? false : inRecord && !isStatic ? true : isPrivate,
         isProtected: isProtected || undefined,
-        isFinal: inRecord && !isStatic ? true : inInterfaceLike ? true : isFinal || undefined,
+        isFinal: inRecord && !isStatic ? true : inInterfaceLikeOwner ? true : isFinal || undefined,
         isVolatile: isVolatile || undefined,
         isTransient: isTransient || undefined,
       });
