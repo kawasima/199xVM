@@ -214,7 +214,7 @@ let knownMethods: Record<string, MethodSig> = { ...BASE_KNOWN_METHODS };
 
 /** Merge an externally-built method registry into the known methods table. */
 export function setMethodRegistry(reg: Record<string, MethodSig>): void {
-  knownMethods = { ...BASE_KNOWN_METHODS, ...reg };
+  knownMethods = { ...knownMethods, ...reg };
 }
 
 /** Reset the method registry to the built-in defaults (useful for test isolation). */
