@@ -232,6 +232,16 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/util/concurrent/locks/Condition.java"
   "$SHIM_SRC/java/util/concurrent/locks/Lock.java"
   "$SHIM_SRC/java/util/concurrent/locks/ReentrantLock.java"
+  "$SHIM_SRC/java/io/UnsupportedEncodingException.java"
+  "$SHIM_SRC/java/net/MalformedURLException.java"
+  "$SHIM_SRC/java/net/URISyntaxException.java"
+  "$SHIM_SRC/java/net/UnknownHostException.java"
+  "$SHIM_SRC/java/net/SocketException.java"
+  "$SHIM_SRC/java/net/ProtocolException.java"
+  "$SHIM_SRC/java/net/URLEncoder.java"
+  "$SHIM_SRC/java/net/URLDecoder.java"
+  "$SHIM_SRC/java/net/URI.java"
+  "$SHIM_SRC/java/net/InetAddress.java"
 )
 
 rm -rf "$OUT_DIR"
