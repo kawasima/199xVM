@@ -30,9 +30,17 @@ public final class TemporalQueries {
 
     private static final TemporalQuery<java.time.ZoneId> ZONE_ID = temporal -> null;
     private static final TemporalQuery<java.time.ZoneId> ZONE = temporal -> null;
+    private static final TemporalQuery<java.time.ZoneOffset> OFFSET = temporal -> null;
     private static final TemporalQuery<java.time.chrono.Chronology> CHRONOLOGY = temporal -> null;
+    private static final TemporalQuery<java.time.LocalDate> LOCAL_DATE = temporal -> null;
+    private static final TemporalQuery<java.time.LocalTime> LOCAL_TIME = temporal -> null;
+    private static final TemporalQuery<java.time.temporal.ChronoUnit> PRECISION = temporal -> null;
 
     public static TemporalQuery<java.time.ZoneId> zoneId() { return ZONE_ID; }
     public static TemporalQuery<java.time.ZoneId> zone() { return ZONE; }
+    public static TemporalQuery<java.time.ZoneOffset> offset() { return OFFSET; }
     public static TemporalQuery<java.time.chrono.Chronology> chronology() { return CHRONOLOGY; }
+    public static TemporalQuery<java.time.LocalDate> localDate() { return LOCAL_DATE; }
+    public static TemporalQuery<java.time.LocalTime> localTime() { return LOCAL_TIME; }
+    public static TemporalQuery<java.time.temporal.ChronoUnit> precision() { return PRECISION; }
 }

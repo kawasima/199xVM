@@ -79,4 +79,8 @@ public enum ChronoField implements TemporalField {
     public int checkValidIntValue(long value) {
         return range().checkValidIntValue(value, this);
     }
+
+    public long checkValidValue(long value) {
+        return range().checkValidValue(value, this);
+    }
 }

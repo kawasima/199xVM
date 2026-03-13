@@ -23,14 +23,12 @@
  * questions.
  */
 
-package java.time.temporal;
+package java.time.chrono;
 
-public interface TemporalAccessor {
-    default boolean isSupported(TemporalField field) { return false; }
-    default long getLong(TemporalField field) { return 0L; }
-    default int get(TemporalField field) { return (int) getLong(field); }
-    default ValueRange range(TemporalField field) { return field.range(); }
-    default <R> R query(TemporalQuery<R> query) {
-        return query == null ? null : query.queryFrom(this);
-    }
+import java.time.temporal.TemporalAmount;
+
+public interface ChronoPeriod extends TemporalAmount {
+    default boolean isNegative() { return false; }
+    default boolean isZero() { return false; }
+    Chronology getChronology();
 }

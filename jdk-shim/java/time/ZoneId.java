@@ -25,19 +25,20 @@
 
 package java.time;
 
-public class ZoneId {
-    private final String id;
+public abstract class ZoneId {
+    protected ZoneId() {}
 
-    protected ZoneId(String id) { this.id = id == null ? "UTC" : id; }
+    public static ZoneId of(String zoneId) { return java.time.ZoneOffset.of(zoneId.equals("Z") || zoneId.startsWith("+") || zoneId.startsWith("-") ? zoneId : "+00:00"); }
+    public static ZoneId ofOffset(String prefix, java.time.ZoneOffset offset) { return offset; }
 
-    public static ZoneId of(String zoneId) { return new ZoneId(zoneId); }
-    public static ZoneId ofOffset(String prefix, ZoneOffset offset) {
-        return new ZoneId((prefix == null ? "" : prefix) + (offset == null ? "" : offset.toString()));
-    }
+    public abstract String getId();
+    public abstract java.time.zone.ZoneRules getRules();
+    public ZoneId normalized() { return this; }
+    public java.time.ZoneOffset getOffset(long epochSecond) { return java.time.ZoneOffset.UTC; }
 
-    public String getId() { return id; }
-    public java.time.zone.ZoneRules getRules() { return java.time.zone.ZoneRules.of(); }
+    public static ZoneId from(java.time.temporal.TemporalAccessor temporal) { throw new UnsupportedOperationException("stub"); }
+    public static ZoneId systemDefault() { return java.time.ZoneOffset.UTC; }
 
     @Override
-    public String toString() { return id; }
+    public String toString() { return getId(); }
 }

@@ -60,6 +60,10 @@ public final class Integer extends Number implements Comparable<Integer> {
         return parseInt(s, 10);
     }
 
+    public static int parseInt(CharSequence s, int beginIndex, int endIndex, int radix) {
+        return parseInt(s.subSequence(beginIndex, endIndex).toString(), radix);
+    }
+
     public static int parseInt(String s, int radix) {
         if (s == null) throw new NumberFormatException("null");
         int len = s.length();

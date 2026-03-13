@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2015, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -61,11 +61,9 @@
  */
 package java.time;
 
-import static java.time.temporal.ChronoField.MONTH_OF_YEAR;
-import static java.time.temporal.ChronoUnit.MONTHS;
+import static java.time.temporal.ChronoField.DAY_OF_WEEK;
+import static java.time.temporal.ChronoUnit.DAYS;
 
-import java.time.chrono.Chronology;
-import java.time.chrono.IsoChronology;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.TextStyle;
 import java.time.temporal.ChronoField;
@@ -77,160 +75,135 @@ import java.time.temporal.TemporalQueries;
 import java.time.temporal.TemporalQuery;
 import java.time.temporal.UnsupportedTemporalTypeException;
 import java.time.temporal.ValueRange;
+import java.time.temporal.WeekFields;
 import java.util.Locale;
 
 /**
- * A month-of-year, such as 'July'.
+ * A day-of-week, such as 'Tuesday'.
  * <p>
- * {@code Month} is an enum representing the 12 months of the year -
- * January, February, March, April, May, June, July, August, September, October,
- * November and December.
+ * {@code DayOfWeek} is an enum representing the 7 days of the week -
+ * Monday, Tuesday, Wednesday, Thursday, Friday, Saturday and Sunday.
  * <p>
- * In addition to the textual enum name, each month-of-year has an {@code int} value.
- * The {@code int} value follows normal usage and the ISO-8601 standard,
- * from 1 (January) to 12 (December). It is recommended that applications use the enum
- * rather than the {@code int} value to ensure code clarity.
+ * In addition to the textual enum name, each day-of-week has an {@code int} value.
+ * The {@code int} value follows the ISO-8601 standard, from 1 (Monday) to 7 (Sunday).
+ * It is recommended that applications use the enum rather than the {@code int} value
+ * to ensure code clarity.
  * <p>
- * <b>Do not use {@code ordinal()} to obtain the numeric representation of {@code Month}.
+ * This enum provides access to the localized textual form of the day-of-week.
+ * Some locales also assign different numeric values to the days, declaring
+ * Sunday to have the value 1, however this class provides no support for this.
+ * See {@link WeekFields} for localized week-numbering.
+ * <p>
+ * <b>Do not use {@code ordinal()} to obtain the numeric representation of {@code DayOfWeek}.
  * Use {@code getValue()} instead.</b>
  * <p>
  * This enum represents a common concept that is found in many calendar systems.
- * As such, this enum may be used by any calendar system that has the month-of-year
- * concept defined exactly equivalent to the ISO-8601 calendar system.
+ * As such, this enum may be used by any calendar system that has the day-of-week
+ * concept defined exactly equivalent to the ISO calendar system.
  *
  * @implSpec
  * This is an immutable and thread-safe enum.
  *
  * @since 1.8
  */
-public enum Month implements TemporalAccessor, TemporalAdjuster {
+public enum DayOfWeek implements TemporalAccessor, TemporalAdjuster {
 
     /**
-     * The singleton instance for the month of January with 31 days.
+     * The singleton instance for the day-of-week of Monday.
      * This has the numeric value of {@code 1}.
      */
-    JANUARY,
+    MONDAY,
     /**
-     * The singleton instance for the month of February with 28 days, or 29 in a leap year.
+     * The singleton instance for the day-of-week of Tuesday.
      * This has the numeric value of {@code 2}.
      */
-    FEBRUARY,
+    TUESDAY,
     /**
-     * The singleton instance for the month of March with 31 days.
+     * The singleton instance for the day-of-week of Wednesday.
      * This has the numeric value of {@code 3}.
      */
-    MARCH,
+    WEDNESDAY,
     /**
-     * The singleton instance for the month of April with 30 days.
+     * The singleton instance for the day-of-week of Thursday.
      * This has the numeric value of {@code 4}.
      */
-    APRIL,
+    THURSDAY,
     /**
-     * The singleton instance for the month of May with 31 days.
+     * The singleton instance for the day-of-week of Friday.
      * This has the numeric value of {@code 5}.
      */
-    MAY,
+    FRIDAY,
     /**
-     * The singleton instance for the month of June with 30 days.
+     * The singleton instance for the day-of-week of Saturday.
      * This has the numeric value of {@code 6}.
      */
-    JUNE,
+    SATURDAY,
     /**
-     * The singleton instance for the month of July with 31 days.
+     * The singleton instance for the day-of-week of Sunday.
      * This has the numeric value of {@code 7}.
      */
-    JULY,
-    /**
-     * The singleton instance for the month of August with 31 days.
-     * This has the numeric value of {@code 8}.
-     */
-    AUGUST,
-    /**
-     * The singleton instance for the month of September with 30 days.
-     * This has the numeric value of {@code 9}.
-     */
-    SEPTEMBER,
-    /**
-     * The singleton instance for the month of October with 31 days.
-     * This has the numeric value of {@code 10}.
-     */
-    OCTOBER,
-    /**
-     * The singleton instance for the month of November with 30 days.
-     * This has the numeric value of {@code 11}.
-     */
-    NOVEMBER,
-    /**
-     * The singleton instance for the month of December with 31 days.
-     * This has the numeric value of {@code 12}.
-     */
-    DECEMBER;
+    SUNDAY;
     /**
      * Private cache of all the constants.
      */
-    private static final Month[] ENUMS = Month.values();
+    private static final DayOfWeek[] ENUMS = DayOfWeek.values();
 
     //-----------------------------------------------------------------------
     /**
-     * Obtains an instance of {@code Month} from an {@code int} value.
+     * Obtains an instance of {@code DayOfWeek} from an {@code int} value.
      * <p>
-     * {@code Month} is an enum representing the 12 months of the year.
+     * {@code DayOfWeek} is an enum representing the 7 days of the week.
      * This factory allows the enum to be obtained from the {@code int} value.
-     * The {@code int} value follows the ISO-8601 standard, from 1 (January) to 12 (December).
+     * The {@code int} value follows the ISO-8601 standard, from 1 (Monday) to 7 (Sunday).
      *
-     * @param month  the month-of-year to represent, from 1 (January) to 12 (December)
-     * @return the month-of-year, not null
-     * @throws DateTimeException if the month-of-year is invalid
+     * @param dayOfWeek  the day-of-week to represent, from 1 (Monday) to 7 (Sunday)
+     * @return the day-of-week singleton, not null
+     * @throws DateTimeException if the day-of-week is invalid
      */
-    public static Month of(int month) {
-        if (month < 1 || month > 12) {
-            throw new DateTimeException("Invalid value for MonthOfYear: " + month);
+    public static DayOfWeek of(int dayOfWeek) {
+        if (dayOfWeek < 1 || dayOfWeek > 7) {
+            throw new DateTimeException("Invalid value for DayOfWeek: " + dayOfWeek);
         }
-        return ENUMS[month - 1];
+        return ENUMS[dayOfWeek - 1];
     }
 
     //-----------------------------------------------------------------------
     /**
-     * Obtains an instance of {@code Month} from a temporal object.
+     * Obtains an instance of {@code DayOfWeek} from a temporal object.
      * <p>
-     * This obtains a month based on the specified temporal.
+     * This obtains a day-of-week based on the specified temporal.
      * A {@code TemporalAccessor} represents an arbitrary set of date and time information,
-     * which this factory converts to an instance of {@code Month}.
+     * which this factory converts to an instance of {@code DayOfWeek}.
      * <p>
-     * The conversion extracts the {@link ChronoField#MONTH_OF_YEAR MONTH_OF_YEAR} field.
-     * The extraction is only permitted if the temporal object has an ISO
-     * chronology, or can be converted to a {@code LocalDate}.
+     * The conversion extracts the {@link ChronoField#DAY_OF_WEEK DAY_OF_WEEK} field.
      * <p>
      * This method matches the signature of the functional interface {@link TemporalQuery}
-     * allowing it to be used as a query via method reference, {@code Month::from}.
+     * allowing it to be used as a query via method reference, {@code DayOfWeek::from}.
      *
      * @param temporal  the temporal object to convert, not null
-     * @return the month-of-year, not null
-     * @throws DateTimeException if unable to convert to a {@code Month}
+     * @return the day-of-week, not null
+     * @throws DateTimeException if unable to convert to a {@code DayOfWeek}
      */
-    public static Month from(TemporalAccessor temporal) {
-        if (temporal instanceof Month) {
-            return (Month) temporal;
+    public static DayOfWeek from(TemporalAccessor temporal) {
+        if (temporal instanceof DayOfWeek) {
+            return (DayOfWeek) temporal;
         }
         try {
-            if (IsoChronology.INSTANCE.equals(Chronology.from(temporal)) == false) {
-                temporal = LocalDate.from(temporal);
-            }
-            return of(temporal.get(MONTH_OF_YEAR));
+            return of(temporal.get(DAY_OF_WEEK));
         } catch (DateTimeException ex) {
-            throw new DateTimeException("Unable to obtain Month from TemporalAccessor: " +
+            throw new DateTimeException("Unable to obtain DayOfWeek from TemporalAccessor: " +
                     temporal + " of type " + temporal.getClass().getName(), ex);
         }
     }
 
     //-----------------------------------------------------------------------
     /**
-     * Gets the month-of-year {@code int} value.
+     * Gets the day-of-week {@code int} value.
      * <p>
-     * The values are numbered following the ISO-8601 standard,
-     * from 1 (January) to 12 (December).
+     * The values are numbered following the ISO-8601 standard, from 1 (Monday) to 7 (Sunday).
+     * See {@link java.time.temporal.WeekFields#dayOfWeek()} for localized week-numbering.
      *
-     * @return the month-of-year, from 1 (January) to 12 (December)
+     * @return the day-of-week, from 1 (Monday) to 7 (Sunday)
      */
     public int getValue() {
         return ordinal() + 1;
@@ -238,9 +211,9 @@ public enum Month implements TemporalAccessor, TemporalAdjuster {
 
     //-----------------------------------------------------------------------
     /**
-     * Gets the textual representation, such as 'Jan' or 'December'.
+     * Gets the textual representation, such as 'Mon' or 'Friday'.
      * <p>
-     * This returns the textual name used to identify the month-of-year,
+     * This returns the textual name used to identify the day-of-week,
      * suitable for presentation to the user.
      * The parameters control the style of the returned text and the locale.
      * <p>
@@ -248,21 +221,21 @@ public enum Month implements TemporalAccessor, TemporalAdjuster {
      *
      * @param style  the length of the text required, not null
      * @param locale  the locale to use, not null
-     * @return the text value of the month-of-year, not null
+     * @return the text value of the day-of-week, not null
      */
     public String getDisplayName(TextStyle style, Locale locale) {
-        return new DateTimeFormatterBuilder().appendText(MONTH_OF_YEAR, style).toFormatter(locale).format(this);
+        return new DateTimeFormatterBuilder().appendText(DAY_OF_WEEK, style).toFormatter(locale).format(this);
     }
 
     //-----------------------------------------------------------------------
     /**
      * Checks if the specified field is supported.
      * <p>
-     * This checks if this month-of-year can be queried for the specified field.
+     * This checks if this day-of-week can be queried for the specified field.
      * If false, then calling the {@link #range(TemporalField) range} and
      * {@link #get(TemporalField) get} methods will throw an exception.
      * <p>
-     * If the field is {@link ChronoField#MONTH_OF_YEAR MONTH_OF_YEAR} then
+     * If the field is {@link ChronoField#DAY_OF_WEEK DAY_OF_WEEK} then
      * this method returns true.
      * All other {@code ChronoField} instances will return false.
      * <p>
@@ -272,12 +245,12 @@ public enum Month implements TemporalAccessor, TemporalAdjuster {
      * Whether the field is supported is determined by the field.
      *
      * @param field  the field to check, null returns false
-     * @return true if the field is supported on this month-of-year, false if not
+     * @return true if the field is supported on this day-of-week, false if not
      */
     @Override
     public boolean isSupported(TemporalField field) {
         if (field instanceof ChronoField) {
-            return field == MONTH_OF_YEAR;
+            return field == DAY_OF_WEEK;
         }
         return field != null && field.isSupportedBy(this);
     }
@@ -286,12 +259,12 @@ public enum Month implements TemporalAccessor, TemporalAdjuster {
      * Gets the range of valid values for the specified field.
      * <p>
      * The range object expresses the minimum and maximum valid values for a field.
-     * This month is used to enhance the accuracy of the returned range.
+     * This day-of-week is used to enhance the accuracy of the returned range.
      * If it is not possible to return the range, because the field is not supported
      * or for some other reason, an exception is thrown.
      * <p>
-     * If the field is {@link ChronoField#MONTH_OF_YEAR MONTH_OF_YEAR} then the
-     * range of the month-of-year, from 1 to 12, will be returned.
+     * If the field is {@link ChronoField#DAY_OF_WEEK DAY_OF_WEEK} then the
+     * range of the day-of-week, from 1 to 7, will be returned.
      * All other {@code ChronoField} instances will throw an {@code UnsupportedTemporalTypeException}.
      * <p>
      * If the field is not a {@code ChronoField}, then the result of this method
@@ -306,22 +279,22 @@ public enum Month implements TemporalAccessor, TemporalAdjuster {
      */
     @Override
     public ValueRange range(TemporalField field) {
-        if (field == MONTH_OF_YEAR) {
+        if (field == DAY_OF_WEEK) {
             return field.range();
         }
         return TemporalAccessor.super.range(field);
     }
 
     /**
-     * Gets the value of the specified field from this month-of-year as an {@code int}.
+     * Gets the value of the specified field from this day-of-week as an {@code int}.
      * <p>
-     * This queries this month for the value of the specified field.
+     * This queries this day-of-week for the value of the specified field.
      * The returned value will always be within the valid range of values for the field.
      * If it is not possible to return the value, because the field is not supported
      * or for some other reason, an exception is thrown.
      * <p>
-     * If the field is {@link ChronoField#MONTH_OF_YEAR MONTH_OF_YEAR} then the
-     * value of the month-of-year, from 1 to 12, will be returned.
+     * If the field is {@link ChronoField#DAY_OF_WEEK DAY_OF_WEEK} then the
+     * value of the day-of-week, from 1 to 7, will be returned.
      * All other {@code ChronoField} instances will throw an {@code UnsupportedTemporalTypeException}.
      * <p>
      * If the field is not a {@code ChronoField}, then the result of this method
@@ -339,21 +312,21 @@ public enum Month implements TemporalAccessor, TemporalAdjuster {
      */
     @Override
     public int get(TemporalField field) {
-        if (field == MONTH_OF_YEAR) {
+        if (field == DAY_OF_WEEK) {
             return getValue();
         }
         return TemporalAccessor.super.get(field);
     }
 
     /**
-     * Gets the value of the specified field from this month-of-year as a {@code long}.
+     * Gets the value of the specified field from this day-of-week as a {@code long}.
      * <p>
-     * This queries this month for the value of the specified field.
+     * This queries this day-of-week for the value of the specified field.
      * If it is not possible to return the value, because the field is not supported
      * or for some other reason, an exception is thrown.
      * <p>
-     * If the field is {@link ChronoField#MONTH_OF_YEAR MONTH_OF_YEAR} then the
-     * value of the month-of-year, from 1 to 12, will be returned.
+     * If the field is {@link ChronoField#DAY_OF_WEEK DAY_OF_WEEK} then the
+     * value of the day-of-week, from 1 to 7, will be returned.
      * All other {@code ChronoField} instances will throw an {@code UnsupportedTemporalTypeException}.
      * <p>
      * If the field is not a {@code ChronoField}, then the result of this method
@@ -369,7 +342,7 @@ public enum Month implements TemporalAccessor, TemporalAdjuster {
      */
     @Override
     public long getLong(TemporalField field) {
-        if (field == MONTH_OF_YEAR) {
+        if (field == DAY_OF_WEEK) {
             return getValue();
         } else if (field instanceof ChronoField) {
             throw new UnsupportedTemporalTypeException("Unsupported field: " + field);
@@ -379,141 +352,41 @@ public enum Month implements TemporalAccessor, TemporalAdjuster {
 
     //-----------------------------------------------------------------------
     /**
-     * Returns the month-of-year that is the specified number of months after this one.
+     * Returns the day-of-week that is the specified number of days after this one.
      * <p>
-     * The calculation rolls around the end of the year from December to January.
+     * The calculation rolls around the end of the week from Sunday to Monday.
      * The specified period may be negative.
      * <p>
      * This instance is immutable and unaffected by this method call.
      *
-     * @param months  the months to add, positive or negative
-     * @return the resulting month, not null
+     * @param days  the days to add, positive or negative
+     * @return the resulting day-of-week, not null
      */
-    public Month plus(long months) {
-        int amount = (int) (months % 12);
-        return ENUMS[(ordinal() + (amount + 12)) % 12];
+    public DayOfWeek plus(long days) {
+        int amount = (int) (days % 7);
+        return ENUMS[(ordinal() + (amount + 7)) % 7];
     }
 
     /**
-     * Returns the month-of-year that is the specified number of months before this one.
+     * Returns the day-of-week that is the specified number of days before this one.
      * <p>
-     * The calculation rolls around the start of the year from January to December.
+     * The calculation rolls around the start of the week from Monday to Sunday.
      * The specified period may be negative.
      * <p>
      * This instance is immutable and unaffected by this method call.
      *
-     * @param months  the months to subtract, positive or negative
-     * @return the resulting month, not null
+     * @param days  the days to subtract, positive or negative
+     * @return the resulting day-of-week, not null
      */
-    public Month minus(long months) {
-        return plus(-(months % 12));
+    public DayOfWeek minus(long days) {
+        return plus(-(days % 7));
     }
 
     //-----------------------------------------------------------------------
     /**
-     * Gets the length of this month in days.
+     * Queries this day-of-week using the specified query.
      * <p>
-     * This takes a flag to determine whether to return the length for a leap year or not.
-     * <p>
-     * February has 28 days in a standard year and 29 days in a leap year.
-     * April, June, September and November have 30 days.
-     * All other months have 31 days.
-     *
-     * @param leapYear  true if the length is required for a leap year
-     * @return the length of this month in days, from 28 to 31
-     */
-    public int length(boolean leapYear) {
-        return switch (this) {
-            case FEBRUARY -> (leapYear ? 29 : 28);
-            case APRIL, JUNE, SEPTEMBER, NOVEMBER -> 30;
-            default -> 31;
-        };
-    }
-
-    /**
-     * Gets the minimum length of this month in days.
-     * <p>
-     * February has a minimum length of 28 days.
-     * April, June, September and November have 30 days.
-     * All other months have 31 days.
-     *
-     * @return the minimum length of this month in days, from 28 to 31
-     */
-    public int minLength() {
-        return switch (this) {
-            case FEBRUARY -> 28;
-            case APRIL, JUNE, SEPTEMBER, NOVEMBER -> 30;
-            default -> 31;
-        };
-    }
-
-    /**
-     * Gets the maximum length of this month in days.
-     * <p>
-     * February has a maximum length of 29 days.
-     * April, June, September and November have 30 days.
-     * All other months have 31 days.
-     *
-     * @return the maximum length of this month in days, from 29 to 31
-     */
-    public int maxLength() {
-        return switch (this) {
-            case FEBRUARY -> 29;
-            case APRIL, JUNE, SEPTEMBER, NOVEMBER -> 30;
-            default -> 31;
-        };
-    }
-
-    //-----------------------------------------------------------------------
-    /**
-     * Gets the day-of-year corresponding to the first day of this month.
-     * <p>
-     * This returns the day-of-year that this month begins on, using the leap
-     * year flag to determine the length of February.
-     *
-     * @param leapYear  true if the length is required for a leap year
-     * @return the day of year corresponding to the first day of this month, from 1 to 336
-     */
-    public int firstDayOfYear(boolean leapYear) {
-        int leap = leapYear ? 1 : 0;
-        return switch (this) {
-            case JANUARY   -> 1;
-            case FEBRUARY  -> 32;
-            case MARCH     -> 60 + leap;
-            case APRIL     -> 91 + leap;
-            case MAY       -> 121 + leap;
-            case JUNE      -> 152 + leap;
-            case JULY      -> 182 + leap;
-            case AUGUST    -> 213 + leap;
-            case SEPTEMBER -> 244 + leap;
-            case OCTOBER   -> 274 + leap;
-            case NOVEMBER  -> 305 + leap;
-            // otherwise (DECEMBER)
-            default -> 335 + leap;
-        };
-    }
-
-    /**
-     * Gets the month corresponding to the first month of this quarter.
-     * <p>
-     * The year can be divided into four quarters.
-     * This method returns the first month of the quarter for the base month.
-     * January, February and March return January.
-     * April, May and June return April.
-     * July, August and September return July.
-     * October, November and December return October.
-     *
-     * @return the first month of the quarter corresponding to this month, not null
-     */
-    public Month firstMonthOfQuarter() {
-        return ENUMS[(ordinal() / 3) * 3];
-    }
-
-    //-----------------------------------------------------------------------
-    /**
-     * Queries this month-of-year using the specified query.
-     * <p>
-     * This queries this month-of-year using the specified query strategy object.
+     * This queries this day-of-week using the specified query strategy object.
      * The {@code TemporalQuery} object defines the logic to be used to
      * obtain the result. Read the documentation of the query to understand
      * what the result of this method will be.
@@ -531,40 +404,42 @@ public enum Month implements TemporalAccessor, TemporalAdjuster {
     @SuppressWarnings("unchecked")
     @Override
     public <R> R query(TemporalQuery<R> query) {
-        if (query == TemporalQueries.chronology()) {
-            return (R) IsoChronology.INSTANCE;
-        } else if (query == TemporalQueries.precision()) {
-            return (R) MONTHS;
+        if (query == TemporalQueries.precision()) {
+            return (R) DAYS;
         }
         return TemporalAccessor.super.query(query);
     }
 
     /**
-     * Adjusts the specified temporal object to have this month-of-year.
+     * Adjusts the specified temporal object to have this day-of-week.
      * <p>
      * This returns a temporal object of the same observable type as the input
-     * with the month-of-year changed to be the same as this.
+     * with the day-of-week changed to be the same as this.
      * <p>
      * The adjustment is equivalent to using {@link Temporal#with(TemporalField, long)}
-     * passing {@link ChronoField#MONTH_OF_YEAR} as the field.
-     * If the specified temporal object does not use the ISO calendar system then
-     * a {@code DateTimeException} is thrown.
+     * passing {@link ChronoField#DAY_OF_WEEK} as the field.
+     * Note that this adjusts forwards or backwards within a Monday to Sunday week.
+     * See {@link java.time.temporal.WeekFields#dayOfWeek()} for localized week start days.
+     * See {@code TemporalAdjuster} for other adjusters with more control,
+     * such as {@code next(MONDAY)}.
      * <p>
      * In most cases, it is clearer to reverse the calling pattern by using
      * {@link Temporal#with(TemporalAdjuster)}:
      * <pre>
      *   // these two lines are equivalent, but the second approach is recommended
-     *   temporal = thisMonth.adjustInto(temporal);
-     *   temporal = temporal.with(thisMonth);
+     *   temporal = thisDayOfWeek.adjustInto(temporal);
+     *   temporal = temporal.with(thisDayOfWeek);
      * </pre>
      * <p>
-     * For example, given a date in May, the following are output:
+     * For example, given a date that is a Wednesday, the following are output:
      * <pre>
-     *   dateInMay.with(JANUARY);    // four months earlier
-     *   dateInMay.with(APRIL);      // one months earlier
-     *   dateInMay.with(MAY);        // same date
-     *   dateInMay.with(JUNE);       // one month later
-     *   dateInMay.with(DECEMBER);   // seven months later
+     *   dateOnWed.with(MONDAY);     // two days earlier
+     *   dateOnWed.with(TUESDAY);    // one day earlier
+     *   dateOnWed.with(WEDNESDAY);  // same date
+     *   dateOnWed.with(THURSDAY);   // one day later
+     *   dateOnWed.with(FRIDAY);     // two days later
+     *   dateOnWed.with(SATURDAY);   // three days later
+     *   dateOnWed.with(SUNDAY);     // four days later
      * </pre>
      * <p>
      * This instance is immutable and unaffected by this method call.
@@ -576,10 +451,7 @@ public enum Month implements TemporalAccessor, TemporalAdjuster {
      */
     @Override
     public Temporal adjustInto(Temporal temporal) {
-        if (Chronology.from(temporal).equals(IsoChronology.INSTANCE) == false) {
-            throw new DateTimeException("Adjustment only supported on ISO date-time");
-        }
-        return temporal.with(MONTH_OF_YEAR, getValue());
+        return temporal.with(DAY_OF_WEEK, getValue());
     }
 
 }

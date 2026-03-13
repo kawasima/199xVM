@@ -23,14 +23,33 @@
  * questions.
  */
 
-package java.time.temporal;
+package java.time.format;
 
-public interface TemporalAccessor {
-    default boolean isSupported(TemporalField field) { return false; }
-    default long getLong(TemporalField field) { return 0L; }
-    default int get(TemporalField field) { return (int) getLong(field); }
-    default ValueRange range(TemporalField field) { return field.range(); }
-    default <R> R query(TemporalQuery<R> query) {
-        return query == null ? null : query.queryFrom(this);
+public enum TextStyle {
+    FULL,
+    FULL_STANDALONE,
+    SHORT,
+    SHORT_STANDALONE,
+    NARROW,
+    NARROW_STANDALONE;
+
+    public boolean isStandalone() {
+        return (ordinal() & 1) == 1;
+    }
+
+    public TextStyle asStandalone() {
+        return values()[ordinal() | 1];
+    }
+
+    public TextStyle asNormal() {
+        return values()[ordinal() & ~1];
+    }
+
+    public int zoneNameStyleIndex() {
+        throw new UnsupportedOperationException("stub");
+    }
+
+    public int toCalendarStyle() {
+        throw new UnsupportedOperationException("stub");
     }
 }

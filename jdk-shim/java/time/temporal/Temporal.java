@@ -26,7 +26,14 @@
 package java.time.temporal;
 
 public interface Temporal extends TemporalAccessor {
+    default boolean isSupported(TemporalUnit unit) { return false; }
     default Temporal with(TemporalField field, long newValue) { return this; }
+    default Temporal with(TemporalAdjuster adjuster) { return adjuster.adjustInto(this); }
     default Temporal plus(long amountToAdd, TemporalUnit unit) { return this; }
+    default Temporal plus(TemporalAmount amount) { return amount.addTo(this); }
+    default Temporal minus(long amountToSubtract, TemporalUnit unit) {
+        return (amountToSubtract == Long.MIN_VALUE ? plus(Long.MAX_VALUE, unit).plus(1, unit) : plus(-amountToSubtract, unit));
+    }
+    default Temporal minus(TemporalAmount amount) { return amount.subtractFrom(this); }
     default long until(Temporal endExclusive, TemporalUnit unit) { return 0L; }
 }

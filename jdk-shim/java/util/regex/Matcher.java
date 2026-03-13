@@ -100,8 +100,16 @@ public final class Matcher {
         return matchStart;
     }
 
+    public int start(int group) {
+        return group == 0 ? matchStart : -1;
+    }
+
     public int end() {
         return matchEnd;
+    }
+
+    public int end(int group) {
+        return group == 0 ? matchEnd : -1;
     }
 
     public String group() {

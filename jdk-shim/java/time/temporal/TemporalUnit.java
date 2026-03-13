@@ -28,4 +28,11 @@ package java.time.temporal;
 public interface TemporalUnit {
     default boolean isDateBased() { return false; }
     default boolean isTimeBased() { return false; }
+    default boolean isDurationEstimated() { return false; }
+    default java.time.Duration getDuration() { return java.time.Duration.ZERO; }
+    default Temporal addTo(Temporal temporal, long amount) { return temporal.plus(amount, this); }
+    default long between(Temporal temporal1Inclusive, Temporal temporal2Exclusive) {
+        return temporal1Inclusive.until(temporal2Exclusive, this);
+    }
+    default boolean isSupportedBy(Temporal temporal) { return temporal.isSupported(this); }
 }
