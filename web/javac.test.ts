@@ -16,7 +16,7 @@ import type { MethodSig } from "./javac/method-registry.js";
 
 // Pre-load shim method registry so compiler tests work without bundle.bin being
 // explicitly set up (mirrors index.html loadClassBundle).
-// Stored in module scope so resetAndReloadShim() can re-apply after resetMethodRegistry().
+// Stored in module scope so reloadShimRegistry() can re-apply after resetMethodRegistry().
 let _shimRegistryCache: { reg: Record<string, import("./javac/method-registry.js").MethodSig>; ifaces: Record<string, string[]> } | null = null;
 
 function reloadShimRegistry(): void {
@@ -33,8 +33,9 @@ function reloadShimRegistry(): void {
     const metas = parseBundleMeta(shimBytes);
     _shimRegistryCache = { reg: buildMethodRegistry(metas), ifaces: buildClassInterfaces(metas) };
     reloadShimRegistry();
-  } catch {
-    // bundle.bin not available — run `make shim` first
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    // bundle.bin not built yet — run `make shim` first
   }
 }
 
@@ -229,13 +230,11 @@ async function ensureRuntimeReady(): Promise<void> {
       const wasmBytes = await readFile(new URL("../jvm-core/pkg/jvm_core_bg.wasm", import.meta.url));
       await initJvm({ module_or_path: wasmBytes });
       shimBundle = new Uint8Array(await readFile(new URL("../jdk-shim/bundle.bin", import.meta.url)));
-      // Re-register in case resetMethodRegistry() was called between tests
-      const metas = parseBundleMeta(shimBundle);
-      setMethodRegistry(buildMethodRegistry(metas));
-      setClassInterfaces(buildClassInterfaces(metas));
     })();
   }
   await runtimeReady;
+  // Re-apply shim registry each call so it survives any resetMethodRegistry() between tests.
+  reloadShimRegistry();
 }
 
 function toBundle(classBytes: Uint8Array): Uint8Array {
