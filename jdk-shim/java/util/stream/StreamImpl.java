@@ -43,6 +43,7 @@ import java.util.function.ToDoubleFunction;
 
 public class StreamImpl<T> implements Stream<T> {
     private final List<T> elements;
+    private boolean parallel;
     private Runnable closeHandler;
 
     public StreamImpl(List<T> elements) {
@@ -330,18 +331,18 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public boolean isParallel() {
-        return false;
+        return parallel;
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public Stream<T> sequential() {
+        this.parallel = false;
         return this;
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public Stream<T> parallel() {
+        this.parallel = true;
         return this;
     }
 
