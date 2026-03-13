@@ -312,9 +312,15 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         m.params = [...components];
       }
       // Reject duplicate: both a compact canonical constructor and an explicit canonical constructor
+      // with the same canonical signature (same parameter types as the record components).
       if (compactInits.length > 0) {
+        const typeKey = (t: Type): string => typeof t === "string" ? t : t.className;
+        const canonicalSig = components.map(c => typeKey(c.type)).join(",");
         const hasExplicitCanonical = recordMethods.some(
-          m => !m.isCompactConstructor && m.name === "<init>" && m.params.length === components.length,
+          m => !m.isCompactConstructor
+            && m.name === "<init>"
+            && m.params.length === components.length
+            && m.params.map(p => typeKey(p.type)).join(",") === canonicalSig,
         );
         if (hasExplicitCanonical) {
           throw new Error("A record cannot have both a compact canonical constructor and an explicit canonical constructor");
@@ -779,23 +785,36 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     // For nested classes, match either the mangled name (Outer$Inner) or the simple name (Inner).
     const simpleOwnerName = ownerName.includes("$") ? ownerName.slice(ownerName.lastIndexOf("$") + 1) : ownerName;
     skipTypeParametersIfPresent();
-    // Compact canonical constructor: ClassName { ... } (record only, no parameter list)
+    // Compact canonical constructor: ClassName [throws E] { ... } (record only, no parameter list)
+    // Lookahead: Ident followed by '{' or 'throws'
     if (ownerKind === "record"
         && at(TokenKind.Ident)
-        && tokens[pos + 1]?.kind === TokenKind.LBrace
+        && (tokens[pos + 1]?.kind === TokenKind.LBrace || tokens[pos + 1]?.kind === TokenKind.KwThrows)
         && (peek().value === ownerName || peek().value === simpleOwnerName)) {
       if (isSynchronized) throw new Error("'synchronized' is not allowed on constructors");
       if (isFinal) throw new Error("'final' is not allowed on constructors");
       if (explicitAbstract) throw new Error("'abstract' is not allowed on constructors");
       advance(); // consume constructor name
+      const throwsTypes = parseOptionalThrowsClause();
       expect(TokenKind.LBrace);
       const body = parseBlock();
       expect(TokenKind.RBrace);
-      // Compact canonical constructors must not contain explicit return statements
-      const hasReturn = (stmts: Stmt[]): boolean =>
-        stmts.some(s => s.kind === "return" || (s.kind === "block" && hasReturn(s.stmts)));
-      if (hasReturn(body)) throw new Error("compact canonical constructor must not contain a return statement");
-      methods.push({ name: "<init>", returnType: "void", params: [], body, isStatic: false, isCompactConstructor: true, isPrivate: isPrivate || undefined, isProtected: isProtected || undefined });
+      // Full recursive check: compact canonical constructors must not contain return or super() calls
+      const hasForbiddenStmt = (stmts: Stmt[]): boolean => stmts.some(s => {
+        if (s.kind === "return") return true;
+        if (s.kind === "exprStmt" && s.expr.kind === "superCall") return true;
+        if (s.kind === "block") return hasForbiddenStmt(s.stmts);
+        if (s.kind === "if") return hasForbiddenStmt(s.then) || hasForbiddenStmt(s.else_ ?? []);
+        if (s.kind === "while" || s.kind === "doWhile" || s.kind === "synchronized") return hasForbiddenStmt(s.body);
+        if (s.kind === "for") return hasForbiddenStmt(s.body);
+        if (s.kind === "forEach") return hasForbiddenStmt(s.body);
+        if (s.kind === "labeled") return hasForbiddenStmt([s.stmt]);
+        if (s.kind === "tryCatch") return hasForbiddenStmt(s.tryBody) || s.catches.some(c => hasForbiddenStmt(c.body)) || hasForbiddenStmt(s.finallyBody ?? []);
+        if (s.kind === "switch") return s.cases.some(c => hasForbiddenStmt(c.stmts ?? []));
+        return false;
+      });
+      if (hasForbiddenStmt(body)) throw new Error("compact canonical constructor must not contain a return statement or explicit constructor invocation");
+      methods.push({ name: "<init>", returnType: "void", params: [], body, isStatic: false, isCompactConstructor: true, isPrivate: isPrivate || undefined, isProtected: isProtected || undefined, throwsTypes: throwsTypes.length > 0 ? throwsTypes : undefined });
       return;
     }
     if ((ownerKind === "class" || ownerKind === "record" || ownerKind === "enum")
