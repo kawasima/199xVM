@@ -3775,7 +3775,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       : methodDescriptor(method.params, method.returnType);
     const descIdx = cp.addUtf8(desc);
 
-    let accessFlags = method.isPrivate ? 0x0002 : 0x0001; // ACC_PRIVATE/ACC_PUBLIC
+    let accessFlags = method.isPrivate ? 0x0002 : method.isProtected ? 0x0004 : 0x0001; // ACC_PRIVATE/ACC_PROTECTED/ACC_PUBLIC
     if (method.name === "<init>" && classDecl.kind === "enum") accessFlags = 0x0002; // ACC_PRIVATE
     if (method.isStatic) accessFlags |= 0x0008; // ACC_STATIC
     const methodIsAbstract = method.name !== "<init>" && !!method.isAbstract;
@@ -3956,7 +3956,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
   for (const field of classDecl.fields) {
     const nameIdx = cp.addUtf8(field.name);
     const descIdx = cp.addUtf8(typeToDescriptor(field.type));
-    let accessFlags = field.isPrivate ? 0x0002 : 0x0001; // ACC_PRIVATE/ACC_PUBLIC
+    let accessFlags = field.isPrivate ? 0x0002 : field.isProtected ? 0x0004 : 0x0001; // ACC_PRIVATE/ACC_PROTECTED/ACC_PUBLIC
     if (field.isStatic) accessFlags |= 0x0008;
     if (field.isFinal) accessFlags |= 0x0010;
     if (field.isVolatile) accessFlags |= 0x0040; // ACC_VOLATILE

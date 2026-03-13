@@ -232,6 +232,9 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
 
     // record Foo(TypeA a, TypeB b) { ... }
     if (at(TokenKind.KwRecord)) {
+      if (isAbstract) throw new Error("'abstract' is not allowed on record declarations");
+      if (isSealed) throw new Error("'sealed' is not allowed on record declarations");
+      if (isNonSealed) throw new Error("'non-sealed' is not allowed on record declarations");
       advance(); // consume 'record'
       const recordName = expect(TokenKind.Ident).value;
       skipTypeParametersIfPresent();
@@ -578,6 +581,7 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     let isAbstract = inInterfaceLikeOwner; // implicit for methods in interfaces
     let explicitAbstract = false; // tracks whether 'abstract' keyword was actually written
     let isPrivate = false;
+    let isProtected = false;
     let isFinal = false;
     let isVolatile = false;
     let isTransient = false;
@@ -587,7 +591,8 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
 
     // Consume modifiers
     while (true) {
-      if (at(TokenKind.KwPublic) || at(TokenKind.KwProtected)) { advance(); continue; }
+      if (at(TokenKind.KwPublic)) { advance(); continue; }
+      if (at(TokenKind.KwProtected)) { advance(); isProtected = true; continue; }
       if (at(TokenKind.KwPrivate)) { advance(); isPrivate = true; continue; }
       if (at(TokenKind.KwStatic)) { advance(); isStatic = true; continue; }
       if (at(TokenKind.KwAbstract)) { advance(); isAbstract = true; explicitAbstract = true; continue; }
@@ -615,6 +620,10 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     const isTypeDecl = at(TokenKind.KwClass) || at(TokenKind.KwInterface);
     if ((isSealed || isNonSealed) && !isTypeDecl) {
       throw new Error("'sealed' and 'non-sealed' can only be applied to class or interface declarations");
+    }
+    // volatile/transient only valid on fields, not on type declarations
+    if ((isVolatile || isTransient) && isTypeDecl) {
+      throw new Error("'volatile' and 'transient' are not allowed on class or interface declarations");
     }
 
     // Nested type declaration: class/interface Inner { ... }
@@ -785,7 +794,7 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         advance(); // default
         parseExpr(); // ignore default value for now
         expect(TokenKind.Semi);
-        methods.push({ name, returnType: retType, params, body: [], isStatic, isPrivate: isPrivate || undefined, isFinal: isFinal || undefined, isAbstract: true, isSynchronized, throwsTypes });
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isPrivate: isPrivate || undefined, isProtected: isProtected || undefined, isFinal: isFinal || undefined, isAbstract: true, isSynchronized, throwsTypes });
         return;
       }
       if (match(TokenKind.Semi)) {
@@ -793,12 +802,16 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         if (!inInterfaceLike && !isAbstract) {
           throw new Error("Method declarations in classes, enums, and records must have a body unless declared abstract.");
         }
-        methods.push({ name, returnType: retType, params, body: [], isStatic, isPrivate: isPrivate || undefined, isFinal: isFinal || undefined, isAbstract: inInterfaceLike || isAbstract, isSynchronized, throwsTypes });
+        // private/final interface methods must have a body
+        if (inInterfaceLike && isPrivate) {
+          throw new Error("private interface methods must have a body");
+        }
+        methods.push({ name, returnType: retType, params, body: [], isStatic, isPrivate: isPrivate || undefined, isProtected: isProtected || undefined, isFinal: isFinal || undefined, isAbstract: inInterfaceLike || isAbstract, isSynchronized, throwsTypes });
       } else {
         expect(TokenKind.LBrace);
         const body = parseBlock();
         expect(TokenKind.RBrace);
-        methods.push({ name, returnType: retType, params, body, isStatic, isPrivate: isPrivate || undefined, isFinal: isFinal || undefined, isAbstract: false, isSynchronized, throwsTypes });
+        methods.push({ name, returnType: retType, params, body, isStatic, isPrivate: isPrivate || undefined, isProtected: isProtected || undefined, isFinal: isFinal || undefined, isAbstract: false, isSynchronized, throwsTypes });
       }
     } else {
       // Field
@@ -815,6 +828,7 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
         isStatic: inInterfaceLike || isStatic,
         initializer: init,
         isPrivate: inInterfaceLike ? false : inRecord && !isStatic ? true : isPrivate,
+        isProtected: isProtected || undefined,
         isFinal: inRecord && !isStatic ? true : inInterfaceLike ? true : isFinal || undefined,
         isVolatile: isVolatile || undefined,
         isTransient: isTransient || undefined,

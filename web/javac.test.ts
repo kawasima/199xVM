@@ -1123,6 +1123,49 @@ describe("Parser", () => {
     const cls = parse(lex(`public class Foo { transient int temp = 0; }`));
     assert.equal(cls.fields[0].isTransient, true);
   });
+
+  test("protected method modifier is tracked", () => {
+    const cls = parse(lex(`public class Foo { protected void helper() {} }`));
+    assert.equal(cls.methods[0].isProtected, true);
+    assert.equal(cls.methods[0].isPrivate, undefined);
+  });
+
+  test("protected field modifier is tracked", () => {
+    const cls = parse(lex(`public class Foo { protected int x = 1; }`));
+    assert.equal(cls.fields[0].isProtected, true);
+    assert.equal(cls.fields[0].isPrivate, false);
+  });
+
+  test("abstract on record is rejected", () => {
+    assert.throws(() => parse(lex(`public abstract record Point(int x, int y) { }`)),
+      /abstract.*not allowed on record/i);
+  });
+
+  test("sealed on record is rejected", () => {
+    assert.throws(() => parse(lex(`public sealed record Point(int x, int y) permits SubPoint { }`)),
+      /sealed.*not allowed on record/i);
+  });
+
+  test("volatile on nested class is rejected", () => {
+    assert.throws(() => parse(lex(`public class Outer { volatile static class Inner {} }`)),
+      /volatile.*transient.*not allowed/i);
+  });
+
+  test("transient on nested interface is rejected", () => {
+    assert.throws(() => parse(lex(`public class Outer { transient interface Inner {} }`)),
+      /volatile.*transient.*not allowed/i);
+  });
+
+  test("private interface method without body is rejected", () => {
+    assert.throws(() => parse(lex(`public interface Foo { private void m(); }`)),
+      /private interface methods must have a body/i);
+  });
+
+  test("private interface method with body is accepted", () => {
+    const src = `public interface Foo { private void m() { } }`;
+    const cls = parse(lex(src));
+    assert.equal(cls.methods[0].isPrivate, true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3136,6 +3179,27 @@ describe("Parser – new syntax", () => {
     }`);
     const info = parseClassFile(bytes);
     assert.ok(!(info.classAccessFlags & 0x0010), "sealed class should not have ACC_FINAL");
+  });
+
+  test("protected method emits ACC_PROTECTED flag", () => {
+    const bytes = compile(`public class ProtMethod {
+      protected void helper() {}
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.methodFlags.get("helper")! & 0x0004, 0x0004, "ACC_PROTECTED should be set");
+    assert.ok(!(info.methodFlags.get("helper")! & 0x0001), "ACC_PUBLIC should not be set");
+    assert.ok(!(info.methodFlags.get("helper")! & 0x0002), "ACC_PRIVATE should not be set");
+  });
+
+  test("protected field emits ACC_PROTECTED flag", () => {
+    const bytes = compile(`public class ProtField {
+      protected int x = 0;
+      public static String run() { return "ok"; }
+    }`);
+    const info = parseClassFile(bytes);
+    assert.equal(info.fieldFlags.get("x")! & 0x0004, 0x0004, "ACC_PROTECTED should be set");
+    assert.ok(!(info.fieldFlags.get("x")! & 0x0001), "ACC_PUBLIC should not be set");
   });
 
   test("regular class does not have ACC_FINAL or ACC_ABSTRACT", () => {

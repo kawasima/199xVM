@@ -26,6 +26,7 @@ export interface FieldDecl {
   type: Type;
   isStatic: boolean;
   isPrivate?: boolean;
+  isProtected?: boolean;
   isFinal?: boolean;
   isVolatile?: boolean;
   isTransient?: boolean;
@@ -40,6 +41,7 @@ export interface MethodDecl {
   body: Stmt[];
   isStatic: boolean;
   isPrivate?: boolean;
+  isProtected?: boolean;
   isFinal?: boolean;
   isAbstract?: boolean;
   isSynchronized?: boolean;
