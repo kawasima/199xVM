@@ -979,6 +979,11 @@ describe("Parser", () => {
     assert.equal(cls.methods.length, 1);
     assert.equal(cls.methods[0].name, "run");
   });
+  test("compact source file: main() is implicitly static", () => {
+    const classes = parseAll(lex(`void main() { System.out.println("hi"); }`), "Main");
+    assert.equal(classes[0].methods[0].name, "main");
+    assert.equal(classes[0].methods[0].isStatic, true);
+  });
   test("compact source file: top-level field and method", () => {
     const classes = parseAll(lex(`static int x = 42;\nint getX() { return x; }`), "Foo");
     const cls = classes[0];
@@ -1546,6 +1551,16 @@ describe("Code generator", () => {
     assert.ok((meta.accessFlags & 0x0010) !== 0, "ACC_FINAL set on implicit class");
     const run = meta.methods.find(m => m.name === "run");
     assert.ok(run, "run method exists");
+  });
+
+  test("compact source file: main() emitted as ACC_STATIC", () => {
+    const bytes = compile(`void main() { System.out.println("hello"); }`, "__implicit__");
+    assertValidClassFile(bytes);
+    const info = parseClassFile(bytes);
+    const mainFlags = info.methodFlags.get("main");
+    assert.ok(mainFlags !== undefined, "main method exists");
+    assert.ok((mainFlags! & 0x0008) !== 0, "ACC_STATIC set on main");
+    assert.ok((mainFlags! & 0x0001) !== 0, "ACC_PUBLIC set on main");
   });
 
   test("compiles ACC_SYNCHRONIZED method flag", () => {

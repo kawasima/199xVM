@@ -1535,7 +1535,10 @@ public class JvmInterfaceDefault implements Describable {
       const runMatch = source.match(/public\s+class\s+(\w+)[^}]*public\s+static\s+String\s+run\s*\(\s*\)/s);
       if (runMatch) return runMatch[1];
       const all = [...source.matchAll(/public\s+class\s+(\w+)/g)];
-      return all.length > 0 ? all[all.length - 1][1] : null;
+      if (all.length > 0) return all[all.length - 1][1];
+      // Compact source file (JEP 463): no class declaration found — use implicit class name
+      if (source.match(/void\s+main\s*\(/)) return "__implicit__";
+      return null;
     }
 
     // Detect whether compile() returned a multi-class bundle (starts with a valid class count)
@@ -1562,7 +1565,7 @@ public class JvmInterfaceDefault implements Describable {
       const source = editorView.state.doc.toString();
       const className = extractRunClassName(source);
       if (!className) {
-        log("err", "Cannot find 'public class <Name>' in source.");
+        log("err", "Cannot find 'public class <Name>' or 'void main()' in source.");
         btn.disabled = false;
         btn.innerHTML = "&#9654; Run";
         return;
@@ -1583,9 +1586,10 @@ public class JvmInterfaceDefault implements Describable {
       // Compile
       let userBundle;
       let classBytes;
+      const isImplicit = className === "__implicit__";
       try {
         log("info", `Compiling…`);
-        classBytes = compile(source);
+        classBytes = compile(source, isImplicit ? className : undefined);
 
         if (isMultiBundle(classBytes)) {
           // Already a length-prefixed multi-class bundle — use as-is
@@ -1619,18 +1623,36 @@ public class JvmInterfaceDefault implements Describable {
 
       // Run
       const bundle = buildBundle(userBundle);
-      const method = "run";
-      const descriptor = "()Ljava/lang/String;";
+      const method = isImplicit ? "main" : "run";
+      const descriptor = isImplicit ? "()V" : "()Ljava/lang/String;";
 
+      // Intercept console.log/error to capture IO.println / System.out.println output
+      const origLog = console.log;
+      const origErr = console.error;
+      const captured = [];
+      console.log = (...args) => { captured.push(args.join(" ")); };
+      console.error = (...args) => { captured.push("[err] " + args.join(" ")); };
       try {
         const result = jvmModule.run_static(bundle, className, method, descriptor);
         if (result.startsWith("ERROR:")) {
           log("err", result);
+        } else if (isImplicit) {
+          // For compact source: output comes via IO.println → console.log
+          for (const line of captured) {
+            if (line.startsWith("[err] ")) {
+              log("err", line.slice(6));
+            } else {
+              log("result", line);
+            }
+          }
         } else {
           log("result", `→ ${result}`);
         }
       } catch (e) {
         log("err", `Runtime error: ${String(e)}`);
+      } finally {
+        console.log = origLog;
+        console.error = origErr;
       }
     }
 

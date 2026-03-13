@@ -18,6 +18,7 @@ const JAVA_LANG_SIMPLE_NAMES = new Set([
   "Double",
   "StringBuilder",
   "Math",
+  "IO",
 ]);
 
 export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl[] {
@@ -182,6 +183,10 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     const nestedClasses: ClassDecl[] = [];
     while (!at(TokenKind.EOF)) {
       parseMember(fields, methods, nestedClasses, className, "class");
+    }
+    // In implicit classes, main() is implicitly static (JEP 463)
+    for (const m of methods) {
+      if (m.name === "main") m.isStatic = true;
     }
     return {
       name: className,
