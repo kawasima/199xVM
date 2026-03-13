@@ -581,8 +581,14 @@ function ownerSearchOrder(ctx: CompileContext, startOwner: string): string[] {
   const queue: string[] = [];
   for (const owner of classChain) {
     const decl = ctx.classDecls.get(owner);
-    if (!decl) continue;
-    for (const itf of decl.interfaces ?? []) queue.push(resolveClassName(ctx, itf));
+    if (decl) {
+      for (const itf of decl.interfaces ?? []) queue.push(resolveClassName(ctx, itf));
+    }
+    // Also check known interface implementations for library classes
+    const builtinIfaces = BUILTIN_INTERFACES[owner];
+    if (builtinIfaces) {
+      for (const itf of builtinIfaces) queue.push(itf);
+    }
   }
   while (queue.length > 0) {
     const itf = queue.shift()!;
@@ -2077,6 +2083,17 @@ const BUILTIN_SUPERS: Record<string, string> = {
   "java/lang/RuntimeException": "java/lang/Exception",
   "java/lang/Error": "java/lang/Throwable",
   "java/io/IOException": "java/lang/Exception",
+};
+
+/** Known interface implementations for library classes (used by ownerSearchOrder). */
+const BUILTIN_INTERFACES: Record<string, string[]> = {
+  "net/unit8/raoh/builtin/StringDecoder": ["net/unit8/raoh/Decoder"],
+  "net/unit8/raoh/builtin/IntDecoder": ["net/unit8/raoh/Decoder"],
+  "net/unit8/raoh/builtin/DecimalDecoder": ["net/unit8/raoh/Decoder"],
+  "net/unit8/raoh/FieldDecoder": ["net/unit8/raoh/Decoder"],
+  "net/unit8/raoh/Ok": ["net/unit8/raoh/Result"],
+  "net/unit8/raoh/Err": ["net/unit8/raoh/Result"],
+  "java/util/ArrayList": ["java/util/List"],
 };
 
 function toInternalClassName(ctx: CompileContext, t: Type): string | undefined {

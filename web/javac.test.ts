@@ -3722,4 +3722,20 @@ describe("Runtime – new syntax", () => {
     }`, "WhileContRun");
     assert.equal(result, "12"); // 1+2+4+5
   });
+
+  test("Decoder.decode emits invokeinterface not invokevirtual", () => {
+    const bytes = compile(`import net.unit8.raoh.*;
+import static net.unit8.raoh.ObjectDecoders.*;
+
+public class DecoderInvokeTest {
+    public static String run() {
+        var dec = string();
+        Result ok = dec.decode("hello");
+        return ok.toString();
+    }
+}`);
+    const output = disassemble(bytes);
+    // The call to decode on a Decoder (interface) must use invokeinterface
+    assert.ok(output.includes("invokeinterface"), "must emit invokeinterface for Decoder.decode, got: " + output);
+  });
 });
