@@ -58,6 +58,22 @@ fn string_concat() {
 // ---------------------------------------------------------------------------
 // ArrayList basic operations
 // ---------------------------------------------------------------------------
+// java.time.LocalDateTime.now() — regression for missing Clock shim
+// ---------------------------------------------------------------------------
+
+#[test]
+fn local_datetime_now() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "LocalDateTimeNowTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ok");
+}
+
+// ---------------------------------------------------------------------------
 
 #[test]
 fn arraylist_basics() {
