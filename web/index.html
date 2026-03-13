@@ -322,7 +322,7 @@
   <header>
     <h1>199xVM</h1>
     <span class="subtitle">Java Playground — compile &amp; run in the browser via WebAssembly</span>
-    <a href="https://github.com/kawasima/199xVM" target="_blank" rel="noopener" style="margin-left:auto"><img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/kawasima/199xVM" style="vertical-align:middle"></a>
+    <a href="https://github.com/kawasima/199xVM" target="_blank" rel="noopener noreferrer" style="margin-left:auto"><img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/kawasima/199xVM" style="vertical-align:middle"></a>
   </header>
 
   <div id="toolbar">
@@ -1487,7 +1487,8 @@ public class JvmInterfaceDefault implements Describable {
       const all = [...source.matchAll(/public\s+class\s+(\w+)/g)];
       if (all.length > 0) return all[all.length - 1][1];
       // Compact source file (JEP 463): no class/interface/record/enum declaration → implicit class
-      if (!source.match(/\b(class|interface|record|enum)\s+\w+/) && source.match(/void\s+main\s*\(/))
+      // Only match no-arg void main() — void main(String[] args) is not supported in compact mode
+      if (!source.match(/\b(class|interface|record|enum)\s+\w+/) && source.match(/void\s+main\s*\(\s*\)/))
         return "__implicit__";
       return null;
     }
@@ -1577,34 +1578,40 @@ public class JvmInterfaceDefault implements Describable {
       const method = isImplicit ? "main" : "run";
       const descriptor = isImplicit ? "()V" : "()Ljava/lang/String;";
 
-      // For compact source, intercept console to capture IO.println output
-      const origLog = isImplicit ? console.log : null;
-      const origErr = isImplicit ? console.error : null;
+      // Intercept console.log/error to capture System.out/err output from the VM
+      const origLog = console.log;
+      const origErr = console.error;
       const captured = [];
-      if (isImplicit) {
-        console.log = (...args) => { captured.push(args.join(" ")); };
-        console.error = (...args) => { captured.push("[err] " + args.join(" ")); };
-      }
+      console.log = (...args) => { captured.push(args.join(" ")); };
+      console.error = (...args) => { captured.push("[err] " + args.join(" ")); };
       try {
         const result = jvmModule.run_static(bundle, className, method, descriptor);
+        // Flush captured console output to UI
+        for (const line of captured) {
+          if (line.startsWith("[err] ")) {
+            log("err", line.slice(6));
+          } else {
+            log("result", line);
+          }
+        }
         if (result.startsWith("ERROR:")) {
           log("err", result);
-        } else if (isImplicit) {
-          for (const line of captured) {
-            if (line.startsWith("[err] ")) {
-              log("err", line.slice(6));
-            } else {
-              log("result", line);
-            }
-          }
-        } else {
+        } else if (!isImplicit) {
           log("result", `→ ${result}`);
         }
       } catch (e) {
+        // Flush any partial output before the error
+        for (const line of captured) {
+          if (line.startsWith("[err] ")) {
+            log("err", line.slice(6));
+          } else {
+            log("result", line);
+          }
+        }
         log("err", `Runtime error: ${String(e)}`);
       } finally {
-        if (origLog) console.log = origLog;
-        if (origErr) console.error = origErr;
+        console.log = origLog;
+        console.error = origErr;
       }
     }
 
