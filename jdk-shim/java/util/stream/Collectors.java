@@ -26,9 +26,14 @@
 package java.util.stream;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 public final class Collectors {
     private Collectors() {}
@@ -52,6 +57,24 @@ public final class Collectors {
 
     public static <T> Collector<T, Set<T>, Set<T>> toSet() {
         return new ToSetCollector<>();
+    }
+
+    public static <T, U, A, R> Collector<T, A, R> mapping(
+            Function<? super T, ? extends U> mapper,
+            Collector<? super U, A, R> downstream) {
+        return new MappingCollector<>(mapper, downstream);
+    }
+
+    public static <T, K> Collector<T, Map<K, List<T>>, Map<K, List<T>>> groupingBy(
+            Function<? super T, ? extends K> classifier) {
+        return groupingBy(classifier, HashMap::new, toList());
+    }
+
+    public static <T, K, A, D> Collector<T, Map<K, A>, Map<K, D>> groupingBy(
+            Function<? super T, ? extends K> classifier,
+            Supplier<Map<K, A>> mapFactory,
+            Collector<? super T, A, D> downstream) {
+        return new GroupingByCollector<>(classifier, mapFactory, downstream);
     }
 
     private static class JoiningCollector implements Collector<CharSequence, StringBuilder, String> {
@@ -113,6 +136,71 @@ public final class Collectors {
         @Override
         public Set<T> finisher(Set<T> set) {
             return set;
+        }
+    }
+
+    private static class MappingCollector<T, U, A, R> implements Collector<T, A, R> {
+        private final Function<? super T, ? extends U> mapper;
+        private final Collector<? super U, A, R> downstream;
+
+        MappingCollector(Function<? super T, ? extends U> mapper, Collector<? super U, A, R> downstream) {
+            this.mapper = mapper;
+            this.downstream = downstream;
+        }
+
+        @Override
+        public A supplier() {
+            return downstream.supplier();
+        }
+
+        @Override
+        public void accumulator(A container, T element) {
+            downstream.accumulator(container, mapper.apply(element));
+        }
+
+        @Override
+        public R finisher(A container) {
+            return downstream.finisher(container);
+        }
+    }
+
+    private static class GroupingByCollector<T, K, A, D> implements Collector<T, Map<K, A>, Map<K, D>> {
+        private final Function<? super T, ? extends K> classifier;
+        private final Supplier<Map<K, A>> mapFactory;
+        private final Collector<? super T, A, D> downstream;
+
+        GroupingByCollector(Function<? super T, ? extends K> classifier,
+                            Supplier<Map<K, A>> mapFactory,
+                            Collector<? super T, A, D> downstream) {
+            this.classifier = classifier;
+            this.mapFactory = mapFactory;
+            this.downstream = downstream;
+        }
+
+        @Override
+        public Map<K, A> supplier() {
+            return mapFactory.get();
+        }
+
+        @Override
+        public void accumulator(Map<K, A> map, T element) {
+            K key = classifier.apply(element);
+            A container = map.get(key);
+            if (container == null) {
+                container = downstream.supplier();
+                map.put(key, container);
+            }
+            downstream.accumulator(container, element);
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public Map<K, D> finisher(Map<K, A> map) {
+            Map<K, D> result = (Map<K, D>) mapFactory.get();
+            for (Map.Entry<K, A> entry : map.entrySet()) {
+                result.put(entry.getKey(), downstream.finisher(entry.getValue()));
+            }
+            return result;
         }
     }
 }
