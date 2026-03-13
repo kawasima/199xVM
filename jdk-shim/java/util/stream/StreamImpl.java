@@ -44,7 +44,7 @@ import java.util.function.ToDoubleFunction;
 public class StreamImpl<T> implements Stream<T> {
     private final List<T> elements;
     private boolean parallel;
-    private Runnable closeHandler;
+    private List<Runnable> closeHandlers;
 
     public StreamImpl(List<T> elements) {
         this.elements = elements;
@@ -67,7 +67,11 @@ public class StreamImpl<T> implements Stream<T> {
         for (T e : elements) {
             Stream<? extends R> s = mapper.apply(e);
             if (s != null) {
-                s.forEach(r -> result.add(r));
+                try {
+                    s.forEach(r -> result.add(r));
+                } finally {
+                    s.close();
+                }
             }
         }
         return new StreamImpl<>(result);
@@ -114,11 +118,11 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public Stream<T> distinct() {
-        List<T> result = new ArrayList<>();
+        java.util.LinkedHashSet<T> seen = new java.util.LinkedHashSet<>();
         for (T e : elements) {
-            if (!result.contains(e)) result.add(e);
+            seen.add(e);
         }
-        return new StreamImpl<>(result);
+        return new StreamImpl<>(new ArrayList<>(seen));
     }
 
     @Override
@@ -354,20 +358,35 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public Stream<T> onClose(Runnable closeHandler) {
-        if (this.closeHandler == null) {
-            this.closeHandler = closeHandler;
-        } else {
-            Runnable existing = this.closeHandler;
-            this.closeHandler = () -> { existing.run(); closeHandler.run(); };
+        if (this.closeHandlers == null) {
+            this.closeHandlers = new ArrayList<>();
         }
+        this.closeHandlers.add(closeHandler);
         return this;
     }
 
     @Override
     public void close() {
-        if (closeHandler != null) {
-            closeHandler.run();
-            closeHandler = null;
+        if (closeHandlers != null) {
+            List<Runnable> handlers = closeHandlers;
+            closeHandlers = null;
+            Throwable first = null;
+            for (Runnable h : handlers) {
+                try {
+                    h.run();
+                } catch (Throwable t) {
+                    if (first == null) {
+                        first = t;
+                    }
+                }
+            }
+            if (first instanceof RuntimeException) {
+                throw (RuntimeException) first;
+            } else if (first instanceof Error) {
+                throw (Error) first;
+            } else if (first != null) {
+                throw new RuntimeException(first);
+            }
         }
     }
 }

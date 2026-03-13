@@ -37,7 +37,11 @@ public final class StreamSupport {
     public static <T> Stream<T> stream(Spliterator<T> spliterator, boolean parallel) {
         List<T> list = new ArrayList<>();
         spliterator.forEachRemaining(list::add);
-        return new StreamImpl<>(list);
+        StreamImpl<T> stream = new StreamImpl<>(list);
+        if (parallel) {
+            stream.parallel();
+        }
+        return stream;
     }
 
     public static IntStream intStream(Spliterator.OfInt spliterator, boolean parallel) {
