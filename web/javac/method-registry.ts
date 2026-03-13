@@ -10,8 +10,11 @@ export interface MethodSig {
 }
 
 // VM-specific methods that are not in jdk-shim/bundle.bin.
-// All standard JDK methods (String, Integer, StringBuilder, etc.) are registered
-// dynamically from jdk-shim/bundle.bin via setMethodRegistry() at startup.
+// All standard JDK methods (String, Integer, StringBuilder, etc.) must be registered
+// dynamically via setMethodRegistry() before calling compile().
+// In the browser this happens in loadClassBundle() (index.html).
+// In tests this happens at module init (javac.test.ts top-level block).
+// Without a loaded shim registry, compile() will fail to resolve JDK method calls.
 const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
   // IO (java.lang.IO — JEP 463/512 compact source helper, 199xVM native stub)
   "java/lang/IO.println(Ljava/lang/Object;)": { owner: "java/lang/IO", returnType: "void", paramTypes: [{ className: "java/lang/Object" }], isStatic: true },

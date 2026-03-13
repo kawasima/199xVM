@@ -17,7 +17,7 @@ import type { MethodSig } from "./javac/method-registry.js";
 // Pre-load shim method registry so compiler tests work without bundle.bin being
 // explicitly set up (mirrors index.html loadClassBundle).
 // Stored in module scope so reloadShimRegistry() can re-apply after resetMethodRegistry().
-let _shimRegistryCache: { reg: Record<string, import("./javac/method-registry.js").MethodSig>; ifaces: Record<string, string[]> } | null = null;
+let _shimRegistryCache: { reg: Record<string, MethodSig>; ifaces: Record<string, string[]> } | null = null;
 
 function reloadShimRegistry(): void {
   if (_shimRegistryCache) {
@@ -34,8 +34,10 @@ function reloadShimRegistry(): void {
     _shimRegistryCache = { reg: buildMethodRegistry(metas), ifaces: buildClassInterfaces(metas) };
     reloadShimRegistry();
   } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-    // bundle.bin not built yet — run `make shim` first
+    throw new Error(
+      `Failed to load jdk-shim/bundle.bin — run \`make shim\` before running tests.\n` +
+      `Cause: ${(e as Error).message}`
+    );
   }
 }
 
