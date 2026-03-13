@@ -55,14 +55,27 @@ public enum ChronoField implements TemporalField {
     public ValueRange range() {
         switch (this) {
             case NANO_OF_SECOND: return ValueRange.of(0, 999_999_999);
+            case NANO_OF_DAY: return ValueRange.of(0, 86_400_000_000_000L - 1);
+            case MICRO_OF_SECOND: return ValueRange.of(0, 999_999);
+            case MICRO_OF_DAY: return ValueRange.of(0, 86_400_000_000L - 1);
+            case MILLI_OF_SECOND: return ValueRange.of(0, 999);
+            case MILLI_OF_DAY: return ValueRange.of(0, 86_400_000L - 1);
             case SECOND_OF_MINUTE: return ValueRange.of(0, 59);
+            case SECOND_OF_DAY: return ValueRange.of(0, 86_400L - 1);
             case MINUTE_OF_HOUR: return ValueRange.of(0, 59);
+            case MINUTE_OF_DAY: return ValueRange.of(0, 24 * 60 - 1);
+            case HOUR_OF_AMPM: return ValueRange.of(0, 11);
+            case CLOCK_HOUR_OF_AMPM: return ValueRange.of(1, 12);
             case HOUR_OF_DAY: return ValueRange.of(0, 23);
+            case CLOCK_HOUR_OF_DAY: return ValueRange.of(1, 24);
+            case AMPM_OF_DAY: return ValueRange.of(0, 1);
+            case DAY_OF_WEEK: return ValueRange.of(1, 7);
+            case DAY_OF_MONTH: return ValueRange.of(1, 28, 31);
+            case DAY_OF_YEAR: return ValueRange.of(1, 365, 366);
+            case EPOCH_DAY: return ValueRange.of(-365_243_219_162L, 365_241_780_471L);
             case MONTH_OF_YEAR: return ValueRange.of(1, 12);
-            case DAY_OF_MONTH: return ValueRange.of(1, 31);
-            case DAY_OF_YEAR: return ValueRange.of(1, 366);
             case YEAR: return ValueRange.of(-999_999_999, 999_999_999);
-            default: return ValueRange.of(-999_999_999L, 999_999_999L);
+            default: return ValueRange.of(Long.MIN_VALUE, Long.MAX_VALUE);
         }
     }
 
