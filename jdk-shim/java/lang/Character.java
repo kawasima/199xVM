@@ -10169,7 +10169,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static boolean isLowerCase(int codePoint) {
-        return CharacterData.of(codePoint).isLowerCase(codePoint);
+        return (codePoint >= 'a' && codePoint <= 'z') || (codePoint >= 0xFF41 && codePoint <= 0xFF5A);
     }
 
     /**
@@ -10234,7 +10234,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static boolean isUpperCase(int codePoint) {
-        return CharacterData.of(codePoint).isUpperCase(codePoint);
+        return (codePoint >= 'A' && codePoint <= 'Z') || (codePoint >= 0xFF21 && codePoint <= 0xFF3A);
     }
 
     /**
@@ -10384,7 +10384,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static boolean isDigit(int codePoint) {
-        return CharacterData.of(codePoint).isDigit(codePoint);
+        return codePoint >= '0' && codePoint <= '9';
     }
 
     /**
@@ -10667,7 +10667,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
             (1 << Character.MODIFIER_LETTER) |
             (1 << Character.OTHER_LETTER) |
             (1 << Character.LETTER_NUMBER)) >> getType(codePoint)) & 1) != 0) ||
-            CharacterData.of(codePoint).isOtherAlphabetic(codePoint);
+            false;
     }
 
     /**
@@ -10681,7 +10681,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.7
      */
     public static boolean isIdeographic(int codePoint) {
-        return CharacterData.of(codePoint).isIdeographic(codePoint);
+        return codePoint >= 0x4E00 && codePoint <= 0x9FFF;
     }
 
     /**
@@ -10743,7 +10743,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      */
     @SuppressWarnings("doclint:reference") // cross-module links
     public static boolean isJavaIdentifierStart(int codePoint) {
-        return CharacterData.of(codePoint).isJavaIdentifierStart(codePoint);
+        return isLetter(codePoint) || codePoint == '_' || codePoint == '$';
     }
 
     /**
@@ -10815,7 +10815,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      */
     @SuppressWarnings("doclint:reference") // cross-module links
     public static boolean isJavaIdentifierPart(int codePoint) {
-        return CharacterData.of(codePoint).isJavaIdentifierPart(codePoint);
+        return isLetterOrDigit(codePoint) || codePoint == '_' || codePoint == '$';
     }
 
     /**
@@ -10897,7 +10897,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static boolean isUnicodeIdentifierStart(int codePoint) {
-        return CharacterData.of(codePoint).isUnicodeIdentifierStart(codePoint);
+        return isLetter(codePoint);
     }
 
     /**
@@ -10998,7 +10998,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static boolean isUnicodeIdentifierPart(int codePoint) {
-        return CharacterData.of(codePoint).isUnicodeIdentifierPart(codePoint);
+        return isLetterOrDigit(codePoint) || codePoint == '_';
     }
 
     /**
@@ -11063,7 +11063,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static boolean isIdentifierIgnorable(int codePoint) {
-        return CharacterData.of(codePoint).isIdentifierIgnorable(codePoint);
+        return (codePoint >= 0x0000 && codePoint <= 0x0008) || (codePoint >= 0x000E && codePoint <= 0x001B) || (codePoint >= 0x007F && codePoint <= 0x009F);
     }
 
     /**
@@ -11081,7 +11081,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   21
      */
     public static boolean isEmoji(int codePoint) {
-        return CharacterData.of(codePoint).isEmoji(codePoint);
+        return false;
     }
 
     /**
@@ -11100,7 +11100,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   21
      */
     public static boolean isEmojiPresentation(int codePoint) {
-        return CharacterData.of(codePoint).isEmojiPresentation(codePoint);
+        return false;
     }
 
     /**
@@ -11119,7 +11119,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   21
      */
     public static boolean isEmojiModifier(int codePoint) {
-        return CharacterData.of(codePoint).isEmojiModifier(codePoint);
+        return false;
     }
 
     /**
@@ -11138,7 +11138,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   21
      */
     public static boolean isEmojiModifierBase(int codePoint) {
-        return CharacterData.of(codePoint).isEmojiModifierBase(codePoint);
+        return false;
     }
 
     /**
@@ -11157,7 +11157,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   21
      */
     public static boolean isEmojiComponent(int codePoint) {
-        return CharacterData.of(codePoint).isEmojiComponent(codePoint);
+        return false;
     }
 
     /**
@@ -11176,7 +11176,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   21
      */
     public static boolean isExtendedPictographic(int codePoint) {
-        return CharacterData.of(codePoint).isExtendedPictographic(codePoint);
+        return false;
     }
 
     /**
@@ -11236,7 +11236,9 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static int toLowerCase(int codePoint) {
-        return CharacterData.of(codePoint).toLowerCase(codePoint);
+        if (codePoint >= 'A' && codePoint <= 'Z') return codePoint + 32;
+        if (codePoint >= 0xFF21 && codePoint <= 0xFF3A) return codePoint + 32;
+        return codePoint;
     }
 
     /**
@@ -11296,7 +11298,9 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static int toUpperCase(int codePoint) {
-        return CharacterData.of(codePoint).toUpperCase(codePoint);
+        if (codePoint >= 'a' && codePoint <= 'z') return codePoint - 32;
+        if (codePoint >= 0xFF41 && codePoint <= 0xFF5A) return codePoint - 32;
+        return codePoint;
     }
 
     /**
@@ -11355,7 +11359,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static int toTitleCase(int codePoint) {
-        return CharacterData.of(codePoint).toTitleCase(codePoint);
+        return toUpperCase(codePoint);
     }
 
     /**
@@ -11461,7 +11465,15 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static int digit(int codePoint, int radix) {
-        return CharacterData.of(codePoint).digit(codePoint, radix);
+        int val;
+        if (codePoint >= '0' && codePoint <= '9') val = codePoint - '0';
+        else if (codePoint >= 'a' && codePoint <= 'z') val = codePoint - 'a' + 10;
+        else if (codePoint >= 'A' && codePoint <= 'Z') val = codePoint - 'A' + 10;
+        else if (codePoint >= 0xFF10 && codePoint <= 0xFF19) val = codePoint - 0xFF10;
+        else if (codePoint >= 0xFF41 && codePoint <= 0xFF5A) val = codePoint - 0xFF41 + 10;
+        else if (codePoint >= 0xFF21 && codePoint <= 0xFF3A) val = codePoint - 0xFF21 + 10;
+        else return -1;
+        return (radix >= MIN_RADIX && radix <= MAX_RADIX && val < radix) ? val : -1;
     }
 
     /**
@@ -11534,7 +11546,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static int getNumericValue(int codePoint) {
-        return CharacterData.of(codePoint).getNumericValue(codePoint);
+        return digit(codePoint, 10) >= 0 ? digit(codePoint, 10) : -1;
     }
 
     /**
@@ -11696,7 +11708,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static boolean isWhitespace(int codePoint) {
-        return CharacterData.of(codePoint).isWhitespace(codePoint);
+        return codePoint == ' ' || codePoint == '\t' || codePoint == '\n' || codePoint == '\r' || codePoint == '\f' || codePoint == 0x1C || codePoint == 0x1D || codePoint == 0x1E || codePoint == 0x1F;
     }
 
     /**
@@ -11831,7 +11843,13 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static int getType(int codePoint) {
-        return CharacterData.of(codePoint).getType(codePoint);
+        if (codePoint >= 'a' && codePoint <= 'z') return LOWERCASE_LETTER;
+        if (codePoint >= 'A' && codePoint <= 'Z') return UPPERCASE_LETTER;
+        if (codePoint >= '0' && codePoint <= '9') return DECIMAL_DIGIT_NUMBER;
+        if (codePoint == ' ') return SPACE_SEPARATOR;
+        if (codePoint >= 0x0000 && codePoint <= 0x001F) return CONTROL;
+        if (codePoint >= 0x007F && codePoint <= 0x009F) return CONTROL;
+        return UNASSIGNED;
     }
 
     /**
@@ -11954,7 +11972,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since    1.5
      */
     public static byte getDirectionality(int codePoint) {
-        return CharacterData.of(codePoint).getDirectionality(codePoint);
+        return DIRECTIONALITY_UNDEFINED;
     }
 
     /**
@@ -11996,7 +12014,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      * @since   1.5
      */
     public static boolean isMirrored(int codePoint) {
-        return CharacterData.of(codePoint).isMirrored(codePoint);
+        return false;
     }
 
     /**
@@ -12051,7 +12069,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      */
     static int toUpperCaseEx(int codePoint) {
         assert isValidCodePoint(codePoint);
-        return CharacterData.of(codePoint).toUpperCaseEx(codePoint);
+        return toUpperCase(codePoint);
     }
 
     /**
@@ -12068,7 +12086,7 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
     static char[] toUpperCaseCharArray(int codePoint) {
         // As of Unicode 6.0, 1:M uppercasings only happen in the BMP.
         assert isBmpCodePoint(codePoint);
-        return CharacterData.of(codePoint).toUpperCaseCharArray(codePoint);
+        return null;
     }
 
     /**
