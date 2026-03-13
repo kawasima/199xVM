@@ -293,6 +293,7 @@ dependencies = [
  "console_error_panic_hook",
  "criterion",
  "js-sys",
+ "regex",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]

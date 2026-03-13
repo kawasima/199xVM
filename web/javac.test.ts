@@ -20,7 +20,12 @@ const RAOH_TEST_REGISTRY: Record<string, MethodSig> = {
   "net/unit8/raoh/ObjectDecoders.string()": { owner: "net/unit8/raoh/ObjectDecoders", returnType: { className: "net/unit8/raoh/builtin/StringDecoder" }, paramTypes: [], isStatic: true },
   "net/unit8/raoh/ObjectDecoders.int_()": { owner: "net/unit8/raoh/ObjectDecoders", returnType: { className: "net/unit8/raoh/builtin/IntDecoder" }, paramTypes: [], isStatic: true },
   "net/unit8/raoh/builtin/StringDecoder.nonBlank()": { owner: "net/unit8/raoh/builtin/StringDecoder", returnType: { className: "net/unit8/raoh/builtin/StringDecoder" }, paramTypes: [] },
+  "net/unit8/raoh/builtin/StringDecoder.trim()": { owner: "net/unit8/raoh/builtin/StringDecoder", returnType: { className: "net/unit8/raoh/builtin/StringDecoder" }, paramTypes: [] },
+  "net/unit8/raoh/builtin/StringDecoder.toLowerCase()": { owner: "net/unit8/raoh/builtin/StringDecoder", returnType: { className: "net/unit8/raoh/builtin/StringDecoder" }, paramTypes: [] },
+  "net/unit8/raoh/builtin/StringDecoder.email()": { owner: "net/unit8/raoh/builtin/StringDecoder", returnType: { className: "net/unit8/raoh/builtin/StringDecoder" }, paramTypes: [] },
+  "net/unit8/raoh/builtin/StringDecoder.map(Ljava/util/function/Function;)": { owner: "net/unit8/raoh/builtin/StringDecoder", returnType: { className: "net/unit8/raoh/Decoder" }, paramTypes: [{ className: "java/util/function/Function" }] },
   "net/unit8/raoh/builtin/IntDecoder.range(II)": { owner: "net/unit8/raoh/builtin/IntDecoder", returnType: { className: "net/unit8/raoh/builtin/IntDecoder" }, paramTypes: ["int", "int"] },
+  "net/unit8/raoh/builtin/IntDecoder.map(Ljava/util/function/Function;)": { owner: "net/unit8/raoh/builtin/IntDecoder", returnType: { className: "net/unit8/raoh/Decoder" }, paramTypes: [{ className: "java/util/function/Function" }] },
   "net/unit8/raoh/map/MapDecoders.field(Ljava/lang/String;Lnet/unit8/raoh/Decoder;)": { owner: "net/unit8/raoh/map/MapDecoders", returnType: { className: "net/unit8/raoh/FieldDecoder" }, paramTypes: ["String", { className: "net/unit8/raoh/Decoder" }], isStatic: true },
   "net/unit8/raoh/map/MapDecoders.combine(Lnet/unit8/raoh/Decoder;Lnet/unit8/raoh/Decoder;)": { owner: "net/unit8/raoh/map/MapDecoders", returnType: { className: "net/unit8/raoh/combinator/Combiner2" }, paramTypes: [{ className: "net/unit8/raoh/Decoder" }, { className: "net/unit8/raoh/Decoder" }], isStatic: true },
   "net/unit8/raoh/combinator/Combiner2.map(Ljava/util/function/BiFunction;)": { owner: "net/unit8/raoh/combinator/Combiner2", returnType: { className: "net/unit8/raoh/Decoder" }, paramTypes: [{ className: "java/util/function/BiFunction" }] },
@@ -3742,6 +3747,54 @@ describe("Runtime – new syntax", () => {
       }
     }`, "WhileContRun");
     assert.equal(result, "12"); // 1+2+4+5
+  });
+
+  test("record toString includes field values", () => {
+    const src = `
+record Age(int value) {}
+
+public class RecordToStringTest {
+    public static String run() {
+        Age a = new Age(42);
+        return a.toString();
+    }
+}`;
+    const tokens = lex(src);
+    const decls = parseAll(tokens);
+    const ageDecl = decls.find(d => d.name === "Age")!;
+    const bytes = generateClassFile(ageDecl, decls);
+    const output = disassemble(bytes);
+    // toString must concatenate field value, not just return "Age[]"
+    assert.ok(!output.includes(`"Age[]"`), "toString must not be a literal 'Age[]', got: " + output);
+    // Should reference the value field access
+    assert.ok(output.includes("value") || output.includes("getfield"), "toString must access field value");
+  });
+
+  test("RaohDomainMap compiles chain trim().toLowerCase().email().map() with invokevirtual", () => {
+    setMethodRegistry(RAOH_TEST_REGISTRY);
+    try {
+      const src = `import net.unit8.raoh.Result;
+import static net.unit8.raoh.ObjectDecoders.*;
+
+record Email(String value) {}
+
+public class RaohDomainMap {
+    public static String run() {
+        var emailDec = string().trim().toLowerCase().email().map(Email::new);
+        Result email = emailDec.decode("alice@example.com");
+        return email.toString();
+    }
+}`;
+      const tokens = lex(src);
+      const decls = parseAll(tokens);
+      const mainDecl = decls.find(d => d.name === "RaohDomainMap")!;
+      const bytes = generateClassFile(mainDecl, decls);
+      const output = disassemble(bytes);
+      // trim/toLowerCase/email must use invokevirtual (StringDecoder methods, not interface)
+      assert.ok(output.includes("invokevirtual") && output.includes("trim"), "trim must be invokevirtual");
+      assert.ok(output.includes("toLowerCase"), "toLowerCase must appear in bytecode");
+      assert.ok(output.includes("email"), "email must appear in bytecode");
+    } finally { resetMethodRegistry(); }
   });
 
   test("Decoder.decode emits invokeinterface not invokevirtual", () => {

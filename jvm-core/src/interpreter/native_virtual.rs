@@ -263,6 +263,12 @@ impl super::Vm {
         // java/lang/Object instance methods are inherited by all reference types.
         match method_name {
             "hashCode" if _descriptor == "()I" => {
+                // Strings have value-based equality: use Java's string hash algorithm.
+                if let Some(s) = this.borrow().as_java_string().map(|s| s.to_owned()) {
+                    let hash = s.chars().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32));
+                    return Some(JValue::Int(hash));
+                }
+                // For all other objects use identity (pointer address).
                 let ptr = Rc::as_ptr(this) as usize;
                 return Some(JValue::Int((ptr as u64 as u32) as i32));
             }
@@ -357,7 +363,16 @@ impl super::Vm {
                         .unwrap_or_default();
                     (regex, input)
                 };
-                let ok = if regex == ".*" { true } else { regex == input };
+                let ok = if regex == ".*" {
+                    true
+                } else {
+                    // Java Matcher.matches() checks full-string match.
+                    // Wrap the pattern with ^(?:...)$ to replicate that behaviour.
+                    let anchored = format!("^(?:{regex})$");
+                    regex::Regex::new(&anchored)
+                        .map(|re| re.is_match(&input))
+                        .unwrap_or(false)
+                };
                 Some(JValue::Int(if ok { 1 } else { 0 }))
             }
             ("java/lang/Class", "getName") => {
