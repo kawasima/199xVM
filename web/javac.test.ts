@@ -1563,6 +1563,30 @@ describe("Code generator", () => {
     assert.ok((mainFlags! & 0x0001) !== 0, "ACC_PUBLIC set on main");
   });
 
+  test("enum class emits $VALUES field", () => {
+    const bytes = compile(`enum Color { RED, GREEN, BLUE }
+public class EnumTest {
+    public static String run() { return Color.RED.name(); }
+}`);
+    // Find the Color class in the multi-class bundle
+    let pos = 0;
+    let colorBytes: Uint8Array | null = null;
+    while (pos + 4 <= bytes.length) {
+      const len = (bytes[pos] << 24) | (bytes[pos+1] << 16) | (bytes[pos+2] << 8) | bytes[pos+3];
+      pos += 4;
+      const cls = bytes.slice(pos, pos + len);
+      const name = readClassName(cls);
+      if (name === "Color") colorBytes = cls;
+      pos += len;
+    }
+    assert.ok(colorBytes, "Color class found in bundle");
+    const info = parseClassFile(colorBytes!);
+    assert.ok(info.fieldFlags.has("$VALUES"), "$VALUES field exists");
+    assert.ok(info.fieldFlags.has("RED"), "RED constant exists");
+    assert.ok(info.fieldFlags.has("GREEN"), "GREEN constant exists");
+    assert.ok(info.fieldFlags.has("BLUE"), "BLUE constant exists");
+  });
+
   test("compiles ACC_SYNCHRONIZED method flag", () => {
     const bytes = compile(`public class Sync {
       public synchronized void foo() {}

@@ -3939,6 +3939,24 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       emitter.emit(0xb3); // putstatic
       emitter.emitU16(fieldRef);
     }
+    // Synthesize $VALUES array for enum classes
+    if (isEnumClass && enumConstantCount > 0) {
+      const enumConstants = classDecl.fields.filter(f => !!f.isEnumConstant);
+      const arrayType = `[L${classDecl.name};`;
+      emitter.emitIconst(enumConstantCount);
+      emitter.emit(0xbd); // anewarray
+      emitter.emitU16(classIdx);
+      for (let i = 0; i < enumConstants.length; i++) {
+        emitter.emit(0x59); // dup
+        emitter.emitIconst(i);
+        emitter.emit(0xb2); // getstatic
+        emitter.emitU16(cp.addFieldref(classDecl.name, enumConstants[i].name, `L${classDecl.name};`));
+        emitter.emit(0x53); // aastore
+      }
+      const valuesFieldRef = cp.addFieldref(classDecl.name, "$VALUES", arrayType);
+      emitter.emit(0xb3); // putstatic
+      emitter.emitU16(valuesFieldRef);
+    }
     emitter.emit(0xb1); // return
     compiledMethods.push({
       nameIdx: cp.addUtf8("<clinit>"),
@@ -3963,6 +3981,14 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
     if (field.isTransient) accessFlags |= 0x0080; // ACC_TRANSIENT
     if (isEnumClass && field.isEnumConstant) accessFlags |= 0x4000; // ACC_ENUM
     compiledFields.push({ nameIdx, descIdx, accessFlags });
+  }
+  // Add synthetic $VALUES field for enum classes
+  if (isEnumClass) {
+    compiledFields.push({
+      nameIdx: cp.addUtf8("$VALUES"),
+      descIdx: cp.addUtf8(`[L${classDecl.name};`),
+      accessFlags: 0x101a, // ACC_PRIVATE | ACC_STATIC | ACC_FINAL | ACC_SYNTHETIC
+    });
   }
 
   // Code attribute name
