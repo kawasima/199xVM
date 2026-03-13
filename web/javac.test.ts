@@ -17,7 +17,12 @@ import type { MethodSig } from "./javac/method-registry.js";
 // Pre-load shim method registry so compiler tests work without bundle.bin being
 // explicitly set up (mirrors index.html loadClassBundle).
 // Stored in module scope so reloadShimRegistry() can re-apply after resetMethodRegistry().
+// Note: bundle.bin must exist before running tests — run `make shim` first.
+// If it is missing, all suites fail immediately with a clear message rather than
+// failing silently on individual "unknown method" errors later.
 let _shimRegistryCache: { reg: Record<string, MethodSig>; ifaces: Record<string, string[]> } | null = null;
+// Keep the raw bytes so ensureRuntimeReady() can reuse them for shimBundle without re-reading.
+let _shimBundleBytes: Uint8Array | null = null;
 
 function reloadShimRegistry(): void {
   if (_shimRegistryCache) {
@@ -29,8 +34,8 @@ function reloadShimRegistry(): void {
 {
   const shimPath = new URL("../jdk-shim/bundle.bin", import.meta.url);
   try {
-    const shimBytes = new Uint8Array(await readFile(shimPath));
-    const metas = parseBundleMeta(shimBytes);
+    _shimBundleBytes = new Uint8Array(await readFile(shimPath));
+    const metas = parseBundleMeta(_shimBundleBytes);
     _shimRegistryCache = { reg: buildMethodRegistry(metas), ifaces: buildClassInterfaces(metas) };
     reloadShimRegistry();
   } catch (e: unknown) {
@@ -231,12 +236,11 @@ async function ensureRuntimeReady(): Promise<void> {
     runtimeReady = (async () => {
       const wasmBytes = await readFile(new URL("../jvm-core/pkg/jvm_core_bg.wasm", import.meta.url));
       await initJvm({ module_or_path: wasmBytes });
-      shimBundle = new Uint8Array(await readFile(new URL("../jdk-shim/bundle.bin", import.meta.url)));
+      // Reuse bytes already loaded at module init; avoids a second read of bundle.bin.
+      shimBundle = _shimBundleBytes ?? new Uint8Array(await readFile(new URL("../jdk-shim/bundle.bin", import.meta.url)));
     })();
   }
   await runtimeReady;
-  // Re-apply shim registry each call so it survives any resetMethodRegistry() between tests.
-  reloadShimRegistry();
 }
 
 function toBundle(classBytes: Uint8Array): Uint8Array {
