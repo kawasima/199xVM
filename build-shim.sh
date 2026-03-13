@@ -163,6 +163,7 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/time/format/DateTimeFormatter.java"
   "$SHIM_SRC/java/time/format/DateTimeFormatterBuilder.java"
   "$SHIM_SRC/java/lang/IO.java"
+  "$SHIM_SRC/java/lang/StrictMath.java"
   "$SHIM_SRC/java/lang/Record.java"
   "$SHIM_SRC/java/lang/FunctionalInterface.java"
   "$SHIM_SRC/java/util/stream/Collectors.java"

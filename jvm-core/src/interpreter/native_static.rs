@@ -431,6 +431,103 @@ impl super::Vm {
                 self.scheduler.current_thread_mut().state = ThreadState::Sleeping;
                 Some(JValue::Void)
             }
+            // ── java.lang.StrictMath ──────────────────────────────────
+            ("java/lang/StrictMath", "sin", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.sin()))
+            }
+            ("java/lang/StrictMath", "cos", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.cos()))
+            }
+            ("java/lang/StrictMath", "tan", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.tan()))
+            }
+            ("java/lang/StrictMath", "asin", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.asin()))
+            }
+            ("java/lang/StrictMath", "acos", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.acos()))
+            }
+            ("java/lang/StrictMath", "atan", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.atan()))
+            }
+            ("java/lang/StrictMath", "exp", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.exp()))
+            }
+            ("java/lang/StrictMath", "log", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.ln()))
+            }
+            ("java/lang/StrictMath", "log10", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.log10()))
+            }
+            ("java/lang/StrictMath", "sqrt", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.sqrt()))
+            }
+            ("java/lang/StrictMath", "cbrt", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.cbrt()))
+            }
+            ("java/lang/StrictMath", "IEEEremainder", "(DD)D") => {
+                let f1 = _args[0].as_double();
+                let f2 = _args[1].as_double();
+                Some(JValue::Double(f1 % f2))
+            }
+            ("java/lang/StrictMath", "ceil", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.ceil()))
+            }
+            ("java/lang/StrictMath", "floor", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.floor()))
+            }
+            ("java/lang/StrictMath", "rint", "(D)D") => {
+                let a = _args[0].as_double();
+                Some(JValue::Double(a.round_ties_even()))
+            }
+            ("java/lang/StrictMath", "atan2", "(DD)D") => {
+                let y = _args[0].as_double();
+                let x = _args[1].as_double();
+                Some(JValue::Double(y.atan2(x)))
+            }
+            ("java/lang/StrictMath", "pow", "(DD)D") => {
+                let a = _args[0].as_double();
+                let b = _args[1].as_double();
+                Some(JValue::Double(a.powf(b)))
+            }
+            ("java/lang/StrictMath", "sinh", "(D)D") => {
+                let x = _args[0].as_double();
+                Some(JValue::Double(x.sinh()))
+            }
+            ("java/lang/StrictMath", "cosh", "(D)D") => {
+                let x = _args[0].as_double();
+                Some(JValue::Double(x.cosh()))
+            }
+            ("java/lang/StrictMath", "tanh", "(D)D") => {
+                let x = _args[0].as_double();
+                Some(JValue::Double(x.tanh()))
+            }
+            ("java/lang/StrictMath", "hypot", "(DD)D") => {
+                let x = _args[0].as_double();
+                let y = _args[1].as_double();
+                Some(JValue::Double(x.hypot(y)))
+            }
+            ("java/lang/StrictMath", "expm1", "(D)D") => {
+                let x = _args[0].as_double();
+                Some(JValue::Double(x.exp_m1()))
+            }
+            ("java/lang/StrictMath", "log1p", "(D)D") => {
+                let x = _args[0].as_double();
+                Some(JValue::Double(x.ln_1p()))
+            }
             _ => None,
         }
     }
