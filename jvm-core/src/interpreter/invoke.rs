@@ -130,7 +130,7 @@ impl Vm {
             _ => None,
         };
         if let Some((rm_method, class_simple_name, component_names, getters)) = record_method_info {
-            if method_name == rm_method || method_name == "toString" || method_name == "equals" || method_name == "hashCode" {
+            if method_name == rm_method {
                 match rm_method.as_str() {
                     "toString" => {
                         // args[0] = the record instance

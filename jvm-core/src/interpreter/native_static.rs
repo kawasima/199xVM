@@ -502,7 +502,9 @@ impl super::Vm {
             ("java/lang/StrictMath", "IEEEremainder", "(DD)D") => {
                 let f1 = _args[0].as_double();
                 let f2 = _args[1].as_double();
-                Some(JValue::Double(f1 % f2))
+                // IEEE 754 remainder: f1 - f2 * rint(f1/f2), not truncated remainder (%)
+                let quotient = f1 / f2;
+                Some(JValue::Double(f1 - f2 * quotient.round_ties_even()))
             }
             ("java/lang/StrictMath", "ceil", "(D)D") => {
                 let a = _args[0].as_double();

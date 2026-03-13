@@ -475,7 +475,7 @@
 
   <script type="module">
     const _javacVer = (typeof "__BUILD_TIMESTAMP__" === "string" && "__BUILD_TIMESTAMP__".startsWith("__")) ? Date.now() : "__BUILD_TIMESTAMP__";
-    const { compile, disassemble, parseBundleMeta, buildMethodRegistry, setMethodRegistry, readJar, classFilesToBundle } = await import(`./javac.js?v=${_javacVer}`);
+    const { compile, disassemble, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, setMethodRegistry, setClassInterfaces, readJar, classFilesToBundle } = await import(`./javac.js?v=${_javacVer}`);
 
     // CodeMirror 6
     import { EditorState } from "https://esm.sh/@codemirror/state@6";
@@ -1579,6 +1579,7 @@ public class JvmInterfaceDefault implements Describable {
         const classMetas = parseBundleMeta(classBundle);
         const registry = buildMethodRegistry(classMetas);
         setMethodRegistry(registry);
+        setClassInterfaces(buildClassInterfaces(classMetas));
         const methodCount = Object.keys(registry).length;
         log("info", `Shim bundle loaded: ${classBundle.byteLength}B — ${methodCount} methods from ${classMetas.length} classes`);
       } catch (e) {
@@ -1595,10 +1596,11 @@ public class JvmInterfaceDefault implements Describable {
       const classFiles = await readJar(jarBytes);
       const jarBundle = classFilesToBundle(classFiles);
 
-      // Register methods from the JAR classes
+      // Register methods and class→interfaces from the JAR classes
       const metas = parseBundleMeta(jarBundle);
       const reg = buildMethodRegistry(metas);
       setMethodRegistry(reg);
+      setClassInterfaces(buildClassInterfaces(metas));
 
       // Append to classBundle
       if (classBundle) {

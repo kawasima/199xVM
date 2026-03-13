@@ -213,14 +213,30 @@ const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
 
 let knownMethods: Record<string, MethodSig> = { ...BASE_KNOWN_METHODS };
 
+/** Maps a class name to the interfaces it implements (populated from loaded JARs). */
+let knownClassInterfaces: Record<string, string[]> = {};
+
 /** Merge an externally-built method registry into the known methods table. */
 export function setMethodRegistry(reg: Record<string, MethodSig>): void {
   knownMethods = { ...knownMethods, ...reg };
 }
 
+/** Merge class→interfaces mappings built from loaded JARs. */
+export function setClassInterfaces(ifaces: Record<string, string[]>): void {
+  for (const [cls, list] of Object.entries(ifaces)) {
+    knownClassInterfaces[cls] = [...(knownClassInterfaces[cls] ?? []), ...list.filter(i => !(knownClassInterfaces[cls] ?? []).includes(i))];
+  }
+}
+
+/** Return known interfaces for a class, or undefined if none recorded. */
+export function getKnownClassInterfaces(cls: string): string[] | undefined {
+  return knownClassInterfaces[cls];
+}
+
 /** Reset the method registry to the built-in defaults (useful for test isolation). */
 export function resetMethodRegistry(): void {
   knownMethods = { ...BASE_KNOWN_METHODS };
+  knownClassInterfaces = {};
 }
 
 export interface FunctionalSig {
