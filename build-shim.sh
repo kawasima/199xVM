@@ -242,6 +242,8 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/net/URLDecoder.java"
   "$SHIM_SRC/java/net/URI.java"
   "$SHIM_SRC/java/net/InetAddress.java"
+  "$SHIM_SRC/java/net/URLConnection.java"
+  "$SHIM_SRC/java/net/URL.java"
 )
 
 rm -rf "$OUT_DIR"

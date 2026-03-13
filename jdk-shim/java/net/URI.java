@@ -1159,7 +1159,7 @@ public final class URI
      *          or if some other error occurred while constructing the URL
      */
     public URL toURL() throws MalformedURLException {
-        throw new MalformedURLException("URL class is not supported in this environment");
+        return new URL(toString());
     }
 
     // -- Component access methods --

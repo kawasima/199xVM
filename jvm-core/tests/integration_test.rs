@@ -430,3 +430,19 @@ fn net_test() {
     );
     assert_eq!(result, "hello+world|hello world|example.com");
 }
+
+// ---------------------------------------------------------------------------
+// java.net.URL: parsing and URI.toURL() round-trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn url_test() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "URLTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "https|example.com|8080|/path|q=1|frag|example.com");
+}
