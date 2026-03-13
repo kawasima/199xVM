@@ -773,7 +773,7 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
       return { className: "java/lang/Object" };
     }
     case "staticCall": {
-      const internalName = expr.className.replace(/\./g, "/");
+      const internalName = resolveClassName(ctx, expr.className.replace(/\./g, "/"));
       const resolved = resolveMethodCandidate(ctx, internalName, expr.method, expr.args, true);
       if (resolved) return resolved.returnType;
       return { className: "java/lang/Object" };
@@ -1182,7 +1182,7 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       break;
     }
     case "staticCall": {
-      const internalName = expr.className.replace(/\./g, "/");
+      const internalName = resolveClassName(ctx, expr.className.replace(/\./g, "/"));
       const resolved = resolveMethodCandidate(ctx, internalName, expr.method, expr.args, true);
       if (resolved) {
         expr.args.forEach((arg, i) => compileExpr(ctx, emitter, arg, resolved.paramTypes[i] ?? { className: "java/lang/Object" }));
