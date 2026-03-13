@@ -115,6 +115,8 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/util/IdentityHashMap.java"
   "$SHIM_SRC/java/util/LinkedHashMap.java"
   "$SHIM_SRC/java/util/Optional.java"
+  "$SHIM_SRC/java/util/KeyValueHolder.java"
+  "$SHIM_SRC/java/util/ImmutableCollections.java"
   "$SHIM_SRC/java/util/Map.java"
   "$SHIM_SRC/java/util/Arrays.java"
   "$SHIM_SRC/java/util/ArrayDeque.java"
