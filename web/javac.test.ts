@@ -11,7 +11,22 @@ import { test, describe } from "node:test";
 import * as assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import initJvm, { run_static } from "../jvm-core/pkg/jvm_core.js";
-import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry, disassemble } from "./javac.js";
+import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry, disassemble, setMethodRegistry, resetMethodRegistry } from "./javac.js";
+import type { MethodSig } from "./javac/method-registry.js";
+
+// Minimal Raoh method registry for tests that reference Raoh classes.
+// In production these are built dynamically from loaded JARs via buildMethodRegistry().
+const RAOH_TEST_REGISTRY: Record<string, MethodSig> = {
+  "net/unit8/raoh/ObjectDecoders.string()": { owner: "net/unit8/raoh/ObjectDecoders", returnType: { className: "net/unit8/raoh/builtin/StringDecoder" }, paramTypes: [], isStatic: true },
+  "net/unit8/raoh/ObjectDecoders.int_()": { owner: "net/unit8/raoh/ObjectDecoders", returnType: { className: "net/unit8/raoh/builtin/IntDecoder" }, paramTypes: [], isStatic: true },
+  "net/unit8/raoh/builtin/StringDecoder.nonBlank()": { owner: "net/unit8/raoh/builtin/StringDecoder", returnType: { className: "net/unit8/raoh/builtin/StringDecoder" }, paramTypes: [] },
+  "net/unit8/raoh/builtin/IntDecoder.range(II)": { owner: "net/unit8/raoh/builtin/IntDecoder", returnType: { className: "net/unit8/raoh/builtin/IntDecoder" }, paramTypes: ["int", "int"] },
+  "net/unit8/raoh/map/MapDecoders.field(Ljava/lang/String;Lnet/unit8/raoh/Decoder;)": { owner: "net/unit8/raoh/map/MapDecoders", returnType: { className: "net/unit8/raoh/FieldDecoder" }, paramTypes: ["String", { className: "net/unit8/raoh/Decoder" }], isStatic: true },
+  "net/unit8/raoh/map/MapDecoders.combine(Lnet/unit8/raoh/Decoder;Lnet/unit8/raoh/Decoder;)": { owner: "net/unit8/raoh/map/MapDecoders", returnType: { className: "net/unit8/raoh/combinator/Combiner2" }, paramTypes: [{ className: "net/unit8/raoh/Decoder" }, { className: "net/unit8/raoh/Decoder" }], isStatic: true },
+  "net/unit8/raoh/combinator/Combiner2.map(Ljava/util/function/BiFunction;)": { owner: "net/unit8/raoh/combinator/Combiner2", returnType: { className: "net/unit8/raoh/Decoder" }, paramTypes: [{ className: "java/util/function/BiFunction" }] },
+  "net/unit8/raoh/Decoder.decode(Ljava/lang/Object;)": { owner: "net/unit8/raoh/Decoder", returnType: { className: "net/unit8/raoh/Result" }, paramTypes: [{ className: "java/lang/Object" }], isInterface: true },
+  "net/unit8/raoh/Result.getOrThrow()": { owner: "net/unit8/raoh/Result", returnType: { className: "java/lang/Object" }, paramTypes: [], isInterface: true },
+};
 
 // Helper: parse single class (convenience wrapper)
 function parse(tokens: ReturnType<typeof lex>) {
@@ -1458,34 +1473,40 @@ describe("Code generator", () => {
   });
 
   test("wildcard import resolves unqualified static call to imported class", () => {
-    const bytes = compile(`
-      import net.unit8.raoh.ObjectDecoders.*;
-      public class Hello {
-        public static String run() {
-          return string().decode("abc");
+    setMethodRegistry(RAOH_TEST_REGISTRY);
+    try {
+      const bytes = compile(`
+        import net.unit8.raoh.ObjectDecoders.*;
+        public class Hello {
+          public static String run() {
+            return string().decode("abc");
+          }
         }
-      }
-    `);
-    assertValidClassFile(bytes);
-    const text = new TextDecoder().decode(bytes);
-    assert.ok(text.includes("ObjectDecoders"), "wildcard class in constant pool");
-    assert.ok(text.includes("string"), "method name in constant pool");
+      `);
+      assertValidClassFile(bytes);
+      const text = new TextDecoder().decode(bytes);
+      assert.ok(text.includes("ObjectDecoders"), "wildcard class in constant pool");
+      assert.ok(text.includes("string"), "method name in constant pool");
+    } finally { resetMethodRegistry(); }
   });
 
   test("import static wildcard resolves same as import wildcard", () => {
-    const bytes = compile(`
-      import static net.unit8.raoh.ObjectDecoders.*;
-      public class Hello {
-        public static String run() {
-          return string().decode("abc");
+    setMethodRegistry(RAOH_TEST_REGISTRY);
+    try {
+      const bytes = compile(`
+        import static net.unit8.raoh.ObjectDecoders.*;
+        public class Hello {
+          public static String run() {
+            return string().decode("abc");
+          }
         }
-      }
-    `);
-    assertValidClassFile(bytes);
-    const text = new TextDecoder().decode(bytes);
-    assert.ok(text.includes("ObjectDecoders"), "wildcard class in constant pool");
-    // Must NOT contain 'staticnet' (the bug: static keyword prepended to class name)
-    assert.ok(!text.includes("staticnet"), "no 'staticnet' corruption in constant pool");
+      `);
+      assertValidClassFile(bytes);
+      const text = new TextDecoder().decode(bytes);
+      assert.ok(text.includes("ObjectDecoders"), "wildcard class in constant pool");
+      // Must NOT contain 'staticnet' (the bug: static keyword prepended to class name)
+      assert.ok(!text.includes("staticnet"), "no 'staticnet' corruption in constant pool");
+    } finally { resetMethodRegistry(); }
   });
 
   test("named import resolves class reference", () => {
@@ -3724,7 +3745,9 @@ describe("Runtime – new syntax", () => {
   });
 
   test("Decoder.decode emits invokeinterface not invokevirtual", () => {
-    const bytes = compile(`import net.unit8.raoh.*;
+    setMethodRegistry(RAOH_TEST_REGISTRY);
+    try {
+      const bytes = compile(`import net.unit8.raoh.*;
 import static net.unit8.raoh.ObjectDecoders.*;
 
 public class DecoderInvokeTest {
@@ -3734,8 +3757,9 @@ public class DecoderInvokeTest {
         return ok.toString();
     }
 }`);
-    const output = disassemble(bytes);
-    // The call to decode on a Decoder (interface) must use invokeinterface
-    assert.ok(output.includes("invokeinterface"), "must emit invokeinterface for Decoder.decode, got: " + output);
+      const output = disassemble(bytes);
+      // The call to decode on a Decoder (interface) must use invokeinterface
+      assert.ok(output.includes("invokeinterface"), "must emit invokeinterface for Decoder.decode, got: " + output);
+    } finally { resetMethodRegistry(); }
   });
 });
