@@ -414,3 +414,19 @@ fn lambda_default_method() {
     );
     assert_eq!(result, "hello:default");
 }
+
+// ---------------------------------------------------------------------------
+// java.net: URLEncoder, URLDecoder, URI
+// ---------------------------------------------------------------------------
+
+#[test]
+fn net_test() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "NetTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "hello+world|hello world|example.com");
+}
