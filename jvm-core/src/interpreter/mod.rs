@@ -816,8 +816,9 @@ impl Vm {
                 return Some(m.access_flags);
             }
         }
-        // Walk super class.
-        let super_name = if class.super_class != 0 {
+        // Resolve super/interface names while we still hold the borrow, then release it.
+        // String allocation happens only here (not on the fast path where method is found above).
+        let super_name: Option<String> = if class.super_class != 0 {
             Some(class.constant_pool.class_name(class.super_class).to_owned())
         } else {
             None
@@ -825,6 +826,7 @@ impl Vm {
         let iface_names: Vec<String> = class.interfaces.iter()
             .map(|&idx| class.constant_pool.class_name(idx).to_owned())
             .collect();
+        // borrow on `class` ends here
         if let Some(super_name) = super_name {
             if let Some(f) = self.find_method_flags(&super_name, method_name, descriptor) {
                 return Some(f);
@@ -900,7 +902,8 @@ impl Vm {
                 return Some(class.constant_pool.class_name(class.this_class).to_owned());
             }
         }
-        let super_name = if class.super_class != 0 {
+        // Resolve names while holding the borrow; allocation is skipped on the fast path.
+        let super_name: Option<String> = if class.super_class != 0 {
             Some(class.constant_pool.class_name(class.super_class).to_owned())
         } else {
             None
@@ -908,6 +911,7 @@ impl Vm {
         let iface_names: Vec<String> = class.interfaces.iter()
             .map(|&idx| class.constant_pool.class_name(idx).to_owned())
             .collect();
+        // borrow on `class` ends here
         if let Some(super_name) = super_name {
             if let Some(owner) = self.find_method_owner(&super_name, method_name, descriptor) {
                 return Some(owner);

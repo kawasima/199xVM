@@ -4989,23 +4989,23 @@ public class BigDecimal extends Number implements Comparable<BigDecimal> {
      * {@code FIVE_TO_2_TO[n] == 5^(2^n)}
      */
     private static final BigInteger[] FIVE_TO_2_TO = new BigInteger[16 + 1];
-
-    static {
-        BigInteger pow = FIVE_TO_2_TO[0] = BigInteger.valueOf(5L);
-        for (int i = 1; i < FIVE_TO_2_TO.length; i++)
-            FIVE_TO_2_TO[i] = pow = pow.multiply(pow);
-    }
+    // [shim] static initializer removed — entries are populated lazily in fiveToTwoToThe()
+    // to avoid computing 5^(2^16) (~45,000 digits) at class-initialization time.
 
     /**
      * @param n a non-negative integer
      * @return {@code 5^(2^n)}
      */
     private static BigInteger fiveToTwoToThe(int n) {
+        // Lazily populate FIVE_TO_2_TO up to the needed index.
+        if (FIVE_TO_2_TO[0] == null)
+            FIVE_TO_2_TO[0] = BigInteger.valueOf(5L);
+        for (int j = 1; j < FIVE_TO_2_TO.length && FIVE_TO_2_TO[j] == null; j++)
+            FIVE_TO_2_TO[j] = FIVE_TO_2_TO[j - 1].multiply(FIVE_TO_2_TO[j - 1]);
         int i = Math.min(n, FIVE_TO_2_TO.length - 1);
         BigInteger pow = FIVE_TO_2_TO[i];
         for (; i < n; i++)
             pow = pow.multiply(pow);
-
         return pow;
     }
 

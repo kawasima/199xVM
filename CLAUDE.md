@@ -32,15 +32,15 @@ All build tasks are managed via `make`. Key targets:
 
 ## Testing
 
-- Integration tests: `jvm-core/tests/integration_test.rs` — uses `include_bytes!` to embed pre-built `.class` bundles. Rebuild bundles before running tests if Java sources change.
-- Compiler tests: `web/javac.test.ts` — tests for lexer, parser, code generator. Run with `npm test`.
-- Always run `npm test` after modifying `web/javac.ts`.
+- Integration tests: `jvm-core/tests/integration_test.rs` — uses `include_bytes!` to embed pre-built `.class` bundles. Run `make test-bundle` before `cargo test` if Java sources change.
+- Compiler tests: `web/javac.test.ts` — tests for lexer, parser, code generator. Run with `make test`.
+- Always run `make test` after modifying `web/javac.ts`.
 
 ## JDK Shim Design
 
 - **Target: Java 25 API compatibility.** Shim classes provide the same public API as JDK 25.
 - JDK standard library classes are implemented as pure Java shims in `jdk-shim/` (compiled to bytecode).
-- To add a new JDK class: create `.java` under `jdk-shim/java/...`, add to `build-shim.sh` entry points if needed, run `./build-shim.sh`.
+- To add a new JDK class: create `.java` under `jdk-shim/java/...`, add to `build-shim.sh` entry points if needed, run `make shim`.
 - Native stubs (`native_virtual` in `interpreter.rs`) are only for truly native operations (e.g., `String` backed by Rust, `PrintStream`). **Do NOT add native stubs** for classes implementable in Java.
 
 ### Shim Implementation Policy
