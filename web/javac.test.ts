@@ -1599,6 +1599,20 @@ public class EnumTest {
     assert.ok(!output.includes("?tag"), "no unknown tag markers in disassembly");
   });
 
+  test("var infers type from method call chain", () => {
+    // var should infer the return type from method calls, not default to Object
+    const bytes = compile(`import java.util.ArrayList;
+public class VarInfer {
+      public static String run() {
+        var list = new ArrayList();
+        list.add("hello");
+        return list.toString();
+      }
+    }`);
+    assertValidClassFile(bytes);
+    // Should compile without error — list should be typed as ArrayList, not Object
+  });
+
   test("compiles ACC_SYNCHRONIZED method flag", () => {
     const bytes = compile(`public class Sync {
       public synchronized void foo() {}

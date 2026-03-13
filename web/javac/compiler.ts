@@ -2456,19 +2456,31 @@ function compileSwitchExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: 
 function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt): void {
   switch (stmt.kind) {
     case "varDecl": {
-      const slot = addLocal(ctx, stmt.name, stmt.type);
+      // For var declarations (parser sets type to Object), re-infer from initializer
+      let declType = stmt.type;
+      if (stmt.init) {
+        const initType = inferType(ctx, stmt.init);
+        const isObjectFallback = typeof declType === "object" && "className" in declType
+          && declType.className === "java/lang/Object";
+        const isMoreSpecific = typeof initType === "object" && "className" in initType
+          && initType.className !== "java/lang/Object";
+        if (isObjectFallback && isMoreSpecific) {
+          declType = initType;
+        }
+      }
+      const slot = addLocal(ctx, stmt.name, declType);
       if (emitter.maxLocals <= slot) emitter.maxLocals = slot + 1;
       if (stmt.init) {
         // If we have a { ... } array literal, patch the elemType from the declared type
         let init = stmt.init;
-        if (init.kind === "arrayLit" && typeof stmt.type === "object" && "array" in stmt.type) {
-          init = { ...init, elemType: stmt.type.array };
+        if (init.kind === "arrayLit" && typeof declType === "object" && "array" in declType) {
+          init = { ...init, elemType: declType.array };
         }
         const initType = inferType(ctx, init);
-        ensureAssignable(ctx, stmt.type, initType, `local '${stmt.name}'`);
-        compileExpr(ctx, emitter, init, stmt.type);
-        emitWideningConversion(emitter, initType, stmt.type);
-        emitStoreLocalByType(emitter, slot, stmt.type);
+        ensureAssignable(ctx, declType, initType, `local '${stmt.name}'`);
+        compileExpr(ctx, emitter, init, declType);
+        emitWideningConversion(emitter, initType, declType);
+        emitStoreLocalByType(emitter, slot, declType);
       }
       break;
     }
