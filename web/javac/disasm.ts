@@ -120,8 +120,14 @@ export function disassemble(classBytes: Uint8Array): string {
         }
         cp.push(`long:${longRepr}`); pos += 8; cp.push(null); i++; break;
       }
+      case 6: { // Double (8 bytes, 2 CP slots)
+        cp.push(`double:${dv.getFloat64(pos)}`); pos += 8; cp.push(null); i++; break;
+      }
       case 15: { cp.push(`#mhnd:${u8()}:${u16()}`); break; }
       case 16: { cp.push(`#mtype:${u16()}`); break; }
+      case 17: { skip(4); cp.push(null); break; } // Dynamic
+      case 19: { skip(2); cp.push(null); break; } // Module
+      case 20: { skip(2); cp.push(null); break; } // Package
       default: { cp.push(`?tag${tag}`); break; }
     }
   }

@@ -11,7 +11,7 @@ import { test, describe } from "node:test";
 import * as assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import initJvm, { run_static } from "../jvm-core/pkg/jvm_core.js";
-import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry } from "./javac.js";
+import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry, disassemble } from "./javac.js";
 
 // Helper: parse single class (convenience wrapper)
 function parse(tokens: ReturnType<typeof lex>) {
@@ -1585,6 +1585,18 @@ public class EnumTest {
     assert.ok(info.fieldFlags.has("RED"), "RED constant exists");
     assert.ok(info.fieldFlags.has("GREEN"), "GREEN constant exists");
     assert.ok(info.fieldFlags.has("BLUE"), "BLUE constant exists");
+  });
+
+  test("disassemble handles double constants", () => {
+    const bytes = compile(`public class DoubleTest {
+      public static String run() {
+        double d = 19.99;
+        return String.valueOf(d);
+      }
+    }`);
+    const output = disassemble(bytes);
+    assert.ok(output.includes("ldc2_w"), "disassembly contains ldc2_w for double literal");
+    assert.ok(!output.includes("?tag"), "no unknown tag markers in disassembly");
   });
 
   test("compiles ACC_SYNCHRONIZED method flag", () => {
