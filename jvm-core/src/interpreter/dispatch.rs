@@ -291,6 +291,10 @@ impl Vm {
                 }
                 _ => Err(format!("Lambda SAM dispatch: expected Ref for receiver, got {recv:?}")),
             }
+        } else if ref_kind == 8 {
+            // newinvokespecial — constructor reference (e.g. Age::new).
+            // Fall through to recursive invoke_virtual path which handles this.
+            return Ok(None);
         } else {
             // Static dispatch.
             self.ensure_class_init(&impl_class)?;
