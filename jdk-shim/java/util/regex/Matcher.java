@@ -55,21 +55,18 @@ public final class Matcher {
     }
 
     public boolean matches() {
-        String r = pattern.pattern();
-        if (".*".equals(r)) {
+        boolean result = nativeMatches(pattern.pattern(), input);
+        if (result) {
             matchStart = 0;
             matchEnd = input.length();
-            return true;
+        } else {
+            matchStart = -1;
+            matchEnd = -1;
         }
-        if (r.equals(input)) {
-            matchStart = 0;
-            matchEnd = input.length();
-            return true;
-        }
-        matchStart = -1;
-        matchEnd = -1;
-        return false;
+        return result;
     }
+
+    private static native boolean nativeMatches(String regex, String input);
 
     public boolean find() {
         String r = pattern.pattern();
