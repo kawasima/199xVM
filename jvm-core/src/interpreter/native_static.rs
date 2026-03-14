@@ -1,6 +1,39 @@
 use std::rc::Rc;
 use crate::heap::{JObject, JValue, NativePayload};
 
+/// Returns true if `regex` ends with an unescaped `$` anchor.
+/// A `$` is escaped when preceded by an odd number of backslashes.
+fn ends_with_unescaped_dollar(regex: &str) -> bool {
+    if !regex.ends_with('$') {
+        return false;
+    }
+    let trailing_backslashes = regex
+        .chars()
+        .rev()
+        .skip(1)
+        .take_while(|&c| c == '\\')
+        .count();
+    trailing_backslashes % 2 == 0
+}
+
+/// Perform a full-string regex match as Java's `Matcher.matches()` requires.
+pub(super) fn regex_full_match(regex: &str, input: &str) -> bool {
+    if regex == ".*" {
+        return true;
+    }
+    let anchored = if regex.starts_with('^') && ends_with_unescaped_dollar(regex) {
+        regex.to_owned()
+    } else {
+        format!("^(?:{regex})$")
+    };
+    regex::Regex::new(&anchored)
+        .map(|re| re.is_match(input))
+        .unwrap_or_else(|e| {
+            eprintln!("Unsupported regex pattern '{regex}': {e}");
+            false
+        })
+}
+
 impl super::Vm {
     pub(super) fn native_static(
         &mut self,
@@ -44,7 +77,21 @@ impl super::Vm {
                     .and_then(|v| v.as_ref())
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
-                let ok = if regex == ".*" { true } else { regex == input };
+                let ok = regex_full_match(&regex, &input);
+                Some(JValue::Int(if ok { 1 } else { 0 }))
+            }
+            ("java/util/regex/Matcher", "nativeMatches", "(Ljava/lang/String;Ljava/lang/String;)Z") => {
+                let regex = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let input = _args
+                    .get(1)
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let ok = regex_full_match(&regex, &input);
                 Some(JValue::Int(if ok { 1 } else { 0 }))
             }
             ("java/util/Arrays", "hashCode", "([Ljava/lang/Object;)I") => {

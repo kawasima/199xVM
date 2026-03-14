@@ -446,3 +446,26 @@ fn url_test() {
     );
     assert_eq!(result, "https|example.com|8080|/path|q=1|frag|example.com");
 }
+
+// ---------------------------------------------------------------------------
+// Matcher.matches(): already-anchored patterns and escaped \$ edge case
+// ---------------------------------------------------------------------------
+
+#[test]
+fn matcher_test() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "MatcherTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    // true|false|true|true|true|false
+    // 1: ^foo$ matches "foo"
+    // 2: ^foo$ does not match "foobar"
+    // 3: email pattern matches "alice@example.com"
+    // 4: ^foo\$ matches literal "foo$"
+    // 5: non-anchored "foo" matches "foo" (full-string via wrapping)
+    // 6: non-anchored "foo" does not match "foobar"
+    assert_eq!(result, "true|false|true|true|true|false");
+}

@@ -363,24 +363,7 @@ impl super::Vm {
                         .unwrap_or_default();
                     (regex, input)
                 };
-                let ok = if regex == ".*" {
-                    true
-                } else {
-                    // Java Matcher.matches() checks full-string match.
-                    // Wrap with ^(?:...)$ only when the pattern does not already
-                    // anchor itself; otherwise ^(?:^...$)$ would mis-compile.
-                    let anchored = if regex.starts_with('^') && regex.ends_with('$') {
-                        regex.clone()
-                    } else {
-                        format!("^(?:{regex})$")
-                    };
-                    regex::Regex::new(&anchored)
-                        .map(|re| re.is_match(&input))
-                        .unwrap_or_else(|e| {
-                            eprintln!("Unsupported regex pattern '{regex}': {e}");
-                            false
-                        })
-                };
+                let ok = super::native_static::regex_full_match(&regex, &input);
                 Some(JValue::Int(if ok { 1 } else { 0 }))
             }
             ("java/lang/Class", "getName") => {
