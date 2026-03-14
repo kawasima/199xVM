@@ -367,8 +367,13 @@ impl super::Vm {
                     true
                 } else {
                     // Java Matcher.matches() checks full-string match.
-                    // Wrap the pattern with ^(?:...)$ to replicate that behaviour.
-                    let anchored = format!("^(?:{regex})$");
+                    // Wrap with ^(?:...)$ only when the pattern does not already
+                    // anchor itself; otherwise ^(?:^...$)$ would mis-compile.
+                    let anchored = if regex.starts_with('^') && regex.ends_with('$') {
+                        regex.clone()
+                    } else {
+                        format!("^(?:{regex})$")
+                    };
                     regex::Regex::new(&anchored)
                         .map(|re| re.is_match(&input))
                         .unwrap_or_else(|e| {
