@@ -59,7 +59,7 @@ dev-jars: $(WEB_JARS)
 # ============================================================
 # shim — compile JDK shim classes → jdk-shim/bundle.bin
 # ============================================================
-jdk-shim/bundle.bin: $(shell find jdk-shim -name '*.java' 2>/dev/null)
+jdk-shim/bundle.bin: build-shim.sh $(shell find jdk-shim -name '*.java' 2>/dev/null)
 	./build-shim.sh
 
 shim: jdk-shim/bundle.bin
@@ -67,7 +67,7 @@ shim: jdk-shim/bundle.bin
 # ============================================================
 # test-bundle — compile test Java classes → test-classes/bundle.bin
 # ============================================================
-test-classes/bundle.bin: web/javac.js $(shell find test-sources -name '*.java' 2>/dev/null)
+test-classes/bundle.bin: build-test-bundle.sh web/javac.js $(shell find test-sources -name '*.java' 2>/dev/null)
 	./build-test-bundle.sh
 
 test-bundle: test-classes/bundle.bin
