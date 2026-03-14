@@ -14,7 +14,7 @@ JAR_NAMES := $(RAOH_JAR) $(RAOH_JSON_JAR) $(JACKSON_ANN_JAR) \
 
 WEB_JARS := $(addprefix web/,$(JAR_NAMES))
 
-.PHONY: all dev-jars shim test-bundle javac wasm dist test clean deploy
+.PHONY: all dev-jars shim test-bundle javac wasm dist test clean deploy docker-playground dist-docker
 
 # ============================================================
 # all — build everything needed for local development
@@ -163,6 +163,24 @@ endif
 	gcloud storage cp dist/index.html "$(GCS)/index.html" --cache-control="no-cache" --content-type="text/html; charset=utf-8"
 	@echo ""
 	@echo "==> Done: $(GCS)/"
+
+# ============================================================
+# docker-playground — build all artifacts via Docker then start web server
+# ============================================================
+# Requires: Docker (or OrbStack). Runs dev-jars, wasm, shim, javac, dist in containers, then docker-compose up (web only).
+docker-playground: dist-docker
+	@echo "==> Starting web server (docker-compose up)..."
+	docker-compose up
+
+# Build dist via Docker (all artifacts built in containers)
+dist-docker:
+	@echo "==> Building artifacts in Docker..."
+	docker-compose run --rm java make dev-jars
+	docker-compose run --rm rust make wasm
+	docker-compose run --rm java make shim
+	docker-compose run --rm node sh -c "npm ci && make javac"
+	docker-compose run --rm node make dist
+	@echo "==> dist/ ready."
 
 # ============================================================
 # clean — remove generated artifacts
