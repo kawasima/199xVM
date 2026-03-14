@@ -166,12 +166,14 @@ Build all artifacts, then start the web server:
 docker-compose run java make dev-jars
 docker-compose run rust make wasm
 docker-compose run java make shim
-docker-compose run node npm ci && docker-compose run node make javac
+docker-compose run node make javac
 docker-compose run node make dist
-docker-compose up
+docker-compose up   # serves dist/ at <http://localhost:3000/>
 ```
 
-Then open http://localhost:3000/web/ (or serve from `dist/` if you prefer). Alternatively, use `make docker-playground` to run the build steps above and then `docker-compose up`.
+Then open <http://localhost:3000/>. Alternatively, use `make docker-playground` to run the build steps above and then `docker-compose up`.
+
+> **Note:** `docker-compose up` (web service) serves `dist/`. Run `dist-docker` or the manual steps above before starting it, otherwise `dist/` will be empty.
 
 ## Known limitations (high level)
 

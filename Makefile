@@ -178,7 +178,7 @@ dist-docker:
 	docker-compose run --rm java make dev-jars
 	docker-compose run --rm rust make wasm
 	docker-compose run --rm java make shim
-	docker-compose run --rm node sh -c "npm ci && make javac"
+	docker-compose run --rm node make javac
 	docker-compose run --rm node make dist
 	@echo "==> dist/ ready."
 
