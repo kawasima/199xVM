@@ -1,0 +1,21 @@
+# Build artifacts (rebuilt inside container)
+node_modules/
+jvm-core/pkg/
+dist/
+jdk-shim/out/
+jdk-shim/bundle.bin
+test-classes/
+web/javac.js
+
+# Version control and IDE
+.git/
+.gitignore
+.cursor/
+
+# Docs and plans (not needed for build)
+*.plan.md
+.cursor/plans/
+
+# Misc
+*.log
+.DS_Store
