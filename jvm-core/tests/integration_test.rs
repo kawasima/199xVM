@@ -103,17 +103,9 @@ fn try_catch_npe() {
     assert_eq!(result, "CAUGHT");
 }
 
-// ---------------------------------------------------------------------------
-// Factorial with long arithmetic
-// ---------------------------------------------------------------------------
-
-fn factorial_bundle() -> &'static [u8] {
-    include_bytes!("../../test-classes/factorial-bundle.bin")
-}
-
 #[test]
 fn factorial_long() {
-    let bundle = combined_bundle(shim_bundle(), factorial_bundle());
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
     let result = jvm_core::run_static_native(
         &bundle,
         "Factorial",
