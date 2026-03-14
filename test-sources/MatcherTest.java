@@ -26,6 +26,10 @@ public class MatcherTest {
         sb.append(Pattern.compile("foo").matcher("foo").matches() ? "true" : "false");
         sb.append("|");
         sb.append(Pattern.compile("foo").matcher("foobar").matches() ? "true" : "false");
+        sb.append("|");
+
+        // 6. alternation ^foo$|bar$ must NOT match "xxbar" (bar$ branch is not start-anchored)
+        sb.append(Pattern.compile("^foo$|bar$").matcher("xxbar").matches() ? "true" : "false");
 
         return sb.toString();
     }

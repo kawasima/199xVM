@@ -460,12 +460,13 @@ fn matcher_test() {
         "run",
         "()Ljava/lang/String;",
     );
-    // true|false|true|true|true|false
+    // true|false|true|true|true|false|false
     // 1: ^foo$ matches "foo"
     // 2: ^foo$ does not match "foobar"
     // 3: email pattern matches "alice@example.com"
     // 4: ^foo\$ matches literal "foo$"
     // 5: non-anchored "foo" matches "foo" (full-string via wrapping)
     // 6: non-anchored "foo" does not match "foobar"
-    assert_eq!(result, "true|false|true|true|true|false");
+    // 7: alternation ^foo$|bar$ does NOT match "xxbar"
+    assert_eq!(result, "true|false|true|true|true|false|false");
 }
