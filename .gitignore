@@ -1,5 +1,8 @@
 /target/
 /dist/
+/.cpcache/
+/.clj-kondo/
+/.lsp/
 node_modules/
 jvm-core/pkg/
 jvm-core/target/
@@ -9,3 +12,4 @@ jdk-shim/bundle.bin
 jdk-shim/out/
 web/javac.js
 web/*.jar
+/clj-smoke/

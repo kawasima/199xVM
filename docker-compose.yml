@@ -37,6 +37,15 @@ services:
     working_dir: /app
     command: sleep infinity
 
+  clj:
+    profiles:
+      - build
+    image: clojure:temurin-25-tools-deps-trixie-slim
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: sleep infinity
+
   node:
     profiles:
       - build

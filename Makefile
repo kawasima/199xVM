@@ -14,7 +14,7 @@ JAR_NAMES := $(RAOH_JAR) $(RAOH_JSON_JAR) $(JACKSON_ANN_JAR) \
 
 WEB_JARS := $(addprefix web/,$(JAR_NAMES))
 
-.PHONY: all dev-jars shim test-bundle javac wasm dist test clean deploy docker-playground dist-docker
+.PHONY: all dev-jars shim test-bundle clj-smoke-bundle clj-smoke-run clj-smoke-docker javac wasm dist test clean deploy docker-playground dist-docker
 
 # ============================================================
 # all — build everything needed for local development
@@ -71,6 +71,28 @@ test-classes/bundle.bin: build-test-bundle.sh web/javac.js $(shell find test-sou
 	./build-test-bundle.sh
 
 test-bundle: test-classes/bundle.bin
+
+# ============================================================
+# clj-smoke-bundle — compile isolated Clojure smoke classes → clj-smoke/bundle.bin
+# ============================================================
+clj-smoke/bundle.bin: build-clj-smoke.sh test-sources/clojure/deps.edn $(shell find test-sources/clojure -type f 2>/dev/null)
+	./build-clj-smoke.sh
+
+clj-smoke-bundle: clj-smoke/bundle.bin
+
+# ============================================================
+# clj-smoke-run — run the isolated Clojure smoke bundle against the VM
+# ============================================================
+clj-smoke-run: clj-smoke/bundle.bin jdk-shim/bundle.bin
+	cargo run --package jvm-core --bin run_bundle jdk-shim/bundle.bin clj-smoke/bundle.bin ClojureSmokeEntry run '()Ljava/lang/String;'
+
+# ============================================================
+# clj-smoke-docker — build + run the isolated Clojure smoke flow in containers
+# ============================================================
+clj-smoke-docker:
+	docker-compose run --rm java make shim
+	docker-compose run --rm clj make clj-smoke-bundle
+	docker-compose run --rm rust cargo run --package jvm-core --bin run_bundle /app/jdk-shim/bundle.bin /app/clj-smoke/bundle.bin ClojureSmokeEntry run '()Ljava/lang/String;'
 
 # ============================================================
 # javac — build web/javac.js from web/javac.ts
@@ -189,5 +211,6 @@ clean:
 	rm -rf dist
 	rm -rf jdk-shim/out jdk-shim/bundle.bin
 	rm -rf test-classes
+	rm -rf clj-smoke/target clj-smoke/bundle.bin
 	rm -f  web/javac.js
 	rm -rf jvm-core/pkg

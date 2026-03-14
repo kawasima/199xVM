@@ -175,6 +175,30 @@ Then open <http://localhost:3000/>. Alternatively, use `make docker-playground` 
 
 > **Note:** `docker-compose up` (web service) serves `dist/`. Run `dist-docker` or the manual steps above before starting it, otherwise `dist/` will be empty.
 
+**4. Clojure smoke (isolated diagnostic path)**
+
+This path is intentionally separate from `make test`, `cargo test`, and the normal Java/Web build flow. It exists to bundle a tiny AOT-compiled Clojure entrypoint plus the Clojure runtime, then run it through 199xVM so missing shim/runtime support is surfaced incrementally.
+
+The `clj` service uses the Docker Official Image for Clojure on Temurin Java 25 with `tools.deps`.
+The smoke source and `deps.edn` live under `test-sources/clojure/`; `clj-smoke/` is only generated output and cache.
+
+```sh
+make clj-smoke-docker
+```
+
+Manual steps if you want to inspect each stage:
+
+```sh
+docker-compose run --rm java make shim
+docker-compose run --rm clj make clj-smoke-bundle
+docker-compose run --rm rust cargo run --package jvm-core --bin run_bundle \
+  /app/jdk-shim/bundle.bin \
+  /app/clj-smoke/bundle.bin \
+  ClojureSmokeEntry run '()Ljava/lang/String;'
+```
+
+The smoke command prints either the returned string or the first VM error encountered. It is a diagnostic command, not a required test gate.
+
 ## Known limitations (high level)
 
 - Full Java 25 language/toolchain parity is out of scope today
