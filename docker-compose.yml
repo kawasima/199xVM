@@ -6,7 +6,7 @@ services:
   web:
     build:
       context: .
-      dockerfile: Dockerfile.node
+      dockerfile: docker/Dockerfile.node
     command: npx serve . -p 3000
     ports:
       - "3000:3000"
@@ -20,7 +20,7 @@ services:
       - build
     build:
       context: .
-      dockerfile: Dockerfile.rust
+      dockerfile: docker/Dockerfile.rust
     volumes:
       - .:/app
     working_dir: /app
@@ -31,7 +31,7 @@ services:
       - build
     build:
       context: .
-      dockerfile: Dockerfile.java
+      dockerfile: docker/Dockerfile.java
     volumes:
       - .:/app
     working_dir: /app
@@ -42,7 +42,7 @@ services:
       - build
     build:
       context: .
-      dockerfile: Dockerfile.node
+      dockerfile: docker/Dockerfile.node
     volumes:
       - .:/app
       - node_modules:/app/node_modules
