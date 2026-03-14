@@ -1,7 +1,7 @@
 # 199xVM — Rust/WASM build (VM only). Use for: make wasm, cargo test --package jvm-core
 FROM rust:1-bookworm
 
-RUN cargo install wasm-pack
+RUN rustup target add wasm32-unknown-unknown && cargo install wasm-pack
 
 WORKDIR /app
 
