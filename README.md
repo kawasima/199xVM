@@ -136,6 +136,45 @@ npm run build:javac
 wasm-pack build jvm-core --target web
 ```
 
+### Docker (three ways: VM only / Compiler only / Web Playground)
+
+Use Docker or OrbStack with the project’s `docker-compose.yml`. Only the **web** service is started by `docker-compose up`; the **rust**, **java**, and **node** services are for one-off builds/tests via `docker-compose run <service> ...`.
+
+**1. VM (wasm) only**
+
+```sh
+docker-compose run rust make wasm
+docker-compose run rust cargo test --package jvm-core --lib
+```
+
+The `--lib` flag runs only unit tests. For full integration tests (which need `test-classes/bundle.bin`), build the test bundle first:  
+`docker-compose run node npm ci && docker-compose run node make javac`, then `docker-compose run java make test-bundle`. After that, `docker-compose run rust cargo test --package jvm-core` runs all tests.
+
+**2. Compiler only**
+
+```sh
+docker-compose run node npm ci   # first time (or when package.json changes)
+docker-compose run node make javac
+docker-compose run node make test
+```
+
+**3. Web Playground (full dist + serve)**
+
+Build all artifacts, then start the web server:
+
+```sh
+docker-compose run java make dev-jars
+docker-compose run rust make wasm
+docker-compose run java make shim
+docker-compose run node make javac
+docker-compose run node make dist
+docker-compose up   # serves dist/ at <http://localhost:3000/>
+```
+
+Then open <http://localhost:3000/>. Alternatively, use `make docker-playground` to run the build steps above and then `docker-compose up`.
+
+> **Note:** `docker-compose up` (web service) serves `dist/`. Run `dist-docker` or the manual steps above before starting it, otherwise `dist/` will be empty.
+
 ## Known limitations (high level)
 
 - Full Java 25 language/toolchain parity is out of scope today

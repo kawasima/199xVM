@@ -1,0 +1,9 @@
+# 199xVM — Rust/WASM build (VM only). Use for: make wasm, cargo test --package jvm-core
+FROM rust:1-bookworm
+
+RUN rustup target add wasm32-unknown-unknown && cargo install wasm-pack
+
+WORKDIR /app
+
+# Default: keep container alive for docker-compose run; override with make wasm / cargo test
+CMD ["sleep", "infinity"]
