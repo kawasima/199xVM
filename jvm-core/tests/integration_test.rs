@@ -252,6 +252,22 @@ fn concrete_interface_method_no_abstract_method_error() {
 }
 
 // ---------------------------------------------------------------------------
+// java.lang.ref queue bookkeeping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reference_queue_basics() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "ReferenceQueueTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ok");
+}
+
+// ---------------------------------------------------------------------------
 // JVMS §5.5: erroneous-state — second access throws NoClassDefFoundError
 // ---------------------------------------------------------------------------
 
