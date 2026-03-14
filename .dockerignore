@@ -13,6 +13,7 @@ web/javac.js
 .cursor/
 
 # Docs and plans (not needed for build)
+CLAUDE.md
 *.plan.md
 .cursor/plans/
 
