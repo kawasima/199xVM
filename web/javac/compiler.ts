@@ -539,7 +539,6 @@ function mergeTernaryType(a: Type, b: Type): Type {
   return a;
 }
 
-/** Resolve a simple class name to its internal JVM name using the import map. */
 /** Resolve a simple class name against wildcard (on-demand) package imports. */
 function resolveWildcardImport(name: string, packageImports: string[]): string | undefined {
   if (!/^[A-Z]/.test(name) || packageImports.length === 0) return undefined;
@@ -2191,7 +2190,6 @@ function collectAssignedInExpr(expr: Expr, out: Set<string>): void {
     default: break;
   }
 }
-
 
 function descriptorToType(desc: string): Type {
   if (desc === "I") return "int";
