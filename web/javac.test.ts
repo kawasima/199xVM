@@ -4006,4 +4006,23 @@ public class DecoderInvokeTest {
       }
     }`), /effectively final/);
   });
+
+  test("ambiguous wildcard imports are rejected", () => {
+    const ambigRegistry: Record<string, MethodSig[]> = {
+      "pkg/a/Dup.foo": [{ params: [], ret: "Ljava/lang/String;" }],
+      "pkg/b/Dup.foo": [{ params: [], ret: "Ljava/lang/String;" }],
+    };
+    setMethodRegistry(ambigRegistry);
+    try {
+      assert.throws(() => compile(`
+        import pkg.a.*;
+        import pkg.b.*;
+        public class AmbigTest {
+          public static String run() {
+            return Dup.foo();
+          }
+        }
+      `), /Ambiguous class name/);
+    } finally { resetMethodRegistry(); reloadShimRegistry(); }
+  });
 });

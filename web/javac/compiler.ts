@@ -694,9 +694,9 @@ function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
   return undefined;
 }
 
-function addLocal(ctx: CompileContext, name: string, type: Type): number {
+function addLocal(ctx: CompileContext, name: string, type: Type, synthetic = false): number {
   // In Java, a local variable cannot shadow another local or parameter in an enclosing scope.
-  if (!name.startsWith("$") && findLocal(ctx, name)) {
+  if (!synthetic && findLocal(ctx, name)) {
     throw new Error(`Variable '${name}' is already defined in the scope`);
   }
   const slot = ctx.nextSlot++;
@@ -2095,6 +2095,7 @@ function collectAssignedInStmt(stmt: Stmt, out: Set<string>): void {
       collectAssignedInExpr(stmt.selector, out);
       for (const c of stmt.cases) {
         if (c.guard) collectAssignedInExpr(c.guard, out);
+        if (c.expr) collectAssignedInExpr(c.expr, out);
         if (c.stmts) for (const s of c.stmts) collectAssignedInStmt(s, out);
       }
       break;
@@ -2447,7 +2448,7 @@ function bindPatternLabelLocals(
   if (recordDecl.recordComponents.length !== label.bindVars.length) {
     throw new Error(`record pattern arity mismatch for ${label.typeName}`);
   }
-  const recSlot = addLocal(ctx, "$rec_pat", { className: checkClass });
+  const recSlot = addLocal(ctx, "$rec_pat", { className: checkClass }, true);
   if (emitter.maxLocals <= recSlot) emitter.maxLocals = recSlot + 1;
   emitter.emitAstore(recSlot);
 
@@ -2530,7 +2531,7 @@ function compileSwitchStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: 
   withScopedLocals(ctx, () => {
     const selectorType = inferType(ctx, stmt.selector);
     validateSwitchSemanticsCompile(ctx, selectorType, stmt.cases, false);
-    const selectorSlot = addLocal(ctx, "$switch_sel", selectorType);
+    const selectorSlot = addLocal(ctx, "$switch_sel", selectorType, true);
     if (emitter.maxLocals <= selectorSlot) emitter.maxLocals = selectorSlot + 1;
     if (selectorType === "int" || selectorType === "boolean") {
       compileExpr(ctx, emitter, stmt.selector, selectorType);
@@ -2576,7 +2577,7 @@ function compileSwitchExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: 
   withScopedLocals(ctx, () => {
     const selectorType = inferType(ctx, expr.selector);
     validateSwitchSemanticsCompile(ctx, selectorType, expr.cases, true);
-    const selectorSlot = addLocal(ctx, "$switch_expr_sel", selectorType);
+    const selectorSlot = addLocal(ctx, "$switch_expr_sel", selectorType, true);
     if (emitter.maxLocals <= selectorSlot) emitter.maxLocals = selectorSlot + 1;
     if (selectorType === "int" || selectorType === "boolean") {
       compileExpr(ctx, emitter, expr.selector, selectorType);
@@ -2754,7 +2755,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
               emitter.emit(0xb3); // putstatic
               emitter.emitU16(fRef);
             } else {
-              const resultSlot = addLocal(ctx, tempName("$ca_res_"), field.type);
+              const resultSlot = addLocal(ctx, tempName("$ca_res_"), field.type, true);
               if (emitter.maxLocals <= resultSlot) emitter.maxLocals = resultSlot + 1;
               emitStoreLocalByType(emitter, resultSlot, field.type);
               emitter.emitAload(0);
@@ -2774,7 +2775,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         const fieldRef = ctx.cp.addFieldref(ownerClass, stmt.target.field, typeToDescriptor(targetType));
         // Evaluate receiver once
         compileExpr(ctx, emitter, stmt.target.object);
-        const objSlot = addLocal(ctx, tempName("$ca_obj_"), objType);
+        const objSlot = addLocal(ctx, tempName("$ca_obj_"), objType, true);
         if (emitter.maxLocals <= objSlot) emitter.maxLocals = objSlot + 1;
         emitter.emitAstore(objSlot);
         // Load current field value once
@@ -2782,11 +2783,11 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         emitter.emit(0xb4); // getfield
         emitter.emitU16(fieldRef);
         const leftName = tempName("$ca_left_");
-        const leftSlot = addLocal(ctx, leftName, targetType);
+        const leftSlot = addLocal(ctx, leftName, targetType, true);
         if (emitter.maxLocals <= leftSlot) emitter.maxLocals = leftSlot + 1;
         emitStoreLocalByType(emitter, leftSlot, targetType);
         emitBinaryIntoTarget({ kind: "ident", name: leftName }, targetType, `field '${stmt.target.field}'`);
-        const resSlot = addLocal(ctx, tempName("$ca_res_"), targetType);
+        const resSlot = addLocal(ctx, tempName("$ca_res_"), targetType, true);
         if (emitter.maxLocals <= resSlot) emitter.maxLocals = resSlot + 1;
         emitStoreLocalByType(emitter, resSlot, targetType);
         emitter.emitAload(objSlot);
@@ -2819,7 +2820,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         };
         // Evaluate array and index once
         compileExpr(ctx, emitter, stmt.target.array);
-        const arrSlot = addLocal(ctx, tempName("$ca_arr_"), arrType);
+        const arrSlot = addLocal(ctx, tempName("$ca_arr_"), arrType, true);
         if (emitter.maxLocals <= arrSlot) emitter.maxLocals = arrSlot + 1;
         emitter.emitAstore(arrSlot);
         compileExpr(ctx, emitter, stmt.target.index, "int");
@@ -2828,7 +2829,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         } else if (!(indexType === "int" || indexType === "byte" || indexType === "short" || indexType === "char")) {
           throw new Error(`Invalid array index type in compound assignment: ${String(indexType)}`);
         }
-        const idxSlot = addLocal(ctx, tempName("$ca_idx_"), "int");
+        const idxSlot = addLocal(ctx, tempName("$ca_idx_"), "int", true);
         if (emitter.maxLocals <= idxSlot) emitter.maxLocals = idxSlot + 1;
         emitter.emitIstore(idxSlot);
         emitter.emitAload(arrSlot);
@@ -2836,11 +2837,11 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         emitArrayLoad(elemType);
         emitter.adjustStackForArrayLoad();
         const leftName = tempName("$ca_left_");
-        const leftSlot = addLocal(ctx, leftName, elemType);
+        const leftSlot = addLocal(ctx, leftName, elemType, true);
         if (emitter.maxLocals <= leftSlot) emitter.maxLocals = leftSlot + 1;
         emitStoreLocalByType(emitter, leftSlot, elemType);
         emitBinaryIntoTarget({ kind: "ident", name: leftName }, elemType, "array element");
-        const resSlot = addLocal(ctx, tempName("$ca_res_"), elemType);
+        const resSlot = addLocal(ctx, tempName("$ca_res_"), elemType, true);
         if (emitter.maxLocals <= resSlot) emitter.maxLocals = resSlot + 1;
         emitStoreLocalByType(emitter, resSlot, elemType);
         emitter.emitAload(arrSlot);
@@ -2924,7 +2925,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
             if (bindVars.length !== recordDecl.recordComponents.length) {
               throw new Error(`record pattern arity mismatch for ${stmt.cond.checkType}`);
             }
-            const recSlot = addLocal(ctx, "$if_rec_pat", { className: checkClass });
+            const recSlot = addLocal(ctx, "$if_rec_pat", { className: checkClass }, true);
             if (emitter.maxLocals <= recSlot) emitter.maxLocals = recSlot + 1;
             emitter.emitAstore(recSlot);
             for (let i = 0; i < bindVars.length; i++) {
@@ -3039,10 +3040,10 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         if (typeof iterableType === "object" && "array" in iterableType) {
           // Array iteration: for (T x : arr) → int $i=0; while($i < arr.length) { T x = arr[$i]; ... $i++; }
           compileExpr(ctx, emitter, stmt.iterable);
-          const arrSlot = addLocal(ctx, "$forEach_arr", iterableType);
+          const arrSlot = addLocal(ctx, "$forEach_arr", iterableType, true);
           if (emitter.maxLocals <= arrSlot) emitter.maxLocals = arrSlot + 1;
           emitter.emitAstore(arrSlot);
-          const idxSlot = addLocal(ctx, "$forEach_idx", "int");
+          const idxSlot = addLocal(ctx, "$forEach_idx", "int", true);
           if (emitter.maxLocals <= idxSlot) emitter.maxLocals = idxSlot + 1;
           emitter.emitIconst(0);
           emitter.emitIstore(idxSlot);
@@ -3081,7 +3082,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
           compileExpr(ctx, emitter, stmt.iterable);
           const iteratorRef = ctx.cp.addInterfaceMethodref("java/lang/Iterable", "iterator", "()Ljava/util/Iterator;");
           emitter.emitInvokeinterface(iteratorRef, 0, true);
-          const itSlot = addLocal(ctx, "$forEach_it", { className: "java/util/Iterator" });
+          const itSlot = addLocal(ctx, "$forEach_it", { className: "java/util/Iterator" }, true);
           if (emitter.maxLocals <= itSlot) emitter.maxLocals = itSlot + 1;
           emitter.emitAstore(itSlot);
           const loopStart = emitter.pc;
@@ -3158,7 +3159,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         const syncMonName = `$sync_mon_${ctx.nextSlot}`;
         const syncExName = `$sync_ex_${ctx.nextSlot}`;
         compileExpr(ctx, emitter, stmt.monitor);
-        const monSlot = addLocal(ctx, syncMonName, monitorType);
+        const monSlot = addLocal(ctx, syncMonName, monitorType, true);
         if (emitter.maxLocals <= monSlot) emitter.maxLocals = monSlot + 1;
         emitter.emitAstore(monSlot);
 
@@ -3178,7 +3179,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
 
         const handlerPc = emitter.pc;
         emitter.adjustStackForCatch();
-        const exSlot = addLocal(ctx, syncExName, { className: "java/lang/Throwable" });
+        const exSlot = addLocal(ctx, syncExName, { className: "java/lang/Throwable" }, true);
         if (emitter.maxLocals <= exSlot) emitter.maxLocals = exSlot + 1;
         emitter.emitAstore(exSlot);
         emitter.emitAload(monSlot);
@@ -3232,7 +3233,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         const patchAfterFinally = emitter.emitBranch(0xa7); // skip exceptional finally handler on normal flow
         const finallyHandlerPc = emitter.pc;
         emitter.adjustStackForCatch();
-        const exSlot = addLocal(ctx, `\u0001finally_ex_${ctx.nextSlot}`, { className: "java/lang/Throwable" });
+        const exSlot = addLocal(ctx, `\u0001finally_ex_${ctx.nextSlot}`, { className: "java/lang/Throwable" }, true);
         if (emitter.maxLocals <= exSlot) emitter.maxLocals = exSlot + 1;
         emitter.emitAstore(exSlot);
         withScopedLocals(ctx, () => {
