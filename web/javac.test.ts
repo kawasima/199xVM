@@ -3936,4 +3936,63 @@ public class DecoderInvokeTest {
       assert.ok(output.includes("invokeinterface"), "must emit invokeinterface for Decoder.decode, got: " + output);
     } finally { resetMethodRegistry(); reloadShimRegistry(); }
   });
+
+  // -----------------------------------------------------------------------
+  // JLS-6: Names, scope, and shadowing diagnostics
+  // -----------------------------------------------------------------------
+
+  test("duplicate local variable in same scope is rejected", () => {
+    assert.throws(() => compile(`public class DupVar {
+      public static String run() {
+        int x = 1;
+        int x = 2;
+        return "";
+      }
+    }`), /already defined/);
+  });
+
+  test("shadowing in nested block is allowed", () => {
+    const bytes = compile(`public class ShadowNested {
+      public static String run() {
+        int x = 1;
+        if (true) { int x = 2; }
+        return "" + x;
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("sequential scopes can reuse variable name", () => {
+    const bytes = compile(`public class SeqScope {
+      public static String run() {
+        if (true) { int x = 1; }
+        if (true) { int x = 2; }
+        return "";
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
+
+  test("lambda captured variable modified inside lambda is rejected", () => {
+    assert.throws(() => compile(`import java.util.function.Consumer;
+    public class LambdaBadCapture {
+      public static String run() {
+        int x = 5;
+        Consumer<String> c = s -> { x = 10; };
+        return "";
+      }
+    }`), /effectively final/);
+  });
+
+  test("lambda captured variable read-only is allowed", () => {
+    const bytes = compile(`import java.util.function.Consumer;
+    public class LambdaGoodCapture {
+      public static String run() {
+        int x = 5;
+        Consumer<String> c = s -> { int y = x + 1; };
+        return "";
+      }
+    }`);
+    assertValidClassFile(bytes);
+  });
 });

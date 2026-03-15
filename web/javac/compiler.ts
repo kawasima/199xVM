@@ -548,10 +548,15 @@ function resolveClassName(ctx: CompileContext, name: string): string {
   if (explicit) return explicit;
   if (ctx.classDecls.has(name)) return name;
   if (/^[A-Z]/.test(name) && ctx.packageImports.length > 0) {
+    const matches: string[] = [];
     for (const pkg of ctx.packageImports) {
       const candidate = `${pkg}/${name}`;
-      if (hasKnownMethodOwnerPrefix(candidate)) return candidate;
+      if (hasKnownMethodOwnerPrefix(candidate)) matches.push(candidate);
     }
+    if (matches.length > 1) {
+      throw new Error(`Ambiguous class name '${name}': found in ${matches.join(" and ")}`);
+    }
+    if (matches.length === 1) return matches[0];
     // No package resolved — return the bare name rather than defaulting to
     // java/lang/, which would silently mangle unimported class references.
     return name;
@@ -688,6 +693,14 @@ function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
 }
 
 function addLocal(ctx: CompileContext, name: string, type: Type): number {
+  // Check for duplicate declaration in the current scope (skip compiler-generated names)
+  if (!name.startsWith("$")) {
+    for (let i = ctx.scopeStart; i < ctx.locals.length; i++) {
+      if (ctx.locals[i].name === name) {
+        throw new Error(`Variable '${name}' is already defined in the scope`);
+      }
+    }
+  }
   const slot = ctx.nextSlot++;
   ctx.locals.push({ name, type, slot });
   return slot;
@@ -1399,6 +1412,16 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       if (expr.bodyStmts) for (const s of expr.bodyStmts) collectStmtIdentifiers(s, used);
       const paramSet = new Set(expr.params);
       const captures = ctx.locals.filter(l => used.has(l.name) && !paramSet.has(l.name));
+
+      // Check effectively-final: captured variables must not be assigned inside the lambda body
+      const lambdaBodyStmts = expr.bodyStmts ?? [];
+      const assignedInLambda = collectAssignedNames(lambdaBodyStmts);
+      for (const cap of captures) {
+        if (assignedInLambda.has(cap.name)) {
+          throw new Error(`Variable '${cap.name}' must be effectively final when captured by a lambda`);
+        }
+      }
+
       const needsThisCapture = !ctx.ownerIsStatic;
 
       const lambdaId = ctx.lambdaCounter.value++;
@@ -1880,9 +1903,12 @@ function compileFieldAccess(ctx: CompileContext, emitter: BytecodeEmitter, expr:
 function withScopedLocals(ctx: CompileContext, fn: () => void): void {
   const savedLen = ctx.locals.length;
   const savedNext = ctx.nextSlot;
+  const savedScopeStart = ctx.scopeStart;
+  ctx.scopeStart = savedLen;
   fn();
   ctx.locals.length = savedLen;
   ctx.nextSlot = savedNext;
+  ctx.scopeStart = savedScopeStart;
 }
 
 type ExitAction = { kind: "monitor"; slot: number } | { kind: "finally"; body: Stmt[] };
@@ -2025,6 +2051,73 @@ function collectStmtIdentifiers(stmt: Stmt, out: Set<string>): void {
       for (const s of stmt.stmts) collectStmtIdentifiers(s, out);
       break;
   }
+}
+
+/** Collect identifiers that are assignment targets (write operations) in a statement tree. */
+function collectAssignedInStmt(stmt: Stmt, out: Set<string>): void {
+  switch (stmt.kind) {
+    case "assign":
+      if (stmt.target.kind === "ident") out.add(stmt.target.name);
+      collectAssignedInExpr(stmt.value, out);
+      break;
+    case "compoundAssign":
+      if (stmt.target.kind === "ident") out.add(stmt.target.name);
+      break;
+    case "exprStmt": collectAssignedInExpr(stmt.expr, out); break;
+    case "if":
+      for (const s of stmt.then) collectAssignedInStmt(s, out);
+      if (stmt.else_) for (const s of stmt.else_) collectAssignedInStmt(s, out);
+      break;
+    case "for":
+      if (stmt.init) collectAssignedInStmt(stmt.init, out);
+      if (stmt.update) collectAssignedInStmt(stmt.update, out);
+      for (const s of stmt.body) collectAssignedInStmt(s, out);
+      break;
+    case "while":
+    case "doWhile":
+      for (const s of stmt.body) collectAssignedInStmt(s, out);
+      break;
+    case "forEach":
+      for (const s of stmt.body) collectAssignedInStmt(s, out);
+      break;
+    case "block":
+      for (const s of stmt.stmts) collectAssignedInStmt(s, out);
+      break;
+    case "tryCatch":
+      for (const s of stmt.tryBody) collectAssignedInStmt(s, out);
+      for (const c of stmt.catches) for (const s of c.body) collectAssignedInStmt(s, out);
+      if (stmt.finallyBody) for (const s of stmt.finallyBody) collectAssignedInStmt(s, out);
+      break;
+    case "switch":
+      for (const c of stmt.cases) {
+        if (c.stmts) for (const s of c.stmts) collectAssignedInStmt(s, out);
+      }
+      break;
+    case "synchronized":
+      for (const s of stmt.body) collectAssignedInStmt(s, out);
+      break;
+    case "labeled":
+      collectAssignedInStmt(stmt.stmt, out);
+      break;
+    case "return": if (stmt.value) collectAssignedInExpr(stmt.value, out); break;
+    default: break;
+  }
+}
+
+function collectAssignedInExpr(expr: Expr, out: Set<string>): void {
+  switch (expr.kind) {
+    case "postIncrement":
+    case "preIncrement":
+      if (expr.operand.kind === "ident") out.add(expr.operand.name);
+      break;
+    default: break;
+  }
+}
+
+function collectAssignedNames(stmts: Stmt[]): Set<string> {
+  const out = new Set<string>();
+  for (const s of stmts) collectAssignedInStmt(s, out);
+  return out;
 }
 
 function descriptorToType(desc: string): Type {
@@ -3182,6 +3275,7 @@ function compileMethod(
     method,
     locals,
     nextSlot,
+    scopeStart: locals.length,
     fields: classDecl.fields,
     inheritedFields,
     allMethods,
@@ -3414,6 +3508,7 @@ function collectExprCheckedExceptions(
       fields: classDecl.fields,
       inheritedFields: [],
       locals: Array.from(localTypes, ([name, type], idx) => ({ name, type, slot: idx })),
+      scopeStart: 0,
       importMap: classDecl.importMap,
       packageImports: classDecl.packageImports,
       staticWildcardImports: classDecl.staticWildcardImports,
@@ -3571,6 +3666,7 @@ function collectStmtCheckedExceptions(
       fields: classDecl.fields,
       inheritedFields: [],
       locals: Array.from(localTypes, ([name, type], idx) => ({ name, type, slot: idx })),
+      scopeStart: 0,
       importMap: classDecl.importMap,
       packageImports: classDecl.packageImports,
       staticWildcardImports: classDecl.staticWildcardImports,
@@ -3852,6 +3948,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         className: classDecl.name, superClass: classDecl.superClass, cp, method,
         locals: method.params.map((p, i) => ({ name: p.name, type: p.type, slot: i + initParamSlotBase })),
         nextSlot: method.params.length + initParamSlotBase,
+        scopeStart: method.params.length,
         fields: classDecl.fields, inheritedFields, allMethods,
         importMap: classDecl.importMap,
         packageImports: classDecl.packageImports,
@@ -3947,6 +4044,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       method: clinitMethod,
       locals: [],
       nextSlot: 0,
+      scopeStart: 0,
       fields: classDecl.fields,
       inheritedFields,
       allMethods,
