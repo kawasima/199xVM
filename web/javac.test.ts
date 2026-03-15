@@ -4008,9 +4008,9 @@ public class DecoderInvokeTest {
   });
 
   test("ambiguous wildcard imports are rejected", () => {
-    const ambigRegistry: Record<string, MethodSig[]> = {
-      "pkg/a/Dup.foo": [{ params: [], ret: "Ljava/lang/String;" }],
-      "pkg/b/Dup.foo": [{ params: [], ret: "Ljava/lang/String;" }],
+    const ambigRegistry: Record<string, MethodSig> = {
+      "pkg/a/Dup.foo()": { owner: "pkg/a/Dup", returnType: { className: "java/lang/String" }, paramTypes: [], isStatic: true },
+      "pkg/b/Dup.foo()": { owner: "pkg/b/Dup", returnType: { className: "java/lang/String" }, paramTypes: [], isStatic: true },
     };
     setMethodRegistry(ambigRegistry);
     try {
