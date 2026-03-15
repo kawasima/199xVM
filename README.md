@@ -71,7 +71,7 @@ Status labels:
 | ID | Topic | Status | Evidence | Gap / next step |
 | --- | --- | --- | --- | --- |
 | JLS-3 | Lexical structure / tokens / literals | Implemented | `lexer.ts` + lexer tests | Keep parity checks for edge lexical forms |
-| JLS-6 | Names, scope, and shadowing | Implemented | `compiler.ts` scope/shadowing diagnostics + tests | — |
+| JLS-6 | Names, scope, and shadowing | Implemented | `compiler.ts` scope/shadowing diagnostics + tests | Effectively-final: enclosing-scope reassignment not yet checked |
 | JLS-8 | Classes, members, constructors (incl. records/enums) | Partial | parser+codegen tests | Cover remaining declaration constraints and corner cases |
 | JLS-9 | Interfaces and inheritance behavior | Partial | method resolution tests | Expand default/static/interface conflict rules |
 | JLS-11 | Exceptions and checked-exception analysis | Partial | throw/catch analysis tests | Expand full-path exception typing coverage |

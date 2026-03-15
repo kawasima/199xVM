@@ -548,15 +548,15 @@ function resolveClassName(ctx: CompileContext, name: string): string {
   if (explicit) return explicit;
   if (ctx.classDecls.has(name)) return name;
   if (/^[A-Z]/.test(name) && ctx.packageImports.length > 0) {
-    const matches: string[] = [];
+    const matches = new Set<string>();
     for (const pkg of ctx.packageImports) {
       const candidate = `${pkg}/${name}`;
-      if (hasKnownMethodOwnerPrefix(candidate)) matches.push(candidate);
+      if (hasKnownMethodOwnerPrefix(candidate)) matches.add(candidate);
     }
-    if (matches.length > 1) {
-      throw new Error(`Ambiguous class name '${name}': found in ${matches.join(" and ")}`);
+    if (matches.size > 1) {
+      throw new Error(`Ambiguous class name '${name}': found in ${[...matches].join(" and ")}`);
     }
-    if (matches.length === 1) return matches[0];
+    if (matches.size === 1) return matches.values().next().value!;
     // No package resolved — return the bare name rather than defaulting to
     // java/lang/, which would silently mangle unimported class references.
     return name;
@@ -693,9 +693,10 @@ function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
 }
 
 function addLocal(ctx: CompileContext, name: string, type: Type): number {
-  // Check for duplicate declaration in the current scope (skip compiler-generated names)
+  // Check for duplicate declaration against all in-scope locals (skip compiler-generated names).
+  // In Java, a local variable cannot shadow another local or parameter in an enclosing scope.
   if (!name.startsWith("$")) {
-    for (let i = ctx.scopeStart; i < ctx.locals.length; i++) {
+    for (let i = 0; i < ctx.locals.length; i++) {
       if (ctx.locals[i].name === name) {
         throw new Error(`Variable '${name}' is already defined in the scope`);
       }
@@ -1414,8 +1415,9 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
       const captures = ctx.locals.filter(l => used.has(l.name) && !paramSet.has(l.name));
 
       // Check effectively-final: captured variables must not be assigned inside the lambda body
-      const lambdaBodyStmts = expr.bodyStmts ?? [];
-      const assignedInLambda = collectAssignedNames(lambdaBodyStmts);
+      const assignedInLambda = new Set<string>();
+      if (expr.bodyStmts) for (const s of expr.bodyStmts) collectAssignedInStmt(s, assignedInLambda);
+      if (expr.bodyExpr) collectAssignedInExpr(expr.bodyExpr, assignedInLambda);
       for (const cap of captures) {
         if (assignedInLambda.has(cap.name)) {
           throw new Error(`Variable '${cap.name}' must be effectively final when captured by a lambda`);
@@ -1903,12 +1905,9 @@ function compileFieldAccess(ctx: CompileContext, emitter: BytecodeEmitter, expr:
 function withScopedLocals(ctx: CompileContext, fn: () => void): void {
   const savedLen = ctx.locals.length;
   const savedNext = ctx.nextSlot;
-  const savedScopeStart = ctx.scopeStart;
-  ctx.scopeStart = savedLen;
   fn();
   ctx.locals.length = savedLen;
   ctx.nextSlot = savedNext;
-  ctx.scopeStart = savedScopeStart;
 }
 
 type ExitAction = { kind: "monitor"; slot: number } | { kind: "finally"; body: Stmt[] };
@@ -2062,22 +2061,27 @@ function collectAssignedInStmt(stmt: Stmt, out: Set<string>): void {
       break;
     case "compoundAssign":
       if (stmt.target.kind === "ident") out.add(stmt.target.name);
+      collectAssignedInExpr(stmt.value, out);
       break;
     case "exprStmt": collectAssignedInExpr(stmt.expr, out); break;
     case "if":
+      collectAssignedInExpr(stmt.cond, out);
       for (const s of stmt.then) collectAssignedInStmt(s, out);
       if (stmt.else_) for (const s of stmt.else_) collectAssignedInStmt(s, out);
       break;
     case "for":
       if (stmt.init) collectAssignedInStmt(stmt.init, out);
+      if (stmt.cond) collectAssignedInExpr(stmt.cond, out);
       if (stmt.update) collectAssignedInStmt(stmt.update, out);
       for (const s of stmt.body) collectAssignedInStmt(s, out);
       break;
     case "while":
     case "doWhile":
+      collectAssignedInExpr(stmt.cond, out);
       for (const s of stmt.body) collectAssignedInStmt(s, out);
       break;
     case "forEach":
+      collectAssignedInExpr(stmt.iterable, out);
       for (const s of stmt.body) collectAssignedInStmt(s, out);
       break;
     case "block":
@@ -2089,17 +2093,29 @@ function collectAssignedInStmt(stmt: Stmt, out: Set<string>): void {
       if (stmt.finallyBody) for (const s of stmt.finallyBody) collectAssignedInStmt(s, out);
       break;
     case "switch":
+      collectAssignedInExpr(stmt.selector, out);
       for (const c of stmt.cases) {
+        if (c.guard) collectAssignedInExpr(c.guard, out);
         if (c.stmts) for (const s of c.stmts) collectAssignedInStmt(s, out);
       }
       break;
     case "synchronized":
+      collectAssignedInExpr(stmt.monitor, out);
       for (const s of stmt.body) collectAssignedInStmt(s, out);
+      break;
+    case "throw":
+      collectAssignedInExpr(stmt.expr, out);
+      break;
+    case "assert":
+      collectAssignedInExpr(stmt.cond, out);
+      if (stmt.message) collectAssignedInExpr(stmt.message, out);
       break;
     case "labeled":
       collectAssignedInStmt(stmt.stmt, out);
       break;
+    case "varDecl": if (stmt.init) collectAssignedInExpr(stmt.init, out); break;
     case "return": if (stmt.value) collectAssignedInExpr(stmt.value, out); break;
+    case "yield": collectAssignedInExpr(stmt.value, out); break;
     default: break;
   }
 }
@@ -2109,16 +2125,67 @@ function collectAssignedInExpr(expr: Expr, out: Set<string>): void {
     case "postIncrement":
     case "preIncrement":
       if (expr.operand.kind === "ident") out.add(expr.operand.name);
+      collectAssignedInExpr(expr.operand, out);
+      break;
+    case "binary":
+      collectAssignedInExpr(expr.left, out);
+      collectAssignedInExpr(expr.right, out);
+      break;
+    case "unary":
+      collectAssignedInExpr(expr.operand, out);
+      break;
+    case "call":
+      if (expr.object) collectAssignedInExpr(expr.object, out);
+      for (const a of expr.args) collectAssignedInExpr(a, out);
+      break;
+    case "staticCall":
+      for (const a of expr.args) collectAssignedInExpr(a, out);
+      break;
+    case "newExpr":
+      for (const a of expr.args) collectAssignedInExpr(a, out);
+      break;
+    case "fieldAccess":
+      collectAssignedInExpr(expr.object, out);
+      break;
+    case "cast":
+      collectAssignedInExpr(expr.expr, out);
+      break;
+    case "instanceof":
+      collectAssignedInExpr(expr.expr, out);
+      break;
+    case "arrayAccess":
+      collectAssignedInExpr(expr.array, out);
+      collectAssignedInExpr(expr.index, out);
+      break;
+    case "arrayLit":
+      for (const e of expr.elements) collectAssignedInExpr(e, out);
+      break;
+    case "newArray":
+      collectAssignedInExpr(expr.size, out);
+      break;
+    case "ternary":
+      collectAssignedInExpr(expr.cond, out);
+      collectAssignedInExpr(expr.thenExpr, out);
+      collectAssignedInExpr(expr.elseExpr, out);
+      break;
+    case "switchExpr":
+      collectAssignedInExpr(expr.selector, out);
+      for (const c of expr.cases) {
+        if (c.guard) collectAssignedInExpr(c.guard, out);
+        if (c.expr) collectAssignedInExpr(c.expr, out);
+        if (c.stmts) for (const s of c.stmts) collectAssignedInStmt(s, out);
+      }
+      break;
+    case "superCall":
+      for (const a of expr.args) collectAssignedInExpr(a, out);
+      break;
+    case "methodRef":
+      collectAssignedInExpr(expr.target, out);
       break;
     default: break;
   }
 }
 
-function collectAssignedNames(stmts: Stmt[]): Set<string> {
-  const out = new Set<string>();
-  for (const s of stmts) collectAssignedInStmt(s, out);
-  return out;
-}
 
 function descriptorToType(desc: string): Type {
   if (desc === "I") return "int";
@@ -3275,7 +3342,6 @@ function compileMethod(
     method,
     locals,
     nextSlot,
-    scopeStart: locals.length,
     fields: classDecl.fields,
     inheritedFields,
     allMethods,
@@ -3508,7 +3574,6 @@ function collectExprCheckedExceptions(
       fields: classDecl.fields,
       inheritedFields: [],
       locals: Array.from(localTypes, ([name, type], idx) => ({ name, type, slot: idx })),
-      scopeStart: 0,
       importMap: classDecl.importMap,
       packageImports: classDecl.packageImports,
       staticWildcardImports: classDecl.staticWildcardImports,
@@ -3666,7 +3731,6 @@ function collectStmtCheckedExceptions(
       fields: classDecl.fields,
       inheritedFields: [],
       locals: Array.from(localTypes, ([name, type], idx) => ({ name, type, slot: idx })),
-      scopeStart: 0,
       importMap: classDecl.importMap,
       packageImports: classDecl.packageImports,
       staticWildcardImports: classDecl.staticWildcardImports,
@@ -3948,7 +4012,6 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         className: classDecl.name, superClass: classDecl.superClass, cp, method,
         locals: method.params.map((p, i) => ({ name: p.name, type: p.type, slot: i + initParamSlotBase })),
         nextSlot: method.params.length + initParamSlotBase,
-        scopeStart: method.params.length,
         fields: classDecl.fields, inheritedFields, allMethods,
         importMap: classDecl.importMap,
         packageImports: classDecl.packageImports,
@@ -4044,7 +4107,6 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       method: clinitMethod,
       locals: [],
       nextSlot: 0,
-      scopeStart: 0,
       fields: classDecl.fields,
       inheritedFields,
       allMethods,
