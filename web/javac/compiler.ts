@@ -540,6 +540,22 @@ function mergeTernaryType(a: Type, b: Type): Type {
 }
 
 /** Resolve a simple class name to its internal JVM name using the import map. */
+/** Resolve a simple class name against wildcard (on-demand) package imports. */
+function resolveWildcardImport(name: string, packageImports: string[]): string | undefined {
+  if (!/^[A-Z]/.test(name) || packageImports.length === 0) return undefined;
+  const matches = new Set<string>();
+  for (const pkg of packageImports) {
+    const candidate = `${pkg}/${name}`;
+    if (hasKnownMethodOwnerPrefix(candidate)) {
+      matches.add(candidate);
+      if (matches.size > 1) {
+        throw new Error(`Ambiguous class name '${name}': found in ${[...matches].join(" and ")}`);
+      }
+    }
+  }
+  return matches.size === 1 ? matches.values().next().value! : undefined;
+}
+
 function resolveClassName(ctx: CompileContext, name: string): string {
   // Already internal (contains '/') or fully qualified (contains '.')
   if (name.includes("/")) return name;
@@ -547,23 +563,7 @@ function resolveClassName(ctx: CompileContext, name: string): string {
   const explicit = ctx.importMap.get(name);
   if (explicit) return explicit;
   if (ctx.classDecls.has(name)) return name;
-  if (/^[A-Z]/.test(name) && ctx.packageImports.length > 0) {
-    const matches = new Set<string>();
-    for (const pkg of ctx.packageImports) {
-      const candidate = `${pkg}/${name}`;
-      if (hasKnownMethodOwnerPrefix(candidate)) {
-        matches.add(candidate);
-        if (matches.size > 1) {
-          throw new Error(`Ambiguous class name '${name}': found in ${[...matches].join(" and ")}`);
-        }
-      }
-    }
-    if (matches.size === 1) return matches.values().next().value!;
-    // No package resolved — return the bare name rather than defaulting to
-    // java/lang/, which would silently mangle unimported class references.
-    return name;
-  }
-  return name;
+  return resolveWildcardImport(name, ctx.packageImports) ?? name;
 }
 
 interface ResolvedMethodCandidate {
@@ -696,11 +696,17 @@ function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
 
 function addLocal(ctx: CompileContext, name: string, type: Type, synthetic = false): number {
   // In Java, a local variable cannot shadow another local or parameter in an enclosing scope.
-  if (!synthetic && findLocal(ctx, name)) {
-    throw new Error(`Variable '${name}' is already defined in the scope`);
+  // Skip synthetic locals in the check — they use compiler-internal names that may collide.
+  if (!synthetic) {
+    for (let i = ctx.locals.length - 1; i >= 0; i--) {
+      const l = ctx.locals[i];
+      if (!l.synthetic && l.name === name) {
+        throw new Error(`Variable '${name}' is already defined in the scope`);
+      }
+    }
   }
   const slot = ctx.nextSlot++;
-  ctx.locals.push({ name, type, slot });
+  ctx.locals.push({ name, type, slot, synthetic });
   return slot;
 }
 
@@ -3463,14 +3469,7 @@ function resolveClassNameInDecl(classDecl: ClassDecl, classDecls: Map<string, Cl
   const explicit = classDecl.importMap.get(name);
   if (explicit) return explicit;
   if (classDecls.has(name)) return name;
-  if (/^[A-Z]/.test(name) && classDecl.packageImports.length > 0) {
-    for (const pkg of classDecl.packageImports) {
-      const candidate = `${pkg}/${name}`;
-      if (hasKnownMethodOwnerPrefix(candidate)) return candidate;
-    }
-    return name;
-  }
-  return name;
+  return resolveWildcardImport(name, classDecl.packageImports) ?? name;
 }
 
 function isClassSupertypeInMaps(
