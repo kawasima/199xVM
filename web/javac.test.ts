@@ -3951,15 +3951,14 @@ public class DecoderInvokeTest {
     }`), /already defined/);
   });
 
-  test("shadowing in nested block is allowed", () => {
-    const bytes = compile(`public class ShadowNested {
+  test("shadowing in nested block is rejected", () => {
+    assert.throws(() => compile(`public class ShadowNested {
       public static String run() {
         int x = 1;
         if (true) { int x = 2; }
         return "" + x;
       }
-    }`);
-    assertValidClassFile(bytes);
+    }`), /already defined/);
   });
 
   test("sequential scopes can reuse variable name", () => {
