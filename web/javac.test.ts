@@ -3994,4 +3994,16 @@ public class DecoderInvokeTest {
     }`);
     assertValidClassFile(bytes);
   });
+
+  test("lambda captured variable incremented in assignment LHS is rejected", () => {
+    assert.throws(() => compile(`import java.util.function.Consumer;
+    public class LambdaLhsIncr {
+      public static String run() {
+        int i = 0;
+        int[] arr = new int[3];
+        Consumer<String> c = s -> { arr[i++] = 0; };
+        return "";
+      }
+    }`), /effectively final/);
+  });
 });

@@ -551,10 +551,12 @@ function resolveClassName(ctx: CompileContext, name: string): string {
     const matches = new Set<string>();
     for (const pkg of ctx.packageImports) {
       const candidate = `${pkg}/${name}`;
-      if (hasKnownMethodOwnerPrefix(candidate)) matches.add(candidate);
-    }
-    if (matches.size > 1) {
-      throw new Error(`Ambiguous class name '${name}': found in ${[...matches].join(" and ")}`);
+      if (hasKnownMethodOwnerPrefix(candidate)) {
+        matches.add(candidate);
+        if (matches.size > 1) {
+          throw new Error(`Ambiguous class name '${name}': found in ${[...matches].join(" and ")}`);
+        }
+      }
     }
     if (matches.size === 1) return matches.values().next().value!;
     // No package resolved — return the bare name rather than defaulting to
@@ -693,14 +695,9 @@ function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
 }
 
 function addLocal(ctx: CompileContext, name: string, type: Type): number {
-  // Check for duplicate declaration against all in-scope locals (skip compiler-generated names).
   // In Java, a local variable cannot shadow another local or parameter in an enclosing scope.
-  if (!name.startsWith("$")) {
-    for (let i = 0; i < ctx.locals.length; i++) {
-      if (ctx.locals[i].name === name) {
-        throw new Error(`Variable '${name}' is already defined in the scope`);
-      }
-    }
+  if (!name.startsWith("$") && findLocal(ctx, name)) {
+    throw new Error(`Variable '${name}' is already defined in the scope`);
   }
   const slot = ctx.nextSlot++;
   ctx.locals.push({ name, type, slot });
@@ -2057,10 +2054,12 @@ function collectAssignedInStmt(stmt: Stmt, out: Set<string>): void {
   switch (stmt.kind) {
     case "assign":
       if (stmt.target.kind === "ident") out.add(stmt.target.name);
+      collectAssignedInExpr(stmt.target, out);
       collectAssignedInExpr(stmt.value, out);
       break;
     case "compoundAssign":
       if (stmt.target.kind === "ident") out.add(stmt.target.name);
+      collectAssignedInExpr(stmt.target, out);
       collectAssignedInExpr(stmt.value, out);
       break;
     case "exprStmt": collectAssignedInExpr(stmt.expr, out); break;
