@@ -478,7 +478,7 @@
 
   <script type="module">
     const _javacVer = (typeof "__BUILD_TIMESTAMP__" === "string" && "__BUILD_TIMESTAMP__".startsWith("__")) ? Date.now() : "__BUILD_TIMESTAMP__";
-    const { compile, disassemble, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, setMethodRegistry, setClassInterfaces, readJar, classFilesToBundle } = await import(`./javac.js?v=${_javacVer}`);
+    const { compile, disassemble, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, setMethodRegistry, setClassInterfaces, readJar, classFilesToBundle, getKnownClassNames, getKnownClassesByPackage, getMethodsForClass } = await import(`./javac.js?v=${_javacVer}`);
 
     // CodeMirror 6
     import { EditorState } from "https://esm.sh/@codemirror/state@6";
@@ -487,7 +487,7 @@
     import { java } from "https://esm.sh/@codemirror/lang-java@6";
     import { classHighlighter } from "https://esm.sh/@lezer/highlight@1";
     import { syntaxHighlighting } from "https://esm.sh/@codemirror/language@6";
-    import { closeBrackets } from "https://esm.sh/@codemirror/autocomplete@6";
+    import { closeBrackets, autocompletion } from "https://esm.sh/@codemirror/autocomplete@6";
 
     // -------------------------------------------------------------------------
     // Snippet library
@@ -1917,6 +1917,107 @@ public class JvmInterfaceDefault implements Describable {
     // -------------------------------------------------------------------------
     // CodeMirror editor
     // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Java code completion provider
+    // -------------------------------------------------------------------------
+    function javaCompletionSource(context) {
+      // --- Import completion: "import java.util.Arr|" ---
+      const importLine = context.matchBefore(/import\s+[\w.]*$/);
+      if (importLine) {
+        const textAfterImport = importLine.text.replace(/^import\s+/, "");
+        const internalPrefix = textAfterImport.replaceAll(".", "/");
+        const allClasses = getKnownClassNames();
+        const options = allClasses
+          .filter(c => c.startsWith(internalPrefix))
+          .map(c => ({
+            label: c.replaceAll("/", "."),
+            type: "class",
+          }));
+        if (options.length === 0) return null;
+        return { from: importLine.from + importLine.text.indexOf(textAfterImport), options };
+      }
+
+      // --- Method completion after dot: "list.|" ---
+      const dotAccess = context.matchBefore(/(\w+)\.\w*$/);
+      if (dotAccess) {
+        const dotIdx = dotAccess.text.lastIndexOf(".");
+        const varName = dotAccess.text.slice(0, dotIdx).trim();
+        const from = dotAccess.from + dotIdx + 1;
+        // Infer variable type from local declarations in the editor
+        const doc = context.state.doc.toString();
+        const typeMatch = new RegExp(`(?:^|[;{}()\\s])([A-Z]\\w*(?:<[^>]*>)?)\\s+${varName}\\s*[=;,)]`, "m").exec(doc);
+        if (!typeMatch) return null;
+        const rawType = typeMatch[1].replace(/<.*>$/, ""); // strip generics
+        // Resolve type name to internal form
+        const allClasses = getKnownClassNames();
+        let resolved = allClasses.find(c => c.endsWith("/" + rawType));
+        if (!resolved) resolved = "java/lang/" + rawType;
+        const methods = getMethodsForClass(resolved);
+        if (methods.length === 0) return null;
+        // Deduplicate by method name (show each name once, with signature in detail)
+        const seen = new Set();
+        const options = [];
+        for (const m of methods) {
+          if (m.name === "<init>") continue;
+          const paramDesc = m.sig.paramTypes.map(t => typeof t === "string" ? t : t.className?.split("/").pop() ?? "?").join(", ");
+          const retDesc = typeof m.sig.returnType === "string" ? m.sig.returnType : m.sig.returnType.className?.split("/").pop() ?? "?";
+          const key = m.name + "(" + paramDesc + ")";
+          if (seen.has(key)) continue;
+          seen.add(key);
+          options.push({
+            label: m.name,
+            detail: `(${paramDesc}): ${retDesc}`,
+            type: m.sig.isStatic ? "function" : "method",
+          });
+        }
+        return { from, options };
+      }
+
+      // --- Class name completion: uppercase word ---
+      const word = context.matchBefore(/[A-Z]\w*/);
+      if (!word || word.text.length < 2) return null;
+      const allClasses = getKnownClassNames();
+      const options = [];
+      const seenSimple = new Set();
+      for (const cls of allClasses) {
+        const parts = cls.split("/");
+        const simpleName = parts[parts.length - 1];
+        if (!simpleName.startsWith(word.text) || seenSimple.has(simpleName)) continue;
+        seenSimple.add(simpleName);
+        const pkg = parts.slice(0, -1).join(".");
+        options.push({
+          label: simpleName,
+          detail: pkg,
+          type: "class",
+          apply: (view, completion, from, to) => {
+            // Insert the class name
+            view.dispatch({ changes: { from, to, insert: simpleName } });
+            // Auto-insert import if not java.lang and not already imported
+            if (pkg === "java.lang") return;
+            const fqn = cls.replaceAll("/", ".");
+            const importStmt = `import ${fqn};\n`;
+            const docText = view.state.doc.toString();
+            if (docText.includes(importStmt.trim())) return;
+            // Find insertion point: after last import, or at top
+            const lastImportMatch = /^import\s+[^;]+;\s*$/gm;
+            let insertPos = 0;
+            let match;
+            while ((match = lastImportMatch.exec(docText)) !== null) {
+              insertPos = match.index + match[0].length;
+            }
+            if (insertPos === 0) {
+              // No existing imports — insert before first non-blank line
+              const firstLine = /\S/.exec(docText);
+              insertPos = firstLine ? firstLine.index : 0;
+            }
+            view.dispatch({ changes: { from: insertPos, to: insertPos, insert: importStmt } });
+          },
+        });
+      }
+      if (options.length === 0) return null;
+      return { from: word.from, options };
+    }
+
     const runKeymap = keymap.of([
       { key: "Ctrl-Enter", mac: "Cmd-Enter", run: () => { runCode(); return true; } },
       indentWithTab,
@@ -1931,6 +2032,7 @@ public class JvmInterfaceDefault implements Describable {
           highlightActiveLine(),
           highlightActiveLineGutter(),
           closeBrackets(),
+          autocompletion({ override: [javaCompletionSource] }),
           java(),
           syntaxHighlighting(classHighlighter),
           runKeymap,

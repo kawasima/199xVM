@@ -210,3 +210,28 @@ export function hasFunctionalArg(args: Expr[]): boolean {
 export function hasKnownMethodOwnerPrefix(owner: string): boolean {
   return ownerSet.has(owner);
 }
+
+/** Return all known class names (internal form, e.g. "java/util/ArrayList"). */
+export function getKnownClassNames(): string[] {
+  return [...ownerSet];
+}
+
+/** Return all known classes under a given package prefix. */
+export function getKnownClassesByPackage(pkg: string): string[] {
+  const prefix = pkg + "/";
+  return [...ownerSet].filter(c => c.startsWith(prefix) && !c.includes("/", prefix.length));
+}
+
+/** Return all methods for a given owner class. */
+export function getMethodsForClass(owner: string): { name: string; sig: MethodSig }[] {
+  const prefix = `${owner}.`;
+  const results: { name: string; sig: MethodSig }[] = [];
+  for (const [groupKey, group] of methodIndex) {
+    if (!groupKey.startsWith(prefix)) continue;
+    const methodName = groupKey.slice(prefix.length);
+    for (const entry of group) {
+      results.push({ name: methodName, sig: entry.sig });
+    }
+  }
+  return results;
+}
