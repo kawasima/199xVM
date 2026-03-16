@@ -2108,18 +2108,13 @@ public class JvmInterfaceDefault implements Describable {
               const firstLine = /\S/.exec(docText);
               insertPos = firstLine ? firstLine.index : 0;
             }
-            // Single dispatch with both changes to keep positions consistent
-            const changes = [];
-            // Import insertion comes first in document order
-            if (insertPos <= from) {
-              changes.push({ from: insertPos, to: insertPos, insert: importStmt });
-              // Adjust class name position by the length of the inserted import
-              changes.push({ from: from + importStmt.length, to: to + importStmt.length, insert: simpleName });
-            } else {
-              changes.push({ from, to, insert: simpleName });
-              changes.push({ from: insertPos, to: insertPos, insert: importStmt });
-            }
-            view.dispatch({ changes });
+            // Single dispatch: CodeMirror adjusts positions automatically
+            view.dispatch({
+              changes: [
+                { from: insertPos, to: insertPos, insert: importStmt },
+                { from, to, insert: simpleName },
+              ]
+            });
           },
         });
       }
