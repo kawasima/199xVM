@@ -902,7 +902,11 @@ impl Vm {
             return cached.clone();
         }
         let result = self.find_method_owner_uncached(class_name, method_name, descriptor);
-        self.method_owner_cache.insert(cache_key, result.clone());
+        // Only cache positive results — negative lookups (None) may become valid
+        // after new classes are registered via load_lazy/load_class.
+        if result.is_some() {
+            self.method_owner_cache.insert(cache_key, result.clone());
+        }
         result
     }
 

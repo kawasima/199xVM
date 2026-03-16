@@ -50,7 +50,10 @@ function addToIndexes(entries: Record<string, MethodSig>): void {
       group = [];
       methodIndex.set(groupKey, group);
     }
-    group.push({ key, sig: entries[key] });
+    // Avoid duplicate entries when the same key is registered again
+    if (!group.some(e => e.key === key)) {
+      group.push({ key, sig: entries[key] });
+    }
   }
 }
 
