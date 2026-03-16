@@ -322,6 +322,9 @@ pub struct Vm {
     pub(in crate::interpreter) scheduler: Scheduler,
     /// Object monitors keyed by object identity (Rc pointer address).
     monitors: HashMap<usize, Monitor>,
+    /// Method resolution cache: (class, method_name, descriptor) → owner class name.
+    /// Avoids repeated super-chain walks for the same method lookup.
+    method_owner_cache: HashMap<(String, String, String), Option<String>>,
 }
 
 impl Vm {
@@ -339,6 +342,7 @@ impl Vm {
             system_classloader: None,
             scheduler: Scheduler::new(),
             monitors: HashMap::new(),
+            method_owner_cache: HashMap::new(),
         }
     }
 
@@ -888,6 +892,21 @@ impl Vm {
     /// Find the name of the class that owns a given method (super-chain walk).
     /// Returns the canonical class name, or `None` if not found.
     fn find_method_owner(
+        &mut self,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Option<String> {
+        let cache_key = (class_name.to_owned(), method_name.to_owned(), descriptor.to_owned());
+        if let Some(cached) = self.method_owner_cache.get(&cache_key) {
+            return cached.clone();
+        }
+        let result = self.find_method_owner_uncached(class_name, method_name, descriptor);
+        self.method_owner_cache.insert(cache_key, result.clone());
+        result
+    }
+
+    fn find_method_owner_uncached(
         &mut self,
         class_name: &str,
         method_name: &str,

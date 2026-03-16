@@ -33,7 +33,12 @@ let ownerSet = new Set<string>();
 function rebuildIndexes(): void {
   methodIndex = new Map();
   ownerSet = new Set();
-  for (const key of Object.keys(knownMethods)) {
+  addToIndexes(knownMethods);
+}
+
+/** Add entries to the indexes incrementally (avoids full rebuild). */
+function addToIndexes(entries: Record<string, MethodSig>): void {
+  for (const key of Object.keys(entries)) {
     const dotIdx = key.indexOf(".");
     if (dotIdx < 0) continue;
     const owner = key.slice(0, dotIdx);
@@ -45,7 +50,7 @@ function rebuildIndexes(): void {
       group = [];
       methodIndex.set(groupKey, group);
     }
-    group.push({ key, sig: knownMethods[key] });
+    group.push({ key, sig: entries[key] });
   }
 }
 
@@ -58,7 +63,7 @@ let knownClassInterfaces: Record<string, string[]> = {};
 /** Merge an externally-built method registry into the known methods table. */
 export function setMethodRegistry(reg: Record<string, MethodSig>): void {
   knownMethods = { ...knownMethods, ...reg };
-  rebuildIndexes();
+  addToIndexes(reg);
 }
 
 /** Merge class→interfaces mappings built from loaded JARs. */

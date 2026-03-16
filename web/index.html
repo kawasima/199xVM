@@ -1673,11 +1673,39 @@ public class JvmInterfaceDefault implements Describable {
     };
 
     async function loadBootstrapJars() {
-      await window.loadJar("./raoh-0.4.0.jar");
-      await window.loadJar("./jackson-annotations-3.0-rc5.jar");
-      await window.loadJar("./jackson-core-3.1.0.jar");
-      await window.loadJar("./jackson-databind-3.1.0.jar");
-      await window.loadJar("./raoh-json-0.4.0.jar");
+      const jarUrls = [
+        "./raoh-0.4.0.jar",
+        "./jackson-annotations-3.0-rc5.jar",
+        "./jackson-core-3.1.0.jar",
+        "./jackson-databind-3.1.0.jar",
+        "./raoh-json-0.4.0.jar",
+      ];
+      // Fetch all JARs in parallel
+      log("info", `Fetching ${jarUrls.length} JARs in parallel...`);
+      const jarBytesArr = await Promise.all(jarUrls.map(async (url) => {
+        const resp = await fetch(withVersion(url));
+        if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
+        return { url, bytes: new Uint8Array(await resp.arrayBuffer()) };
+      }));
+      // Parse and register sequentially (registry is not thread-safe)
+      for (const { url, bytes } of jarBytesArr) {
+        log("info", `Parsing JAR: ${url} ...`);
+        const classFiles = await readJar(bytes);
+        const jarBundle = classFilesToBundle(classFiles);
+        const metas = parseBundleMeta(jarBundle);
+        const reg = buildMethodRegistry(metas);
+        setMethodRegistry(reg);
+        setClassInterfaces(buildClassInterfaces(metas));
+        if (classBundle) {
+          const combined = new Uint8Array(classBundle.length + jarBundle.length);
+          combined.set(classBundle, 0);
+          combined.set(jarBundle, classBundle.length);
+          classBundle = combined;
+        } else {
+          classBundle = jarBundle;
+        }
+        log("info", `JAR loaded: ${classFiles.size} classes, ${Object.keys(reg).length} methods from ${url}`);
+      }
     };
 
     // Build a combined bundle: shim + user class
