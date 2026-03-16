@@ -1934,9 +1934,9 @@ public class JvmInterfaceDefault implements Describable {
         return { from: importLine.from + importLine.text.indexOf(textAfterImport), options };
       }
 
-      // --- Method completion after dot: "list.|" ---
-      const dotAccess = context.matchBefore(/(\w+)\.\w*$/);
-      if (dotAccess) {
+      // --- Method completion after dot: "list.|" or "list.ge|" ---
+      const dotAccess = context.matchBefore(/\w+\.\w*/);
+      if (dotAccess && dotAccess.text.includes(".")) {
         const dotIdx = dotAccess.text.lastIndexOf(".");
         const varName = dotAccess.text.slice(0, dotIdx).trim();
         const from = dotAccess.from + dotIdx + 1;
@@ -1944,9 +1944,19 @@ public class JvmInterfaceDefault implements Describable {
         if (!/^\w+$/.test(varName)) return null; // skip non-identifier tokens
         const doc = context.state.doc.toString();
         const escapedVar = varName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const typeMatch = new RegExp(`(?:^|[;{}()\\s])([A-Z]\\w*(?:<[^>]*>)?)\\s+${escapedVar}\\s*[=;,)]`, "m").exec(doc);
-        if (!typeMatch) return null;
-        const rawType = typeMatch[1].replace(/<.*>$/, ""); // strip generics
+        // Match local/param/for-each declarations: "Type varName", "Type<G> varName", "Type varName ="
+        const typeMatch = new RegExp(
+          `(?:^|[;{}()\\s,])([A-Z]\\w*(?:<[^>]*>)?(?:\\[\\])?)\\s+${escapedVar}\\b`, "m"
+        ).exec(doc);
+        let rawType;
+        if (typeMatch) {
+          rawType = typeMatch[1].replace(/<.*>$/, "").replace(/\[\]$/, ""); // strip generics and array
+        } else if (/^[A-Z]/.test(varName)) {
+          // Could be a static access like "String.valueOf" — treat varName as class name
+          rawType = varName;
+        } else {
+          return null;
+        }
         // Resolve type name to internal form
         const allClasses = getKnownClassNames();
         let resolved = allClasses.find(c => c.endsWith("/" + rawType));
