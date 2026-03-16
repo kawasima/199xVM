@@ -49,6 +49,8 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/lang/IncompatibleClassChangeError.java"
   "$SHIM_SRC/java/lang/NoSuchFieldError.java"
   "$SHIM_SRC/java/lang/Math.java"
+  "$SHIM_SRC/java/lang/Deprecated.java"
+  "$SHIM_SRC/java/lang/StringBuffer.java"
   "$SHIM_SRC/java/lang/Void.java"
   "$SHIM_SRC/java/lang/reflect/AccessFlag.java"
   "$SHIM_SRC/java/lang/reflect/Type.java"
