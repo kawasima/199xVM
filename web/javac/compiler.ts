@@ -698,6 +698,15 @@ function resolveUnqualifiedMethodCandidate(
   return instResolved ?? staticResolved;
 }
 
+/** Build a Map from inherited fields, preferring the nearest superclass (first occurrence wins). */
+function buildNearestFieldMap(fields: FieldDecl[]): Map<string, FieldDecl> {
+  const map = new Map<string, FieldDecl>();
+  for (const f of fields) {
+    if (!map.has(f.name)) map.set(f.name, f);
+  }
+  return map;
+}
+
 function findLocal(ctx: CompileContext, name: string): LocalVar | undefined {
   for (let i = ctx.locals.length - 1; i >= 0; i--) {
     if (ctx.locals[i].name === name) return ctx.locals[i];
@@ -3361,7 +3370,7 @@ function compileMethod(
     fields: classDecl.fields,
     fieldMap: new Map(classDecl.fields.map(f => [f.name, f])),
     inheritedFields,
-    inheritedFieldMap: new Map(inheritedFields.map(f => [f.name, f])),
+    inheritedFieldMap: buildNearestFieldMap(inheritedFields),
     allMethods,
     importMap: classDecl.importMap,
     packageImports: classDecl.packageImports,
@@ -4032,7 +4041,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         locals: method.params.map((p, i) => ({ name: p.name, type: p.type, slot: i + initParamSlotBase })),
         nextSlot: method.params.length + initParamSlotBase,
         fields: classDecl.fields, fieldMap: new Map(classDecl.fields.map(f => [f.name, f])),
-        inheritedFields, inheritedFieldMap: new Map(inheritedFields.map(f => [f.name, f])),
+        inheritedFields, inheritedFieldMap: buildNearestFieldMap(inheritedFields),
         allMethods,
         importMap: classDecl.importMap,
         packageImports: classDecl.packageImports,
@@ -4131,7 +4140,7 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       fields: classDecl.fields,
       fieldMap: new Map(classDecl.fields.map(f => [f.name, f])),
       inheritedFields,
-      inheritedFieldMap: new Map(inheritedFields.map(f => [f.name, f])),
+      inheritedFieldMap: buildNearestFieldMap(inheritedFields),
       allMethods,
       importMap: classDecl.importMap,
       packageImports: classDecl.packageImports,
