@@ -27,7 +27,7 @@ let knownMethods: Record<string, MethodSig> = { ...BASE_KNOWN_METHODS };
 // ---- Performance indexes (rebuilt on registry mutation) ----
 /** Maps "owner.method" → array of {key, sig} for O(1) method group lookup. */
 let methodIndex = new Map<string, { key: string; sig: MethodSig }[]>();
-/** Set of all known owner prefixes for O(1) hasKnownMethodOwnerPrefix(). */
+/** Set of all known owner class names (internal form) for O(1) hasKnownMethodOwnerPrefix(). */
 let ownerSet = new Set<string>();
 
 function rebuildIndexes(): void {
@@ -143,7 +143,7 @@ export function findKnownMethodByArity(owner: string, method: string, arity: num
 export function findKnownFunctionalInterface(owner: string): FunctionalSig | undefined {
   const prefix = `${owner}.`;
   const candidates: { name: string; sig: MethodSig }[] = [];
-  // Iterate only method groups belonging to this owner
+  // Filter method groups by owner prefix (still iterates all groups)
   for (const [groupKey, group] of methodIndex) {
     if (!groupKey.startsWith(prefix)) continue;
     const methodName = groupKey.slice(prefix.length);
