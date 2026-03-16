@@ -462,3 +462,99 @@ fn matcher_test() {
     // 7: alternation ^foo$|bar$ does NOT match "xxbar"
     assert_eq!(result, "true|false|true|true|true|false|false");
 }
+
+// ---------------------------------------------------------------------------
+// Stream.filter().map().collect(Collectors.toList())
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stream_collect_filter_map() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "StreamCollectTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "APPLE,AVOCADO");
+}
+
+// ---------------------------------------------------------------------------
+// Collectors.joining()
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stream_collectors_joining() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "StreamJoinTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "a-b-c");
+}
+
+// ---------------------------------------------------------------------------
+// IntStream.range().filter().sum()
+// ---------------------------------------------------------------------------
+
+#[test]
+fn int_stream_range_filter_sum() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "IntStreamTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "sum=30");
+}
+
+// ---------------------------------------------------------------------------
+// TreeMap: natural ordering iteration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tree_map_natural_ordering() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "TreeMapTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "apple=1,banana=2,cherry=3");
+}
+
+// ---------------------------------------------------------------------------
+// TreeSet: sorted iteration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tree_set_sorted_iteration() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "TreeSetTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "10,20,30");
+}
+
+// ---------------------------------------------------------------------------
+// PriorityQueue: min-heap poll order
+// ---------------------------------------------------------------------------
+
+#[test]
+fn priority_queue_poll_order() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "PriorityQueueTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "10,20,30");
+}
