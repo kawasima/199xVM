@@ -1918,9 +1918,21 @@ public class JvmInterfaceDefault implements Describable {
     // Java code completion provider
     // -------------------------------------------------------------------------
 
-    /** Resolve a simple type name to internal form using known classes. */
-    function resolveSimpleType(name) {
+    /** Resolve a simple type name to internal form, considering editor imports. */
+    function resolveSimpleType(name, doc) {
+      // 1. Check explicit imports: "import java.util.List;"
+      const explicitMatch = new RegExp(`^import\\s+(\\S+\\.${name})\\s*;`, "m").exec(doc || "");
+      if (explicitMatch) return explicitMatch[1].replaceAll(".", "/");
+      // 2. Check wildcard imports: "import java.awt.*;"
+      const wildcardRe = /^import\s+(\S+)\.\*\s*;/gm;
+      let wm;
       const allClasses = getKnownClassNames();
+      while ((wm = wildcardRe.exec(doc || "")) !== null) {
+        const pkg = wm[1].replaceAll(".", "/");
+        const candidate = pkg + "/" + name;
+        if (allClasses.includes(candidate)) return candidate;
+      }
+      // 3. Fallback: first match in known classes
       return allClasses.find(c => c.endsWith("/" + name)) ?? "java/lang/" + name;
     }
 
@@ -1988,7 +2000,7 @@ public class JvmInterfaceDefault implements Describable {
 
       // Static class reference (uppercase)
       if (/^[A-Z]/.test(name)) {
-        return resolveSimpleType(name);
+        return resolveSimpleType(name, fullDoc);
       }
 
       // Variable — look up declaration type in source
@@ -1998,7 +2010,7 @@ public class JvmInterfaceDefault implements Describable {
       ).exec(fullDoc);
       if (typeMatch) {
         const rawType = typeMatch[1].replace(/<.*>$/, "").replace(/\[\]$/, "");
-        return resolveSimpleType(rawType);
+        return resolveSimpleType(rawType, fullDoc);
       }
       return null;
     }
@@ -2073,14 +2085,18 @@ public class JvmInterfaceDefault implements Describable {
           detail: pkg,
           type: "class",
           apply: (view, completion, from, to) => {
-            // Insert the class name
-            view.dispatch({ changes: { from, to, insert: simpleName } });
             // Auto-insert import if not java.lang and not already imported
-            if (pkg === "java.lang") return;
+            if (pkg === "java.lang") {
+              view.dispatch({ changes: { from, to, insert: simpleName } });
+              return;
+            }
             const fqn = cls.replaceAll("/", ".");
             const importStmt = `import ${fqn};\n`;
             const docText = view.state.doc.toString();
-            if (docText.includes(importStmt.trim())) return;
+            if (docText.includes(importStmt.trim())) {
+              view.dispatch({ changes: { from, to, insert: simpleName } });
+              return;
+            }
             // Find insertion point: after last import, or at top
             const lastImportMatch = /^import\s+[^;]+;\s*$/gm;
             let insertPos = 0;
@@ -2089,11 +2105,21 @@ public class JvmInterfaceDefault implements Describable {
               insertPos = match.index + match[0].length;
             }
             if (insertPos === 0) {
-              // No existing imports — insert before first non-blank line
               const firstLine = /\S/.exec(docText);
               insertPos = firstLine ? firstLine.index : 0;
             }
-            view.dispatch({ changes: { from: insertPos, to: insertPos, insert: importStmt } });
+            // Single dispatch with both changes to keep positions consistent
+            const changes = [];
+            // Import insertion comes first in document order
+            if (insertPos <= from) {
+              changes.push({ from: insertPos, to: insertPos, insert: importStmt });
+              // Adjust class name position by the length of the inserted import
+              changes.push({ from: from + importStmt.length, to: to + importStmt.length, insert: simpleName });
+            } else {
+              changes.push({ from, to, insert: simpleName });
+              changes.push({ from: insertPos, to: insertPos, insert: importStmt });
+            }
+            view.dispatch({ changes });
           },
         });
       }
