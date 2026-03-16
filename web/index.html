@@ -1917,6 +1917,92 @@ public class JvmInterfaceDefault implements Describable {
     // -------------------------------------------------------------------------
     // Java code completion provider
     // -------------------------------------------------------------------------
+
+    /** Resolve a simple type name to internal form using known classes. */
+    function resolveSimpleType(name) {
+      const allClasses = getKnownClassNames();
+      return allClasses.find(c => c.endsWith("/" + name)) ?? "java/lang/" + name;
+    }
+
+    /** Find the return type (internal form) of a method on a given owner class. */
+    function findMethodReturnType(owner, methodName) {
+      const methods = getMethodsForClass(owner);
+      for (const m of methods) {
+        if (m.name === methodName) {
+          const rt = m.sig.returnType;
+          if (typeof rt === "string") return null; // primitive — can't chain further
+          return rt.className ?? null;
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Resolve the type of the expression ending at the given text position.
+     * Supports: simple variables, static class refs, and method chains.
+     * Returns an internal class name (e.g. "java/util/Stream") or null.
+     */
+    function resolveExprType(textBefore, fullDoc) {
+      const trimmed = textBefore.trimEnd();
+      if (trimmed.length === 0) return null;
+
+      // Case 1: ends with ")" — method call chain, e.g. "list.stream()"
+      if (trimmed.endsWith(")")) {
+        // Walk backwards to find matching "("
+        let depth = 0;
+        let i = trimmed.length - 1;
+        for (; i >= 0; i--) {
+          if (trimmed[i] === ")") depth++;
+          else if (trimmed[i] === "(") { depth--; if (depth === 0) break; }
+        }
+        if (i < 0) return null;
+        // Text before "(" should end with a method name, possibly preceded by "."
+        const beforeParen = trimmed.slice(0, i).trimEnd();
+        const methodMatch = beforeParen.match(/(\w+)$/);
+        if (!methodMatch) return null;
+        const methodName = methodMatch[1];
+        const beforeMethod = beforeParen.slice(0, beforeParen.length - methodName.length).trimEnd();
+        // If there's a dot before the method, resolve the receiver recursively
+        if (beforeMethod.endsWith(".")) {
+          const receiverText = beforeMethod.slice(0, -1);
+          const receiverType = resolveExprType(receiverText, fullDoc);
+          if (!receiverType) return null;
+          return findMethodReturnType(receiverType, methodName);
+        }
+        // No dot — could be a local method call or static import; can't resolve
+        return null;
+      }
+
+      // Case 2: ends with an identifier — variable or class name
+      const identMatch = trimmed.match(/(\w+)$/);
+      if (!identMatch) return null;
+      const name = identMatch[1];
+
+      // Check if preceded by a dot (chained field access)
+      const beforeIdent = trimmed.slice(0, trimmed.length - name.length).trimEnd();
+      if (beforeIdent.endsWith(".")) {
+        // Resolve receiver, then look up field/method
+        // For simplicity, skip field resolution — most chains use methods
+        return null;
+      }
+
+      // Static class reference (uppercase)
+      if (/^[A-Z]/.test(name)) {
+        return resolveSimpleType(name);
+      }
+
+      // Variable — look up declaration type in source
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const typeMatch = new RegExp(
+        `(?:^|[;{}()\\s,])([A-Z]\\w*(?:<[^>]*>)?(?:\\[\\])?)\\s+${escaped}\\b`, "m"
+      ).exec(fullDoc);
+      if (typeMatch) {
+        const rawType = typeMatch[1].replace(/<.*>$/, "").replace(/\[\]$/, "");
+        return resolveSimpleType(rawType);
+      }
+      return null;
+    }
+
     function javaCompletionSource(context) {
       // --- Import completion: "import java.util.Arr|" ---
       const importLine = context.matchBefore(/import\s+[\w.]*$/);
@@ -1934,52 +2020,40 @@ public class JvmInterfaceDefault implements Describable {
         return { from: importLine.from + importLine.text.indexOf(textAfterImport), options };
       }
 
-      // --- Method completion after dot: "list.|" or "list.ge|" ---
-      const dotAccess = context.matchBefore(/\w+\.\w*/);
-      if (dotAccess && dotAccess.text.includes(".")) {
-        const dotIdx = dotAccess.text.lastIndexOf(".");
-        const varName = dotAccess.text.slice(0, dotIdx).trim();
-        const from = dotAccess.from + dotIdx + 1;
-        // Infer variable type from local declarations in the editor
-        if (!/^\w+$/.test(varName)) return null; // skip non-identifier tokens
+      // --- Method completion after dot (including method chains) ---
+      // Match "word." or "word.partial" or detect ")" immediately before the dot
+      {
+        const pos = context.pos;
         const doc = context.state.doc.toString();
-        const escapedVar = varName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        // Match local/param/for-each declarations: "Type varName", "Type<G> varName", "Type varName ="
-        const typeMatch = new RegExp(
-          `(?:^|[;{}()\\s,])([A-Z]\\w*(?:<[^>]*>)?(?:\\[\\])?)\\s+${escapedVar}\\b`, "m"
-        ).exec(doc);
-        let rawType;
-        if (typeMatch) {
-          rawType = typeMatch[1].replace(/<.*>$/, "").replace(/\[\]$/, ""); // strip generics and array
-        } else if (/^[A-Z]/.test(varName)) {
-          // Could be a static access like "String.valueOf" — treat varName as class name
-          rawType = varName;
-        } else {
-          return null;
+        const textBefore = doc.slice(0, pos);
+        // Find the dot and partial method name being typed
+        const tailMatch = textBefore.match(/\.(\w*)$/);
+        if (tailMatch) {
+          const from = pos - tailMatch[1].length;
+          const beforeDot = textBefore.slice(0, from - 1); // text before the "."
+          const resolved = resolveExprType(beforeDot, doc);
+          if (resolved) {
+            const methods = getMethodsForClass(resolved);
+            if (methods.length > 0) {
+              const seen = new Set();
+              const options = [];
+              for (const m of methods) {
+                if (m.name === "<init>") continue;
+                const paramDesc = m.sig.paramTypes.map(t => typeof t === "string" ? t : t.className?.split("/").pop() ?? "?").join(", ");
+                const retDesc = typeof m.sig.returnType === "string" ? m.sig.returnType : m.sig.returnType.className?.split("/").pop() ?? "?";
+                const key = m.name + "(" + paramDesc + ")";
+                if (seen.has(key)) continue;
+                seen.add(key);
+                options.push({
+                  label: m.name,
+                  detail: `(${paramDesc}): ${retDesc}`,
+                  type: m.sig.isStatic ? "function" : "method",
+                });
+              }
+              if (options.length > 0) return { from, options };
+            }
+          }
         }
-        // Resolve type name to internal form
-        const allClasses = getKnownClassNames();
-        let resolved = allClasses.find(c => c.endsWith("/" + rawType));
-        if (!resolved) resolved = "java/lang/" + rawType;
-        const methods = getMethodsForClass(resolved);
-        if (methods.length === 0) return null;
-        // Deduplicate by method name (show each name once, with signature in detail)
-        const seen = new Set();
-        const options = [];
-        for (const m of methods) {
-          if (m.name === "<init>") continue;
-          const paramDesc = m.sig.paramTypes.map(t => typeof t === "string" ? t : t.className?.split("/").pop() ?? "?").join(", ");
-          const retDesc = typeof m.sig.returnType === "string" ? m.sig.returnType : m.sig.returnType.className?.split("/").pop() ?? "?";
-          const key = m.name + "(" + paramDesc + ")";
-          if (seen.has(key)) continue;
-          seen.add(key);
-          options.push({
-            label: m.name,
-            detail: `(${paramDesc}): ${retDesc}`,
-            type: m.sig.isStatic ? "function" : "method",
-          });
-        }
-        return { from, options };
       }
 
       // --- Class name completion: uppercase word ---
