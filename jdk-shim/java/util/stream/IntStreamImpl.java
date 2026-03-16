@@ -46,23 +46,42 @@ import java.util.function.ObjIntConsumer;
 import java.util.function.Supplier;
 
 public class IntStreamImpl implements IntStream {
-    private final int[] elements;
+    private int[] elements;
+    private final Spliterator.OfInt lazySpliterator;
     private boolean parallel;
     private List<Runnable> closeHandlers;
 
     public IntStreamImpl(int[] elements) {
         this.elements = elements;
+        this.lazySpliterator = null;
+    }
+
+    /** Lazy constructor: spliterator is not traversed until a terminal operation. */
+    public IntStreamImpl(Spliterator.OfInt spliterator, boolean parallel) {
+        this.elements = null;
+        this.lazySpliterator = spliterator;
+        this.parallel = parallel;
+    }
+
+    private int[] materialize() {
+        if (elements != null) return elements;
+        List<Integer> list = new ArrayList<>();
+        lazySpliterator.forEachRemaining((IntConsumer) (int v) -> list.add(v));
+        int[] arr = new int[list.size()];
+        for (int i = 0; i < arr.length; i++) arr[i] = list.get(i);
+        elements = arr;
+        return arr;
     }
 
     @Override
     public IntStream filter(IntPredicate predicate) {
         int count = 0;
-        for (int e : elements) {
+        for (int e : materialize()) {
             if (predicate.test(e)) count++;
         }
         int[] result = new int[count];
         int idx = 0;
-        for (int e : elements) {
+        for (int e : materialize()) {
             if (predicate.test(e)) result[idx++] = e;
         }
         return new IntStreamImpl(result);
@@ -70,9 +89,9 @@ public class IntStreamImpl implements IntStream {
 
     @Override
     public IntStream map(IntUnaryOperator mapper) {
-        int[] result = new int[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = mapper.applyAsInt(elements[i]);
+        int[] result = new int[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = mapper.applyAsInt(materialize()[i]);
         }
         return new IntStreamImpl(result);
     }
@@ -80,7 +99,7 @@ public class IntStreamImpl implements IntStream {
     @Override
     public <U> Stream<U> mapToObj(IntFunction<? extends U> mapper) {
         List<U> result = new ArrayList<>();
-        for (int e : elements) {
+        for (int e : materialize()) {
             result.add(mapper.apply(e));
         }
         return new StreamImpl<>(result);
@@ -88,18 +107,18 @@ public class IntStreamImpl implements IntStream {
 
     @Override
     public LongStream mapToLong(IntToLongFunction mapper) {
-        long[] result = new long[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = mapper.applyAsLong(elements[i]);
+        long[] result = new long[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = mapper.applyAsLong(materialize()[i]);
         }
         return new LongStreamImpl(result);
     }
 
     @Override
     public DoubleStream mapToDouble(IntToDoubleFunction mapper) {
-        double[] result = new double[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = mapper.applyAsDouble(elements[i]);
+        double[] result = new double[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = mapper.applyAsDouble(materialize()[i]);
         }
         return new DoubleStreamImpl(result);
     }
@@ -107,9 +126,9 @@ public class IntStreamImpl implements IntStream {
     @Override
     public IntStream flatMap(IntFunction<? extends IntStream> mapper) {
         // Collect all results eagerly
-        int[] buf = new int[elements.length * 4];
+        int[] buf = new int[materialize().length * 4];
         int size = 0;
-        for (int e : elements) {
+        for (int e : materialize()) {
             IntStream s = mapper.apply(e);
             if (s != null) {
                 try {
@@ -130,7 +149,7 @@ public class IntStreamImpl implements IntStream {
     @Override
     public IntStream distinct() {
         java.util.LinkedHashSet<Integer> seen = new java.util.LinkedHashSet<>();
-        for (int e : elements) {
+        for (int e : materialize()) {
             seen.add(e);
         }
         int[] result = new int[seen.size()];
@@ -143,17 +162,17 @@ public class IntStreamImpl implements IntStream {
 
     @Override
     public IntStream sorted() {
-        int[] result = Arrays.copyOf(elements, elements.length);
+        int[] result = Arrays.copyOf(materialize(), materialize().length);
         Arrays.sort(result);
         return new IntStreamImpl(result);
     }
 
     @Override
     public IntStream peek(IntConsumer action) {
-        int[] result = new int[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            action.accept(elements[i]);
-            result[i] = elements[i];
+        int[] result = new int[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            action.accept(materialize()[i]);
+            result[i] = materialize()[i];
         }
         return new IntStreamImpl(result);
     }
@@ -161,20 +180,20 @@ public class IntStreamImpl implements IntStream {
     @Override
     public IntStream limit(long maxSize) {
         if (maxSize < 0) throw new IllegalArgumentException(Long.toString(maxSize));
-        int len = (int) Math.min(elements.length, maxSize);
-        return new IntStreamImpl(Arrays.copyOf(elements, len));
+        int len = (int) Math.min(materialize().length, maxSize);
+        return new IntStreamImpl(Arrays.copyOf(materialize(), len));
     }
 
     @Override
     public IntStream skip(long n) {
         if (n < 0) throw new IllegalArgumentException(Long.toString(n));
-        int skip = (int) Math.min(elements.length, n);
-        return new IntStreamImpl(Arrays.copyOfRange(elements, skip, elements.length));
+        int skip = (int) Math.min(materialize().length, n);
+        return new IntStreamImpl(Arrays.copyOfRange(materialize(), skip, materialize().length));
     }
 
     @Override
     public void forEach(IntConsumer action) {
-        for (int e : elements) {
+        for (int e : materialize()) {
             action.accept(e);
         }
     }
@@ -186,13 +205,13 @@ public class IntStreamImpl implements IntStream {
 
     @Override
     public int[] toArray() {
-        return Arrays.copyOf(elements, elements.length);
+        return Arrays.copyOf(materialize(), materialize().length);
     }
 
     @Override
     public int reduce(int identity, IntBinaryOperator op) {
         int result = identity;
-        for (int e : elements) {
+        for (int e : materialize()) {
             result = op.applyAsInt(result, e);
         }
         return result;
@@ -200,10 +219,10 @@ public class IntStreamImpl implements IntStream {
 
     @Override
     public OptionalInt reduce(IntBinaryOperator op) {
-        if (elements.length == 0) return OptionalInt.empty();
-        int result = elements[0];
-        for (int i = 1; i < elements.length; i++) {
-            result = op.applyAsInt(result, elements[i]);
+        if (materialize().length == 0) return OptionalInt.empty();
+        int result = materialize()[0];
+        for (int i = 1; i < materialize().length; i++) {
+            result = op.applyAsInt(result, materialize()[i]);
         }
         return OptionalInt.of(result);
     }
@@ -213,7 +232,7 @@ public class IntStreamImpl implements IntStream {
                          ObjIntConsumer<R> accumulator,
                          BiConsumer<R, R> combiner) {
         R result = supplier.get();
-        for (int e : elements) {
+        for (int e : materialize()) {
             accumulator.accept(result, e);
         }
         return result;
@@ -222,7 +241,7 @@ public class IntStreamImpl implements IntStream {
     @Override
     public int sum() {
         int sum = 0;
-        for (int e : elements) {
+        for (int e : materialize()) {
             sum += e;
         }
         return sum;
@@ -230,37 +249,37 @@ public class IntStreamImpl implements IntStream {
 
     @Override
     public OptionalInt min() {
-        if (elements.length == 0) return OptionalInt.empty();
-        int min = elements[0];
-        for (int i = 1; i < elements.length; i++) {
-            if (elements[i] < min) min = elements[i];
+        if (materialize().length == 0) return OptionalInt.empty();
+        int min = materialize()[0];
+        for (int i = 1; i < materialize().length; i++) {
+            if (materialize()[i] < min) min = materialize()[i];
         }
         return OptionalInt.of(min);
     }
 
     @Override
     public OptionalInt max() {
-        if (elements.length == 0) return OptionalInt.empty();
-        int max = elements[0];
-        for (int i = 1; i < elements.length; i++) {
-            if (elements[i] > max) max = elements[i];
+        if (materialize().length == 0) return OptionalInt.empty();
+        int max = materialize()[0];
+        for (int i = 1; i < materialize().length; i++) {
+            if (materialize()[i] > max) max = materialize()[i];
         }
         return OptionalInt.of(max);
     }
 
     @Override
     public long count() {
-        return elements.length;
+        return materialize().length;
     }
 
     @Override
     public OptionalDouble average() {
-        if (elements.length == 0) return OptionalDouble.empty();
+        if (materialize().length == 0) return OptionalDouble.empty();
         long sum = 0;
-        for (int e : elements) {
+        for (int e : materialize()) {
             sum += e;
         }
-        return OptionalDouble.of((double) sum / elements.length);
+        return OptionalDouble.of((double) sum / materialize().length);
     }
 
     @Override
@@ -270,7 +289,7 @@ public class IntStreamImpl implements IntStream {
 
     @Override
     public boolean anyMatch(IntPredicate predicate) {
-        for (int e : elements) {
+        for (int e : materialize()) {
             if (predicate.test(e)) return true;
         }
         return false;
@@ -278,7 +297,7 @@ public class IntStreamImpl implements IntStream {
 
     @Override
     public boolean allMatch(IntPredicate predicate) {
-        for (int e : elements) {
+        for (int e : materialize()) {
             if (!predicate.test(e)) return false;
         }
         return true;
@@ -286,7 +305,7 @@ public class IntStreamImpl implements IntStream {
 
     @Override
     public boolean noneMatch(IntPredicate predicate) {
-        for (int e : elements) {
+        for (int e : materialize()) {
             if (predicate.test(e)) return false;
         }
         return true;
@@ -294,30 +313,30 @@ public class IntStreamImpl implements IntStream {
 
     @Override
     public OptionalInt findFirst() {
-        if (elements.length == 0) return OptionalInt.empty();
-        return OptionalInt.of(elements[0]);
+        if (materialize().length == 0) return OptionalInt.empty();
+        return OptionalInt.of(materialize()[0]);
     }
 
     @Override
     public OptionalInt findAny() {
-        if (elements.length == 0) return OptionalInt.empty();
-        return OptionalInt.of(elements[0]);
+        if (materialize().length == 0) return OptionalInt.empty();
+        return OptionalInt.of(materialize()[0]);
     }
 
     @Override
     public LongStream asLongStream() {
-        long[] result = new long[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = elements[i];
+        long[] result = new long[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = materialize()[i];
         }
         return new LongStreamImpl(result);
     }
 
     @Override
     public DoubleStream asDoubleStream() {
-        double[] result = new double[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = elements[i];
+        double[] result = new double[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = materialize()[i];
         }
         return new DoubleStreamImpl(result);
     }
@@ -325,7 +344,7 @@ public class IntStreamImpl implements IntStream {
     @Override
     public Stream<Integer> boxed() {
         List<Integer> result = new ArrayList<>();
-        for (int e : elements) {
+        for (int e : materialize()) {
             result.add(e);
         }
         return new StreamImpl<>(result);
@@ -340,20 +359,20 @@ public class IntStreamImpl implements IntStream {
 
             @Override
             public boolean hasNext() {
-                return index < elements.length;
+                return index < materialize().length;
             }
 
             @Override
             public int nextInt() {
                 if (!hasNext()) throw new NoSuchElementException();
-                return elements[index++];
+                return materialize()[index++];
             }
         };
     }
 
     @Override
     public Spliterator.OfInt spliterator() {
-        return Spliterators.spliterator(elements, 0, elements.length,
+        return Spliterators.spliterator(materialize(), 0, materialize().length,
                 Spliterator.ORDERED | Spliterator.SIZED | Spliterator.SUBSIZED);
     }
 

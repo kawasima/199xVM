@@ -45,23 +45,41 @@ import java.util.function.ObjLongConsumer;
 import java.util.function.Supplier;
 
 public class LongStreamImpl implements LongStream {
-    private final long[] elements;
+    private long[] elements;
+    private final Spliterator.OfLong lazySpliterator;
     private boolean parallel;
     private List<Runnable> closeHandlers;
 
     public LongStreamImpl(long[] elements) {
         this.elements = elements;
+        this.lazySpliterator = null;
+    }
+
+    public LongStreamImpl(Spliterator.OfLong spliterator, boolean parallel) {
+        this.elements = null;
+        this.lazySpliterator = spliterator;
+        this.parallel = parallel;
+    }
+
+    private long[] materialize() {
+        if (elements != null) return elements;
+        List<Long> list = new ArrayList<>();
+        lazySpliterator.forEachRemaining((java.util.function.LongConsumer) (long v) -> list.add(v));
+        long[] arr = new long[list.size()];
+        for (int i = 0; i < arr.length; i++) arr[i] = list.get(i);
+        elements = arr;
+        return arr;
     }
 
     @Override
     public LongStream filter(LongPredicate predicate) {
         int count = 0;
-        for (long e : elements) {
+        for (long e : materialize()) {
             if (predicate.test(e)) count++;
         }
         long[] result = new long[count];
         int idx = 0;
-        for (long e : elements) {
+        for (long e : materialize()) {
             if (predicate.test(e)) result[idx++] = e;
         }
         return new LongStreamImpl(result);
@@ -69,9 +87,9 @@ public class LongStreamImpl implements LongStream {
 
     @Override
     public LongStream map(LongUnaryOperator mapper) {
-        long[] result = new long[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = mapper.applyAsLong(elements[i]);
+        long[] result = new long[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = mapper.applyAsLong(materialize()[i]);
         }
         return new LongStreamImpl(result);
     }
@@ -79,7 +97,7 @@ public class LongStreamImpl implements LongStream {
     @Override
     public <U> Stream<U> mapToObj(LongFunction<? extends U> mapper) {
         List<U> result = new ArrayList<>();
-        for (long e : elements) {
+        for (long e : materialize()) {
             result.add(mapper.apply(e));
         }
         return new StreamImpl<>(result);
@@ -87,27 +105,27 @@ public class LongStreamImpl implements LongStream {
 
     @Override
     public IntStream mapToInt(LongToIntFunction mapper) {
-        int[] result = new int[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = mapper.applyAsInt(elements[i]);
+        int[] result = new int[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = mapper.applyAsInt(materialize()[i]);
         }
         return new IntStreamImpl(result);
     }
 
     @Override
     public DoubleStream mapToDouble(LongToDoubleFunction mapper) {
-        double[] result = new double[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = mapper.applyAsDouble(elements[i]);
+        double[] result = new double[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = mapper.applyAsDouble(materialize()[i]);
         }
         return new DoubleStreamImpl(result);
     }
 
     @Override
     public LongStream flatMap(LongFunction<? extends LongStream> mapper) {
-        long[] buf = new long[elements.length * 4];
+        long[] buf = new long[materialize().length * 4];
         int size = 0;
-        for (long e : elements) {
+        for (long e : materialize()) {
             LongStream s = mapper.apply(e);
             if (s != null) {
                 try {
@@ -128,7 +146,7 @@ public class LongStreamImpl implements LongStream {
     @Override
     public LongStream distinct() {
         java.util.LinkedHashSet<Long> seen = new java.util.LinkedHashSet<>();
-        for (long e : elements) {
+        for (long e : materialize()) {
             seen.add(e);
         }
         long[] result = new long[seen.size()];
@@ -141,17 +159,17 @@ public class LongStreamImpl implements LongStream {
 
     @Override
     public LongStream sorted() {
-        long[] result = Arrays.copyOf(elements, elements.length);
+        long[] result = Arrays.copyOf(materialize(), materialize().length);
         Arrays.sort(result);
         return new LongStreamImpl(result);
     }
 
     @Override
     public LongStream peek(LongConsumer action) {
-        long[] result = new long[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            action.accept(elements[i]);
-            result[i] = elements[i];
+        long[] result = new long[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            action.accept(materialize()[i]);
+            result[i] = materialize()[i];
         }
         return new LongStreamImpl(result);
     }
@@ -159,20 +177,20 @@ public class LongStreamImpl implements LongStream {
     @Override
     public LongStream limit(long maxSize) {
         if (maxSize < 0) throw new IllegalArgumentException(Long.toString(maxSize));
-        int len = (int) Math.min(elements.length, maxSize);
-        return new LongStreamImpl(Arrays.copyOf(elements, len));
+        int len = (int) Math.min(materialize().length, maxSize);
+        return new LongStreamImpl(Arrays.copyOf(materialize(), len));
     }
 
     @Override
     public LongStream skip(long n) {
         if (n < 0) throw new IllegalArgumentException(Long.toString(n));
-        int skip = (int) Math.min(elements.length, n);
-        return new LongStreamImpl(Arrays.copyOfRange(elements, skip, elements.length));
+        int skip = (int) Math.min(materialize().length, n);
+        return new LongStreamImpl(Arrays.copyOfRange(materialize(), skip, materialize().length));
     }
 
     @Override
     public void forEach(LongConsumer action) {
-        for (long e : elements) {
+        for (long e : materialize()) {
             action.accept(e);
         }
     }
@@ -184,13 +202,13 @@ public class LongStreamImpl implements LongStream {
 
     @Override
     public long[] toArray() {
-        return Arrays.copyOf(elements, elements.length);
+        return Arrays.copyOf(materialize(), materialize().length);
     }
 
     @Override
     public long reduce(long identity, LongBinaryOperator op) {
         long result = identity;
-        for (long e : elements) {
+        for (long e : materialize()) {
             result = op.applyAsLong(result, e);
         }
         return result;
@@ -198,10 +216,10 @@ public class LongStreamImpl implements LongStream {
 
     @Override
     public OptionalLong reduce(LongBinaryOperator op) {
-        if (elements.length == 0) return OptionalLong.empty();
-        long result = elements[0];
-        for (int i = 1; i < elements.length; i++) {
-            result = op.applyAsLong(result, elements[i]);
+        if (materialize().length == 0) return OptionalLong.empty();
+        long result = materialize()[0];
+        for (int i = 1; i < materialize().length; i++) {
+            result = op.applyAsLong(result, materialize()[i]);
         }
         return OptionalLong.of(result);
     }
@@ -211,7 +229,7 @@ public class LongStreamImpl implements LongStream {
                          ObjLongConsumer<R> accumulator,
                          BiConsumer<R, R> combiner) {
         R result = supplier.get();
-        for (long e : elements) {
+        for (long e : materialize()) {
             accumulator.accept(result, e);
         }
         return result;
@@ -220,7 +238,7 @@ public class LongStreamImpl implements LongStream {
     @Override
     public long sum() {
         long sum = 0;
-        for (long e : elements) {
+        for (long e : materialize()) {
             sum += e;
         }
         return sum;
@@ -228,37 +246,37 @@ public class LongStreamImpl implements LongStream {
 
     @Override
     public OptionalLong min() {
-        if (elements.length == 0) return OptionalLong.empty();
-        long min = elements[0];
-        for (int i = 1; i < elements.length; i++) {
-            if (elements[i] < min) min = elements[i];
+        if (materialize().length == 0) return OptionalLong.empty();
+        long min = materialize()[0];
+        for (int i = 1; i < materialize().length; i++) {
+            if (materialize()[i] < min) min = materialize()[i];
         }
         return OptionalLong.of(min);
     }
 
     @Override
     public OptionalLong max() {
-        if (elements.length == 0) return OptionalLong.empty();
-        long max = elements[0];
-        for (int i = 1; i < elements.length; i++) {
-            if (elements[i] > max) max = elements[i];
+        if (materialize().length == 0) return OptionalLong.empty();
+        long max = materialize()[0];
+        for (int i = 1; i < materialize().length; i++) {
+            if (materialize()[i] > max) max = materialize()[i];
         }
         return OptionalLong.of(max);
     }
 
     @Override
     public long count() {
-        return elements.length;
+        return materialize().length;
     }
 
     @Override
     public OptionalDouble average() {
-        if (elements.length == 0) return OptionalDouble.empty();
+        if (materialize().length == 0) return OptionalDouble.empty();
         long sum = 0;
-        for (long e : elements) {
+        for (long e : materialize()) {
             sum += e;
         }
-        return OptionalDouble.of((double) sum / elements.length);
+        return OptionalDouble.of((double) sum / materialize().length);
     }
 
     @Override
@@ -268,7 +286,7 @@ public class LongStreamImpl implements LongStream {
 
     @Override
     public boolean anyMatch(LongPredicate predicate) {
-        for (long e : elements) {
+        for (long e : materialize()) {
             if (predicate.test(e)) return true;
         }
         return false;
@@ -276,7 +294,7 @@ public class LongStreamImpl implements LongStream {
 
     @Override
     public boolean allMatch(LongPredicate predicate) {
-        for (long e : elements) {
+        for (long e : materialize()) {
             if (!predicate.test(e)) return false;
         }
         return true;
@@ -284,7 +302,7 @@ public class LongStreamImpl implements LongStream {
 
     @Override
     public boolean noneMatch(LongPredicate predicate) {
-        for (long e : elements) {
+        for (long e : materialize()) {
             if (predicate.test(e)) return false;
         }
         return true;
@@ -292,21 +310,21 @@ public class LongStreamImpl implements LongStream {
 
     @Override
     public OptionalLong findFirst() {
-        if (elements.length == 0) return OptionalLong.empty();
-        return OptionalLong.of(elements[0]);
+        if (materialize().length == 0) return OptionalLong.empty();
+        return OptionalLong.of(materialize()[0]);
     }
 
     @Override
     public OptionalLong findAny() {
-        if (elements.length == 0) return OptionalLong.empty();
-        return OptionalLong.of(elements[0]);
+        if (materialize().length == 0) return OptionalLong.empty();
+        return OptionalLong.of(materialize()[0]);
     }
 
     @Override
     public DoubleStream asDoubleStream() {
-        double[] result = new double[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = elements[i];
+        double[] result = new double[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = materialize()[i];
         }
         return new DoubleStreamImpl(result);
     }
@@ -314,7 +332,7 @@ public class LongStreamImpl implements LongStream {
     @Override
     public Stream<Long> boxed() {
         List<Long> result = new ArrayList<>();
-        for (long e : elements) {
+        for (long e : materialize()) {
             result.add(e);
         }
         return new StreamImpl<>(result);
@@ -329,20 +347,20 @@ public class LongStreamImpl implements LongStream {
 
             @Override
             public boolean hasNext() {
-                return index < elements.length;
+                return index < materialize().length;
             }
 
             @Override
             public long nextLong() {
                 if (!hasNext()) throw new NoSuchElementException();
-                return elements[index++];
+                return materialize()[index++];
             }
         };
     }
 
     @Override
     public Spliterator.OfLong spliterator() {
-        return Spliterators.spliterator(elements, 0, elements.length,
+        return Spliterators.spliterator(materialize(), 0, materialize().length,
                 Spliterator.ORDERED | Spliterator.SIZED | Spliterator.SUBSIZED);
     }
 
