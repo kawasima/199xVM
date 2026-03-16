@@ -42,6 +42,13 @@ public abstract class Enum<E extends Enum<E>> implements Comparable<E>, Serializ
     @Override
     public String toString() { return name; }
 
+    @SuppressWarnings("unchecked")
+    public final Class<E> getDeclaringClass() {
+        Class<?> clazz = getClass();
+        Class<?> zuper = clazz.getSuperclass();
+        return (Class<E>)(zuper == Enum.class ? clazz : zuper);
+    }
+
     @Override
     public final int compareTo(E o) {
         return this.ordinal() - o.ordinal();

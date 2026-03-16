@@ -79,32 +79,95 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public IntStream mapToInt(ToIntFunction<? super T> mapper) {
-        throw new UnsupportedOperationException("mapToInt");
+        int[] result = new int[elements.size()];
+        for (int i = 0; i < elements.size(); i++) {
+            result[i] = mapper.applyAsInt(elements.get(i));
+        }
+        return new IntStreamImpl(result);
     }
 
     @Override
     public LongStream mapToLong(ToLongFunction<? super T> mapper) {
-        throw new UnsupportedOperationException("mapToLong");
+        long[] result = new long[elements.size()];
+        for (int i = 0; i < elements.size(); i++) {
+            result[i] = mapper.applyAsLong(elements.get(i));
+        }
+        return new LongStreamImpl(result);
     }
 
     @Override
     public DoubleStream mapToDouble(ToDoubleFunction<? super T> mapper) {
-        throw new UnsupportedOperationException("mapToDouble");
+        double[] result = new double[elements.size()];
+        for (int i = 0; i < elements.size(); i++) {
+            result[i] = mapper.applyAsDouble(elements.get(i));
+        }
+        return new DoubleStreamImpl(result);
     }
 
     @Override
     public IntStream flatMapToInt(Function<? super T, ? extends IntStream> mapper) {
-        throw new UnsupportedOperationException("flatMapToInt");
+        int[] buf = new int[16];
+        int size = 0;
+        for (T e : elements) {
+            IntStream s = mapper.apply(e);
+            if (s != null) {
+                try {
+                    int[] arr = s.toArray();
+                    while (size + arr.length > buf.length) {
+                        buf = java.util.Arrays.copyOf(buf, buf.length * 2);
+                    }
+                    System.arraycopy(arr, 0, buf, size, arr.length);
+                    size += arr.length;
+                } finally {
+                    s.close();
+                }
+            }
+        }
+        return new IntStreamImpl(java.util.Arrays.copyOf(buf, size));
     }
 
     @Override
     public LongStream flatMapToLong(Function<? super T, ? extends LongStream> mapper) {
-        throw new UnsupportedOperationException("flatMapToLong");
+        long[] buf = new long[16];
+        int size = 0;
+        for (T e : elements) {
+            LongStream s = mapper.apply(e);
+            if (s != null) {
+                try {
+                    long[] arr = s.toArray();
+                    while (size + arr.length > buf.length) {
+                        buf = java.util.Arrays.copyOf(buf, buf.length * 2);
+                    }
+                    System.arraycopy(arr, 0, buf, size, arr.length);
+                    size += arr.length;
+                } finally {
+                    s.close();
+                }
+            }
+        }
+        return new LongStreamImpl(java.util.Arrays.copyOf(buf, size));
     }
 
     @Override
     public DoubleStream flatMapToDouble(Function<? super T, ? extends DoubleStream> mapper) {
-        throw new UnsupportedOperationException("flatMapToDouble");
+        double[] buf = new double[16];
+        int size = 0;
+        for (T e : elements) {
+            DoubleStream s = mapper.apply(e);
+            if (s != null) {
+                try {
+                    double[] arr = s.toArray();
+                    while (size + arr.length > buf.length) {
+                        buf = java.util.Arrays.copyOf(buf, buf.length * 2);
+                    }
+                    System.arraycopy(arr, 0, buf, size, arr.length);
+                    size += arr.length;
+                } finally {
+                    s.close();
+                }
+            }
+        }
+        return new DoubleStreamImpl(java.util.Arrays.copyOf(buf, size));
     }
 
     @Override
@@ -244,14 +307,13 @@ public class StreamImpl<T> implements Stream<T> {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
     public <R, A> R collect(Collector<? super T, A, R> collector) {
-        Collector<T, Object, R> c = (Collector<T, Object, R>) collector;
-        Object container = c.supplier();
+        A container = collector.supplier().get();
+        java.util.function.BiConsumer<A, ? super T> acc = collector.accumulator();
         for (T e : elements) {
-            c.accumulator(container, e);
+            acc.accept(container, e);
         }
-        return c.finisher(container);
+        return collector.finisher().apply(container);
     }
 
     @Override
