@@ -299,7 +299,7 @@ public final class StringBuffer
         return -1;
     }
 
-    public int lastIndexOf(String str) {
+    public synchronized int lastIndexOf(String str) {
         return lastIndexOf(str, count);
     }
 
