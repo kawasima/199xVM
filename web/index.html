@@ -2097,8 +2097,8 @@ public class JvmInterfaceDefault implements Describable {
               view.dispatch({ changes: { from, to, insert: simpleName } });
               return;
             }
-            // Find insertion point: after last import, or at top
-            const lastImportMatch = /^import\s+[^;]+;\s*$/gm;
+            // Find insertion point: after last import line (including its newline)
+            const lastImportMatch = /^import\s+[^;]+;[^\S\n]*\n?/gm;
             let insertPos = 0;
             let match;
             while ((match = lastImportMatch.exec(docText)) !== null) {
