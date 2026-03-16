@@ -1915,9 +1915,6 @@ public class JvmInterfaceDefault implements Describable {
     }
 
     // -------------------------------------------------------------------------
-    // CodeMirror editor
-    // -------------------------------------------------------------------------
-    // -------------------------------------------------------------------------
     // Java code completion provider
     // -------------------------------------------------------------------------
     function javaCompletionSource(context) {
@@ -1944,8 +1941,10 @@ public class JvmInterfaceDefault implements Describable {
         const varName = dotAccess.text.slice(0, dotIdx).trim();
         const from = dotAccess.from + dotIdx + 1;
         // Infer variable type from local declarations in the editor
+        if (!/^\w+$/.test(varName)) return null; // skip non-identifier tokens
         const doc = context.state.doc.toString();
-        const typeMatch = new RegExp(`(?:^|[;{}()\\s])([A-Z]\\w*(?:<[^>]*>)?)\\s+${varName}\\s*[=;,)]`, "m").exec(doc);
+        const escapedVar = varName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const typeMatch = new RegExp(`(?:^|[;{}()\\s])([A-Z]\\w*(?:<[^>]*>)?)\\s+${escapedVar}\\s*[=;,)]`, "m").exec(doc);
         if (!typeMatch) return null;
         const rawType = typeMatch[1].replace(/<.*>$/, ""); // strip generics
         // Resolve type name to internal form
