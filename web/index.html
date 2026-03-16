@@ -478,7 +478,7 @@
 
   <script type="module">
     const _javacVer = (typeof "__BUILD_TIMESTAMP__" === "string" && "__BUILD_TIMESTAMP__".startsWith("__")) ? Date.now() : "__BUILD_TIMESTAMP__";
-    const { compile, disassemble, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, setMethodRegistry, setClassInterfaces, readJar, classFilesToBundle, getKnownClassNames, getKnownClassesByPackage, getMethodsForClass } = await import(`./javac.js?v=${_javacVer}`);
+    const { compile, disassemble, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, setMethodRegistry, setClassInterfaces, readJar, classFilesToBundle, getKnownClassNames, getKnownClassesByPackage, getMethodsForClass, hasKnownMethodOwnerPrefix } = await import(`./javac.js?v=${_javacVer}`);
 
     // CodeMirror 6
     import { EditorState } from "https://esm.sh/@codemirror/state@6";
@@ -1926,13 +1926,13 @@ public class JvmInterfaceDefault implements Describable {
       // 2. Check wildcard imports: "import java.awt.*;"
       const wildcardRe = /^import\s+(\S+)\.\*\s*;/gm;
       let wm;
-      const allClasses = getKnownClassNames();
       while ((wm = wildcardRe.exec(doc || "")) !== null) {
         const pkg = wm[1].replaceAll(".", "/");
         const candidate = pkg + "/" + name;
-        if (allClasses.includes(candidate)) return candidate;
+        if (hasKnownMethodOwnerPrefix(candidate)) return candidate;
       }
       // 3. Fallback: first match in known classes
+      const allClasses = getKnownClassNames();
       return allClasses.find(c => c.endsWith("/" + name)) ?? "java/lang/" + name;
     }
 
