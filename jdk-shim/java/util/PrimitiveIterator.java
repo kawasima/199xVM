@@ -50,11 +50,6 @@ import java.util.function.LongConsumer;
  * does not affect the order in which the values, transformed to boxed values,
  * are encountered.
  *
- * @implNote
- * If the boolean system property {@code org.openjdk.java.util.stream.tripwire}
- * is set to {@code true} then diagnostic warnings are reported if boxing of
- * primitive values occur when operating on primitive subtype specializations.
- *
  * @param <T> the type of elements returned by this PrimitiveIterator.  The
  *        type must be a wrapper type for a primitive type, such as
  *        {@code Integer} for the primitive {@code int} type.
