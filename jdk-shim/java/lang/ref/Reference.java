@@ -68,7 +68,6 @@ public abstract class Reference<T> {
     }
 
     public boolean enqueue() {
-        clearImpl();
         return queue.enqueue(this);
     }
 
