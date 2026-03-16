@@ -24,18 +24,49 @@ const BASE_KNOWN_METHODS: Record<string, MethodSig> = {
 
 let knownMethods: Record<string, MethodSig> = { ...BASE_KNOWN_METHODS };
 
+// ---- Performance indexes (rebuilt on registry mutation) ----
+/** Maps "owner.method" → array of {key, sig} for O(1) method group lookup. */
+let methodIndex = new Map<string, { key: string; sig: MethodSig }[]>();
+/** Set of all known owner prefixes for O(1) hasKnownMethodOwnerPrefix(). */
+let ownerSet = new Set<string>();
+
+function rebuildIndexes(): void {
+  methodIndex = new Map();
+  ownerSet = new Set();
+  for (const key of Object.keys(knownMethods)) {
+    const dotIdx = key.indexOf(".");
+    if (dotIdx < 0) continue;
+    const owner = key.slice(0, dotIdx);
+    ownerSet.add(owner);
+    const parenIdx = key.indexOf("(", dotIdx);
+    const groupKey = parenIdx > 0 ? key.slice(0, parenIdx) : key;
+    let group = methodIndex.get(groupKey);
+    if (!group) {
+      group = [];
+      methodIndex.set(groupKey, group);
+    }
+    group.push({ key, sig: knownMethods[key] });
+  }
+}
+
+// Build initial indexes
+rebuildIndexes();
+
 /** Maps a class name to the interfaces it implements (populated from loaded JARs). */
 let knownClassInterfaces: Record<string, string[]> = {};
 
 /** Merge an externally-built method registry into the known methods table. */
 export function setMethodRegistry(reg: Record<string, MethodSig>): void {
   knownMethods = { ...knownMethods, ...reg };
+  rebuildIndexes();
 }
 
 /** Merge class→interfaces mappings built from loaded JARs. */
 export function setClassInterfaces(ifaces: Record<string, string[]>): void {
   for (const [cls, list] of Object.entries(ifaces)) {
-    knownClassInterfaces[cls] = [...(knownClassInterfaces[cls] ?? []), ...list.filter(i => !(knownClassInterfaces[cls] ?? []).includes(i))];
+    const existing = new Set(knownClassInterfaces[cls] ?? []);
+    for (const i of list) existing.add(i);
+    knownClassInterfaces[cls] = [...existing];
   }
 }
 
@@ -48,6 +79,7 @@ export function getKnownClassInterfaces(cls: string): string[] | undefined {
 export function resetMethodRegistry(): void {
   knownMethods = { ...BASE_KNOWN_METHODS };
   knownClassInterfaces = {};
+  rebuildIndexes();
 }
 
 export interface FunctionalSig {
@@ -73,15 +105,14 @@ export function lookupKnownMethod(owner: string, method: string, argDescs: strin
   const exact = knownMethods[`${owner}.${method}(${argDescs})`];
   if (exact) return exact;
   // Fallback: choose compatible overload by arity and primitive/ref compatibility.
-  const prefix = `${owner}.${method}(`;
+  const group = methodIndex.get(`${owner}.${method}`);
+  if (!group) return undefined;
   const wantedArgs = splitDescriptorArgs(argDescs);
-  let firstCompatible: MethodSig | undefined;
-  for (const key of Object.keys(knownMethods)) {
-    if (!key.startsWith(prefix)) continue;
-    const start = key.indexOf("(");
-    const end = key.indexOf(")");
+  for (const entry of group) {
+    const start = entry.key.indexOf("(");
+    const end = entry.key.indexOf(")");
     if (start < 0 || end < 0) continue;
-    const keyArgs = splitDescriptorArgs(key.slice(start + 1, end));
+    const keyArgs = splitDescriptorArgs(entry.key.slice(start + 1, end));
     if (keyArgs.length !== wantedArgs.length) continue;
     const compatible = keyArgs.every((a, i) => {
       const b = wantedArgs[i];
@@ -89,26 +120,21 @@ export function lookupKnownMethod(owner: string, method: string, argDescs: strin
       const aRef = a.startsWith("L") || a.startsWith("[");
       const bRef = b.startsWith("L") || b.startsWith("[");
       if (aRef && bRef) return true;
-      // Autoboxing: primitive actual → reference param (e.g. int → Object)
       if (aRef && !bRef) return true;
       return false;
     });
-    if (compatible) {
-      firstCompatible = knownMethods[key];
-      break;
-    }
+    if (compatible) return entry.sig;
   }
-  return firstCompatible;
+  return undefined;
 }
 
 export function findKnownMethodByArity(owner: string, method: string, arity: number, wantStatic: boolean): MethodSig | undefined {
-  const prefix = `${owner}.${method}(`;
-  for (const key of Object.keys(knownMethods)) {
-    if (!key.startsWith(prefix)) continue;
-    const sig = knownMethods[key];
-    const isStatic = sig.isStatic ?? false;
+  const group = methodIndex.get(`${owner}.${method}`);
+  if (!group) return undefined;
+  for (const entry of group) {
+    const isStatic = entry.sig.isStatic ?? false;
     if (isStatic !== wantStatic) continue;
-    if (sig.paramTypes.length === arity) return sig;
+    if (entry.sig.paramTypes.length === arity) return entry.sig;
   }
   return undefined;
 }
@@ -116,21 +142,21 @@ export function findKnownMethodByArity(owner: string, method: string, arity: num
 export function findKnownFunctionalInterface(owner: string): FunctionalSig | undefined {
   const prefix = `${owner}.`;
   const candidates: { name: string; sig: MethodSig }[] = [];
-  for (const key of Object.keys(knownMethods)) {
-    if (!key.startsWith(prefix)) continue;
-    const open = key.indexOf("(", prefix.length);
-    const end = key.indexOf(")", open + 1);
-    if (open < 0) continue;
-    if (end < 0) continue;
-    const methodName = key.slice(prefix.length, open);
-    const signatureKey = `${methodName}(${key.slice(open + 1, end)})`;
-    if (methodName === "<init>" || OBJECT_PUBLIC_INSTANCE_METHODS.has(signatureKey)) continue;
-    const sig = knownMethods[key];
-    if (!sig.isInterface || sig.isStatic) continue;
-    // Skip default (non-abstract) methods — only the SAM (abstract) method counts.
-    // isAbstract===false means the registry explicitly marked it as non-abstract.
-    if (sig.isAbstract === false) continue;
-    candidates.push({ name: methodName, sig });
+  // Iterate only method groups belonging to this owner
+  for (const [groupKey, group] of methodIndex) {
+    if (!groupKey.startsWith(prefix)) continue;
+    const methodName = groupKey.slice(prefix.length);
+    for (const entry of group) {
+      const open = entry.key.indexOf("(");
+      const end = entry.key.indexOf(")");
+      if (open < 0 || end < 0) continue;
+      const signatureKey = `${methodName}(${entry.key.slice(open + 1, end)})`;
+      if (methodName === "<init>" || OBJECT_PUBLIC_INSTANCE_METHODS.has(signatureKey)) continue;
+      const sig = entry.sig;
+      if (!sig.isInterface || sig.isStatic) continue;
+      if (sig.isAbstract === false) continue;
+      candidates.push({ name: methodName, sig });
+    }
   }
   if (candidates.length !== 1) return undefined;
   return {
@@ -173,5 +199,5 @@ export function hasFunctionalArg(args: Expr[]): boolean {
 }
 
 export function hasKnownMethodOwnerPrefix(owner: string): boolean {
-  return Object.keys(knownMethods).some(k => k.startsWith(`${owner}.`));
+  return ownerSet.has(owner);
 }

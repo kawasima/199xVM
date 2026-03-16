@@ -635,15 +635,27 @@ function resolveMethodCandidateByTypes(
   for (const owner of ownerSearchOrder(ctx, ownerClass)) {
     const decl = ctx.classDecls.get(owner);
     if (decl) {
-      const candidates = decl.methods.filter(mm => mm.name === method && mm.isStatic === wantStatic && mm.params.length === argTypes.length);
-      if (candidates.length === 0) continue;
-      const exactMatches = candidates.filter(mm => mm.params.map(p => typeToDescriptor(p.type)).join("") === argDescs);
+      // Single-pass: find exact match and collect arity-compatible candidates
+      let exactMatch: MethodDecl | undefined;
+      let exactCount = 0;
+      let arityMatch: MethodDecl | undefined;
+      let arityCount = 0;
+      for (const mm of decl.methods) {
+        if (mm.name !== method || mm.isStatic !== wantStatic || mm.params.length !== argTypes.length) continue;
+        arityCount++;
+        arityMatch = mm;
+        if (mm.params.map(p => typeToDescriptor(p.type)).join("") === argDescs) {
+          exactCount++;
+          exactMatch = mm;
+        }
+      }
+      if (arityCount === 0) continue;
       let m: MethodDecl | undefined;
-      if (exactMatches.length === 1) m = exactMatches[0];
-      else if (exactMatches.length > 1) {
+      if (exactCount === 1) m = exactMatch;
+      else if (exactCount > 1) {
         throw new Error(`Ambiguous method overload: ${owner}.${method}(${argDescs})`);
-      } else if (candidates.length === 1) {
-        m = candidates[0];
+      } else if (arityCount === 1) {
+        m = arityMatch;
       } else {
         throw new Error(`Ambiguous method overload: ${owner}.${method}(${argDescs})`);
       }
@@ -724,9 +736,9 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
     case "ident": {
       const loc = findLocal(ctx, expr.name);
       if (loc) return loc.type;
-      const field = ctx.fields.find(f => f.name === expr.name);
+      const field = ctx.fieldMap.get(expr.name);
       if (field) return field.type;
-      const inherited = ctx.inheritedFields.find(f => f.name === expr.name);
+      const inherited = ctx.inheritedFieldMap.get(expr.name);
       if (inherited) return inherited.type;
       return { className: expr.name };
     }
@@ -799,7 +811,7 @@ function inferType(ctx: CompileContext, expr: Expr): Type {
     case "fieldAccess": {
       if (expr.field === "out") return { className: "java/io/PrintStream" };
       if (expr.field === "length") return "int";
-      const fld = ctx.fields.find(f => f.name === expr.field);
+      const fld = ctx.fieldMap.get(expr.field);
       if (fld) return fld.type;
       return { className: "java/lang/Object" };
     }
@@ -893,7 +905,7 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         break;
       }
       // Check own fields
-      const field = ctx.fields.find(f => f.name === expr.name);
+      const field = ctx.fieldMap.get(expr.name);
       if (field) {
         if (field.isStatic) {
           const fRef = ctx.cp.addFieldref(ctx.className, expr.name, typeToDescriptor(field.type));
@@ -908,7 +920,7 @@ function compileExpr(ctx: CompileContext, emitter: BytecodeEmitter, expr: Expr, 
         break;
       }
       // Check inherited fields (superclass fields accessed without this.)
-      const inherited = ctx.inheritedFields.find(f => f.name === expr.name);
+      const inherited = ctx.inheritedFieldMap.get(expr.name);
       if (inherited) {
         emitter.emitAload(0); // this
         const fRef = ctx.cp.addFieldref(ctx.superClass, expr.name, typeToDescriptor(inherited.type));
@@ -1897,7 +1909,7 @@ function compileFieldAccess(ctx: CompileContext, emitter: BytecodeEmitter, expr:
   compileExpr(ctx, emitter, expr.object);
   const objType = inferType(ctx, expr.object);
   const ownerClass = typeof objType === "object" && "className" in objType ? objType.className : ctx.className;
-  const fld = ctx.fields.find(f => f.name === expr.field);
+  const fld = ctx.fieldMap.get(expr.field);
   const fieldType = fld ? typeToDescriptor(fld.type) : "Ljava/lang/Object;";
   const fieldRef = ctx.cp.addFieldref(ownerClass, expr.field, fieldType);
   emitter.emit(0xb4); // getfield
@@ -2691,7 +2703,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
           emitStoreLocalByType(emitter, loc.slot, loc.type);
         } else {
           // Field assignment
-          const field = ctx.fields.find(f => f.name === stmt.target.name);
+          const field = ctx.fieldMap.get(stmt.target.name);
           if (field) {
             ensureAssignable(ctx, field.type, inferType(ctx, stmt.value), `field '${stmt.target.name}'`);
             if (field.isStatic) {
@@ -2715,7 +2727,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
         compileExpr(ctx, emitter, stmt.value, targetType);
         const objType = inferType(ctx, stmt.target.object);
         const ownerClass = typeof objType === "object" && "className" in objType ? objType.className : ctx.className;
-        const fld = ctx.fields.find(f => f.name === stmt.target.field);
+        const fld = ctx.fieldMap.get(stmt.target.field);
         const fieldType = fld ? typeToDescriptor(fld.type) : typeToDescriptor(inferType(ctx, stmt.value));
         const fieldRef = ctx.cp.addFieldref(ownerClass, stmt.target.field, fieldType);
         emitter.emit(0xb5); // putfield
@@ -2751,7 +2763,7 @@ function compileStmt(ctx: CompileContext, emitter: BytecodeEmitter, stmt: Stmt):
           emitBinaryIntoTarget({ kind: "ident", name: stmt.target.name }, loc.type, `local '${stmt.target.name}'`);
           emitStoreLocalByType(emitter, loc.slot, loc.type);
         } else {
-          const field = ctx.fields.find(f => f.name === stmt.target.name);
+          const field = ctx.fieldMap.get(stmt.target.name);
           if (field) {
             emitBinaryIntoTarget({ kind: "ident", name: stmt.target.name }, field.type, `field '${stmt.target.name}'`);
             if (field.isStatic) {
@@ -3347,7 +3359,9 @@ function compileMethod(
     locals,
     nextSlot,
     fields: classDecl.fields,
+    fieldMap: new Map(classDecl.fields.map(f => [f.name, f])),
     inheritedFields,
+    inheritedFieldMap: new Map(inheritedFields.map(f => [f.name, f])),
     allMethods,
     importMap: classDecl.importMap,
     packageImports: classDecl.packageImports,
@@ -3569,7 +3583,9 @@ function collectExprCheckedExceptions(
       className: classDecl.name,
       superClass: classDecl.superClass,
       fields: classDecl.fields,
-      inheritedFields: [],
+      fieldMap: new Map(classDecl.fields.map(f => [f.name, f])),
+      inheritedFields: [] as FieldDecl[],
+      inheritedFieldMap: new Map<string, FieldDecl>(),
       locals: Array.from(localTypes, ([name, type], idx) => ({ name, type, slot: idx })),
       importMap: classDecl.importMap,
       packageImports: classDecl.packageImports,
@@ -3726,7 +3742,9 @@ function collectStmtCheckedExceptions(
       className: classDecl.name,
       superClass: classDecl.superClass,
       fields: classDecl.fields,
-      inheritedFields: [],
+      fieldMap: new Map(classDecl.fields.map(f => [f.name, f])),
+      inheritedFields: [] as FieldDecl[],
+      inheritedFieldMap: new Map<string, FieldDecl>(),
       locals: Array.from(localTypes, ([name, type], idx) => ({ name, type, slot: idx })),
       importMap: classDecl.importMap,
       packageImports: classDecl.packageImports,
@@ -4009,7 +4027,9 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
         className: classDecl.name, superClass: classDecl.superClass, cp, method,
         locals: method.params.map((p, i) => ({ name: p.name, type: p.type, slot: i + initParamSlotBase })),
         nextSlot: method.params.length + initParamSlotBase,
-        fields: classDecl.fields, inheritedFields, allMethods,
+        fields: classDecl.fields, fieldMap: new Map(classDecl.fields.map(f => [f.name, f])),
+        inheritedFields, inheritedFieldMap: new Map(inheritedFields.map(f => [f.name, f])),
+        allMethods,
         importMap: classDecl.importMap,
         packageImports: classDecl.packageImports,
         staticWildcardImports: classDecl.staticWildcardImports,
@@ -4105,7 +4125,9 @@ export function generateClassFile(classDecl: ClassDecl, allClassDecls: ClassDecl
       locals: [],
       nextSlot: 0,
       fields: classDecl.fields,
+      fieldMap: new Map(classDecl.fields.map(f => [f.name, f])),
       inheritedFields,
+      inheritedFieldMap: new Map(inheritedFields.map(f => [f.name, f])),
       allMethods,
       importMap: classDecl.importMap,
       packageImports: classDecl.packageImports,
