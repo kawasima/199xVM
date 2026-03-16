@@ -3578,14 +3578,16 @@ function collectExprCheckedExceptions(
   localTypes: Map<string, Type>,
   ownerIsStatic: boolean,
 ): Set<string> {
+  const fieldMap = new Map(classDecl.fields.map(f => [f.name, f]));
+  const emptyInheritedFieldMap = new Map<string, FieldDecl>();
   const inferArgTypesForChecks = (args: Expr[]): Type[] => {
     const inferCtx = {
       className: classDecl.name,
       superClass: classDecl.superClass,
       fields: classDecl.fields,
-      fieldMap: new Map(classDecl.fields.map(f => [f.name, f])),
+      fieldMap,
       inheritedFields: [] as FieldDecl[],
-      inheritedFieldMap: new Map<string, FieldDecl>(),
+      inheritedFieldMap: emptyInheritedFieldMap,
       locals: Array.from(localTypes, ([name, type], idx) => ({ name, type, slot: idx })),
       importMap: classDecl.importMap,
       packageImports: classDecl.packageImports,
@@ -3737,14 +3739,16 @@ function collectStmtCheckedExceptions(
     if (!isCheckedExceptionType(classSupers, name)) return;
     out.add(name);
   };
+  const fieldMap = new Map(classDecl.fields.map(f => [f.name, f]));
+  const emptyInheritedFieldMap = new Map<string, FieldDecl>();
   const inferExprTypeForChecks = (expr: Expr): Type => {
     const inferCtx = {
       className: classDecl.name,
       superClass: classDecl.superClass,
       fields: classDecl.fields,
-      fieldMap: new Map(classDecl.fields.map(f => [f.name, f])),
+      fieldMap,
       inheritedFields: [] as FieldDecl[],
-      inheritedFieldMap: new Map<string, FieldDecl>(),
+      inheritedFieldMap: emptyInheritedFieldMap,
       locals: Array.from(localTypes, ([name, type], idx) => ({ name, type, slot: idx })),
       importMap: classDecl.importMap,
       packageImports: classDecl.packageImports,
