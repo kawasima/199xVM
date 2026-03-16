@@ -1644,21 +1644,14 @@ public class JvmInterfaceDefault implements Describable {
     }
 
     /** Load a JAR from a URL, register its methods, and append to classBundle. */
-    window.loadJar = async function(url) {
-      log("info", `Loading JAR: ${url} ...`);
-      const resp = await fetch(withVersion(url));
-      if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
-      const jarBytes = new Uint8Array(await resp.arrayBuffer());
+    /** Parse JAR bytes, register methods/interfaces, and append to classBundle. */
+    async function registerJarBytes(url, jarBytes) {
       const classFiles = await readJar(jarBytes);
       const jarBundle = classFilesToBundle(classFiles);
-
-      // Register methods and class→interfaces from the JAR classes
       const metas = parseBundleMeta(jarBundle);
       const reg = buildMethodRegistry(metas);
       setMethodRegistry(reg);
       setClassInterfaces(buildClassInterfaces(metas));
-
-      // Append to classBundle
       if (classBundle) {
         const combined = new Uint8Array(classBundle.length + jarBundle.length);
         combined.set(classBundle, 0);
@@ -1667,9 +1660,15 @@ public class JvmInterfaceDefault implements Describable {
       } else {
         classBundle = jarBundle;
       }
+      log("info", `JAR loaded: ${classFiles.size} classes, ${Object.keys(reg).length} methods from ${url}`);
+    }
 
-      const methodCount = Object.keys(reg).length;
-      log("info", `JAR loaded: ${classFiles.size} classes, ${methodCount} methods from ${url}`);
+    window.loadJar = async function(url) {
+      log("info", `Loading JAR: ${url} ...`);
+      const resp = await fetch(withVersion(url));
+      if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
+      const jarBytes = new Uint8Array(await resp.arrayBuffer());
+      await registerJarBytes(url, jarBytes);
     };
 
     async function loadBootstrapJars() {
@@ -1682,29 +1681,20 @@ public class JvmInterfaceDefault implements Describable {
       ];
       // Fetch all JARs in parallel
       log("info", `Fetching ${jarUrls.length} JARs in parallel...`);
-      const jarBytesArr = await Promise.all(jarUrls.map(async (url) => {
+      const results = await Promise.allSettled(jarUrls.map(async (url) => {
         const resp = await fetch(withVersion(url));
         if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
         return { url, bytes: new Uint8Array(await resp.arrayBuffer()) };
       }));
-      // Parse and register sequentially (registry is not thread-safe)
-      for (const { url, bytes } of jarBytesArr) {
-        log("info", `Parsing JAR: ${url} ...`);
-        const classFiles = await readJar(bytes);
-        const jarBundle = classFilesToBundle(classFiles);
-        const metas = parseBundleMeta(jarBundle);
-        const reg = buildMethodRegistry(metas);
-        setMethodRegistry(reg);
-        setClassInterfaces(buildClassInterfaces(metas));
-        if (classBundle) {
-          const combined = new Uint8Array(classBundle.length + jarBundle.length);
-          combined.set(classBundle, 0);
-          combined.set(jarBundle, classBundle.length);
-          classBundle = combined;
-        } else {
-          classBundle = jarBundle;
+      // Parse and register sequentially (order-dependent: classBundle is appended to)
+      for (const result of results) {
+        if (result.status === "rejected") {
+          log("error", `JAR fetch failed: ${result.reason}`);
+          continue;
         }
-        log("info", `JAR loaded: ${classFiles.size} classes, ${Object.keys(reg).length} methods from ${url}`);
+        const { url, bytes } = result.value;
+        log("info", `Parsing JAR: ${url} ...`);
+        await registerJarBytes(url, bytes);
       }
     };
 
