@@ -120,6 +120,7 @@ export function lookupKnownMethod(owner: string, method: string, argDescs: strin
       const aRef = a.startsWith("L") || a.startsWith("[");
       const bRef = b.startsWith("L") || b.startsWith("[");
       if (aRef && bRef) return true;
+      // Autoboxing: primitive actual → reference param (e.g. int → Object)
       if (aRef && !bRef) return true;
       return false;
     });
