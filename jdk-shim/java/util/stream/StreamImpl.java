@@ -42,19 +42,36 @@ import java.util.function.ToLongFunction;
 import java.util.function.ToDoubleFunction;
 
 public class StreamImpl<T> implements Stream<T> {
-    private final List<T> elements;
+    private List<T> elements;
+    private final Spliterator<T> lazySpliterator;
     private boolean parallel;
     private List<Runnable> closeHandlers;
 
     public StreamImpl(List<T> elements) {
         this.elements = elements;
+        this.lazySpliterator = null;
+    }
+
+    /** Lazy constructor: spliterator is not traversed until a terminal operation. */
+    public StreamImpl(Spliterator<T> spliterator, boolean parallel) {
+        this.elements = null;
+        this.lazySpliterator = spliterator;
+        this.parallel = parallel;
+    }
+
+    private List<T> materialize() {
+        if (elements != null) return elements;
+        List<T> list = new ArrayList<>();
+        lazySpliterator.forEachRemaining(list::add);
+        elements = list;
+        return list;
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public <R> Stream<R> map(Function<? super T, ? extends R> mapper) {
         List<R> result = new ArrayList<>();
-        for (T e : elements) {
+        for (T e : materialize()) {
             result.add(mapper.apply(e));
         }
         return new StreamImpl<>(result);
@@ -64,7 +81,7 @@ public class StreamImpl<T> implements Stream<T> {
     @SuppressWarnings("unchecked")
     public <R> Stream<R> flatMap(Function<? super T, ? extends Stream<? extends R>> mapper) {
         List<R> result = new ArrayList<>();
-        for (T e : elements) {
+        for (T e : materialize()) {
             Stream<? extends R> s = mapper.apply(e);
             if (s != null) {
                 try {
@@ -79,27 +96,30 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public IntStream mapToInt(ToIntFunction<? super T> mapper) {
-        int[] result = new int[elements.size()];
-        for (int i = 0; i < elements.size(); i++) {
-            result[i] = mapper.applyAsInt(elements.get(i));
+        List<T> elems = materialize();
+        int[] result = new int[elems.size()];
+        for (int i = 0; i < elems.size(); i++) {
+            result[i] = mapper.applyAsInt(elems.get(i));
         }
         return new IntStreamImpl(result);
     }
 
     @Override
     public LongStream mapToLong(ToLongFunction<? super T> mapper) {
-        long[] result = new long[elements.size()];
-        for (int i = 0; i < elements.size(); i++) {
-            result[i] = mapper.applyAsLong(elements.get(i));
+        List<T> elems = materialize();
+        long[] result = new long[elems.size()];
+        for (int i = 0; i < elems.size(); i++) {
+            result[i] = mapper.applyAsLong(elems.get(i));
         }
         return new LongStreamImpl(result);
     }
 
     @Override
     public DoubleStream mapToDouble(ToDoubleFunction<? super T> mapper) {
-        double[] result = new double[elements.size()];
-        for (int i = 0; i < elements.size(); i++) {
-            result[i] = mapper.applyAsDouble(elements.get(i));
+        List<T> elems = materialize();
+        double[] result = new double[elems.size()];
+        for (int i = 0; i < elems.size(); i++) {
+            result[i] = mapper.applyAsDouble(elems.get(i));
         }
         return new DoubleStreamImpl(result);
     }
@@ -108,7 +128,7 @@ public class StreamImpl<T> implements Stream<T> {
     public IntStream flatMapToInt(Function<? super T, ? extends IntStream> mapper) {
         int[] buf = new int[16];
         int size = 0;
-        for (T e : elements) {
+        for (T e : materialize()) {
             IntStream s = mapper.apply(e);
             if (s != null) {
                 try {
@@ -130,7 +150,7 @@ public class StreamImpl<T> implements Stream<T> {
     public LongStream flatMapToLong(Function<? super T, ? extends LongStream> mapper) {
         long[] buf = new long[16];
         int size = 0;
-        for (T e : elements) {
+        for (T e : materialize()) {
             LongStream s = mapper.apply(e);
             if (s != null) {
                 try {
@@ -152,7 +172,7 @@ public class StreamImpl<T> implements Stream<T> {
     public DoubleStream flatMapToDouble(Function<? super T, ? extends DoubleStream> mapper) {
         double[] buf = new double[16];
         int size = 0;
-        for (T e : elements) {
+        for (T e : materialize()) {
             DoubleStream s = mapper.apply(e);
             if (s != null) {
                 try {
@@ -173,7 +193,7 @@ public class StreamImpl<T> implements Stream<T> {
     @Override
     public Stream<T> filter(Predicate<? super T> predicate) {
         List<T> result = new ArrayList<>();
-        for (T e : elements) {
+        for (T e : materialize()) {
             if (predicate.test(e)) result.add(e);
         }
         return new StreamImpl<>(result);
@@ -182,7 +202,7 @@ public class StreamImpl<T> implements Stream<T> {
     @Override
     public Stream<T> distinct() {
         java.util.LinkedHashSet<T> seen = new java.util.LinkedHashSet<>();
-        for (T e : elements) {
+        for (T e : materialize()) {
             seen.add(e);
         }
         return new StreamImpl<>(new ArrayList<>(seen));
@@ -191,14 +211,14 @@ public class StreamImpl<T> implements Stream<T> {
     @Override
     @SuppressWarnings("unchecked")
     public Stream<T> sorted() {
-        List<T> result = new ArrayList<>(elements);
+        List<T> result = new ArrayList<>(materialize());
         Collections.sort((List<Comparable>) result);
         return new StreamImpl<>(result);
     }
 
     @Override
     public Stream<T> sorted(Comparator<? super T> comparator) {
-        List<T> result = new ArrayList<>(elements);
+        List<T> result = new ArrayList<>(materialize());
         result.sort(comparator);
         return new StreamImpl<>(result);
     }
@@ -206,7 +226,7 @@ public class StreamImpl<T> implements Stream<T> {
     @Override
     public Stream<T> peek(Consumer<? super T> action) {
         List<T> result = new ArrayList<>();
-        for (T e : elements) {
+        for (T e : materialize()) {
             action.accept(e);
             result.add(e);
         }
@@ -218,7 +238,7 @@ public class StreamImpl<T> implements Stream<T> {
         if (maxSize < 0) throw new IllegalArgumentException(Long.toString(maxSize));
         List<T> result = new ArrayList<>();
         long count = 0;
-        for (T e : elements) {
+        for (T e : materialize()) {
             if (count >= maxSize) break;
             result.add(e);
             count++;
@@ -231,7 +251,7 @@ public class StreamImpl<T> implements Stream<T> {
         if (n < 0) throw new IllegalArgumentException(Long.toString(n));
         List<T> result = new ArrayList<>();
         long count = 0;
-        for (T e : elements) {
+        for (T e : materialize()) {
             if (count >= n) result.add(e);
             count++;
         }
@@ -240,7 +260,7 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public void forEach(Consumer<? super T> action) {
-        for (T e : elements) {
+        for (T e : materialize()) {
             action.accept(e);
         }
     }
@@ -252,15 +272,16 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public Object[] toArray() {
-        return elements.toArray();
+        return materialize().toArray();
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public <A> A[] toArray(IntFunction<A[]> generator) {
-        A[] arr = generator.apply(elements.size());
-        for (int i = 0; i < elements.size(); i++) {
-            arr[i] = (A) elements.get(i);
+        List<T> elems = materialize();
+        A[] arr = generator.apply(elems.size());
+        for (int i = 0; i < elems.size(); i++) {
+            arr[i] = (A) elems.get(i);
         }
         return arr;
     }
@@ -268,7 +289,7 @@ public class StreamImpl<T> implements Stream<T> {
     @Override
     public T reduce(T identity, BinaryOperator<T> accumulator) {
         T result = identity;
-        for (T e : elements) {
+        for (T e : materialize()) {
             result = accumulator.apply(result, e);
         }
         return result;
@@ -276,10 +297,11 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public Optional<T> reduce(BinaryOperator<T> accumulator) {
-        if (elements.isEmpty()) return Optional.empty();
-        T result = elements.get(0);
-        for (int i = 1; i < elements.size(); i++) {
-            result = accumulator.apply(result, elements.get(i));
+        if (materialize().isEmpty()) return Optional.empty();
+        List<T> elems = materialize();
+        T result = elems.get(0);
+        for (int i = 1; i < elems.size(); i++) {
+            result = accumulator.apply(result, elems.get(i));
         }
         return Optional.of(result);
     }
@@ -289,7 +311,7 @@ public class StreamImpl<T> implements Stream<T> {
                         java.util.function.BiFunction<U, ? super T, U> accumulator,
                         BinaryOperator<U> combiner) {
         U result = identity;
-        for (T e : elements) {
+        for (T e : materialize()) {
             result = accumulator.apply(result, e);
         }
         return result;
@@ -300,7 +322,7 @@ public class StreamImpl<T> implements Stream<T> {
                          java.util.function.BiConsumer<R, ? super T> accumulator,
                          java.util.function.BiConsumer<R, R> combiner) {
         R result = supplier.get();
-        for (T e : elements) {
+        for (T e : materialize()) {
             accumulator.accept(result, e);
         }
         return result;
@@ -310,7 +332,7 @@ public class StreamImpl<T> implements Stream<T> {
     public <R, A> R collect(Collector<? super T, A, R> collector) {
         A container = collector.supplier().get();
         java.util.function.BiConsumer<A, ? super T> acc = collector.accumulator();
-        for (T e : elements) {
+        for (T e : materialize()) {
             acc.accept(container, e);
         }
         return collector.finisher().apply(container);
@@ -318,7 +340,7 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public Optional<T> min(Comparator<? super T> comparator) {
-        if (elements.isEmpty()) return Optional.empty();
+        if (materialize().isEmpty()) return Optional.empty();
         T min = elements.get(0);
         for (int i = 1; i < elements.size(); i++) {
             if (comparator.compare(elements.get(i), min) < 0) {
@@ -330,7 +352,7 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public Optional<T> max(Comparator<? super T> comparator) {
-        if (elements.isEmpty()) return Optional.empty();
+        if (materialize().isEmpty()) return Optional.empty();
         T max = elements.get(0);
         for (int i = 1; i < elements.size(); i++) {
             if (comparator.compare(elements.get(i), max) > 0) {
@@ -342,12 +364,12 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public long count() {
-        return elements.size();
+        return materialize().size();
     }
 
     @Override
     public boolean anyMatch(Predicate<? super T> predicate) {
-        for (T e : elements) {
+        for (T e : materialize()) {
             if (predicate.test(e)) return true;
         }
         return false;
@@ -355,7 +377,7 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public boolean allMatch(Predicate<? super T> predicate) {
-        for (T e : elements) {
+        for (T e : materialize()) {
             if (!predicate.test(e)) return false;
         }
         return true;
@@ -363,7 +385,7 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public boolean noneMatch(Predicate<? super T> predicate) {
-        for (T e : elements) {
+        for (T e : materialize()) {
             if (predicate.test(e)) return false;
         }
         return true;
@@ -371,30 +393,31 @@ public class StreamImpl<T> implements Stream<T> {
 
     @Override
     public Optional<T> findFirst() {
-        if (elements.isEmpty()) {
+        if (materialize().isEmpty()) {
             return Optional.empty();
         }
-        return Optional.of(elements.get(0));
+        return Optional.of(materialize().get(0));
     }
 
     @Override
     public Optional<T> findAny() {
-        if (elements.isEmpty()) {
+        if (materialize().isEmpty()) {
             return Optional.empty();
         }
-        return Optional.of(elements.get(0));
+        return Optional.of(materialize().get(0));
     }
 
     // BaseStream methods
 
     @Override
     public Iterator<T> iterator() {
-        return elements.iterator();
+        return materialize().iterator();
     }
 
     @Override
     public Spliterator<T> spliterator() {
-        return elements.spliterator();
+        if (lazySpliterator != null) return lazySpliterator;
+        return materialize().spliterator();
     }
 
     @Override

@@ -44,23 +44,41 @@ import java.util.function.ObjDoubleConsumer;
 import java.util.function.Supplier;
 
 public class DoubleStreamImpl implements DoubleStream {
-    private final double[] elements;
+    private double[] elements;
+    private final Spliterator.OfDouble lazySpliterator;
     private boolean parallel;
     private List<Runnable> closeHandlers;
 
     public DoubleStreamImpl(double[] elements) {
         this.elements = elements;
+        this.lazySpliterator = null;
+    }
+
+    public DoubleStreamImpl(Spliterator.OfDouble spliterator, boolean parallel) {
+        this.elements = null;
+        this.lazySpliterator = spliterator;
+        this.parallel = parallel;
+    }
+
+    private double[] materialize() {
+        if (elements != null) return elements;
+        List<Double> list = new ArrayList<>();
+        lazySpliterator.forEachRemaining((java.util.function.DoubleConsumer) (double v) -> list.add(v));
+        double[] arr = new double[list.size()];
+        for (int i = 0; i < arr.length; i++) arr[i] = list.get(i);
+        elements = arr;
+        return arr;
     }
 
     @Override
     public DoubleStream filter(DoublePredicate predicate) {
         int count = 0;
-        for (double e : elements) {
+        for (double e : materialize()) {
             if (predicate.test(e)) count++;
         }
         double[] result = new double[count];
         int idx = 0;
-        for (double e : elements) {
+        for (double e : materialize()) {
             if (predicate.test(e)) result[idx++] = e;
         }
         return new DoubleStreamImpl(result);
@@ -68,9 +86,9 @@ public class DoubleStreamImpl implements DoubleStream {
 
     @Override
     public DoubleStream map(DoubleUnaryOperator mapper) {
-        double[] result = new double[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = mapper.applyAsDouble(elements[i]);
+        double[] result = new double[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = mapper.applyAsDouble(materialize()[i]);
         }
         return new DoubleStreamImpl(result);
     }
@@ -78,7 +96,7 @@ public class DoubleStreamImpl implements DoubleStream {
     @Override
     public <U> Stream<U> mapToObj(DoubleFunction<? extends U> mapper) {
         List<U> result = new ArrayList<>();
-        for (double e : elements) {
+        for (double e : materialize()) {
             result.add(mapper.apply(e));
         }
         return new StreamImpl<>(result);
@@ -86,27 +104,27 @@ public class DoubleStreamImpl implements DoubleStream {
 
     @Override
     public IntStream mapToInt(DoubleToIntFunction mapper) {
-        int[] result = new int[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = mapper.applyAsInt(elements[i]);
+        int[] result = new int[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = mapper.applyAsInt(materialize()[i]);
         }
         return new IntStreamImpl(result);
     }
 
     @Override
     public LongStream mapToLong(DoubleToLongFunction mapper) {
-        long[] result = new long[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            result[i] = mapper.applyAsLong(elements[i]);
+        long[] result = new long[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            result[i] = mapper.applyAsLong(materialize()[i]);
         }
         return new LongStreamImpl(result);
     }
 
     @Override
     public DoubleStream flatMap(DoubleFunction<? extends DoubleStream> mapper) {
-        double[] buf = new double[elements.length * 4];
+        double[] buf = new double[materialize().length * 4];
         int size = 0;
-        for (double e : elements) {
+        for (double e : materialize()) {
             DoubleStream s = mapper.apply(e);
             if (s != null) {
                 try {
@@ -127,7 +145,7 @@ public class DoubleStreamImpl implements DoubleStream {
     @Override
     public DoubleStream distinct() {
         java.util.LinkedHashSet<Double> seen = new java.util.LinkedHashSet<>();
-        for (double e : elements) {
+        for (double e : materialize()) {
             seen.add(e);
         }
         double[] result = new double[seen.size()];
@@ -140,17 +158,17 @@ public class DoubleStreamImpl implements DoubleStream {
 
     @Override
     public DoubleStream sorted() {
-        double[] result = Arrays.copyOf(elements, elements.length);
+        double[] result = Arrays.copyOf(materialize(), materialize().length);
         Arrays.sort(result);
         return new DoubleStreamImpl(result);
     }
 
     @Override
     public DoubleStream peek(DoubleConsumer action) {
-        double[] result = new double[elements.length];
-        for (int i = 0; i < elements.length; i++) {
-            action.accept(elements[i]);
-            result[i] = elements[i];
+        double[] result = new double[materialize().length];
+        for (int i = 0; i < materialize().length; i++) {
+            action.accept(materialize()[i]);
+            result[i] = materialize()[i];
         }
         return new DoubleStreamImpl(result);
     }
@@ -158,20 +176,20 @@ public class DoubleStreamImpl implements DoubleStream {
     @Override
     public DoubleStream limit(long maxSize) {
         if (maxSize < 0) throw new IllegalArgumentException(Long.toString(maxSize));
-        int len = (int) Math.min(elements.length, maxSize);
-        return new DoubleStreamImpl(Arrays.copyOf(elements, len));
+        int len = (int) Math.min(materialize().length, maxSize);
+        return new DoubleStreamImpl(Arrays.copyOf(materialize(), len));
     }
 
     @Override
     public DoubleStream skip(long n) {
         if (n < 0) throw new IllegalArgumentException(Long.toString(n));
-        int skip = (int) Math.min(elements.length, n);
-        return new DoubleStreamImpl(Arrays.copyOfRange(elements, skip, elements.length));
+        int skip = (int) Math.min(materialize().length, n);
+        return new DoubleStreamImpl(Arrays.copyOfRange(materialize(), skip, materialize().length));
     }
 
     @Override
     public void forEach(DoubleConsumer action) {
-        for (double e : elements) {
+        for (double e : materialize()) {
             action.accept(e);
         }
     }
@@ -183,13 +201,13 @@ public class DoubleStreamImpl implements DoubleStream {
 
     @Override
     public double[] toArray() {
-        return Arrays.copyOf(elements, elements.length);
+        return Arrays.copyOf(materialize(), materialize().length);
     }
 
     @Override
     public double reduce(double identity, DoubleBinaryOperator op) {
         double result = identity;
-        for (double e : elements) {
+        for (double e : materialize()) {
             result = op.applyAsDouble(result, e);
         }
         return result;
@@ -197,10 +215,10 @@ public class DoubleStreamImpl implements DoubleStream {
 
     @Override
     public OptionalDouble reduce(DoubleBinaryOperator op) {
-        if (elements.length == 0) return OptionalDouble.empty();
-        double result = elements[0];
-        for (int i = 1; i < elements.length; i++) {
-            result = op.applyAsDouble(result, elements[i]);
+        if (materialize().length == 0) return OptionalDouble.empty();
+        double result = materialize()[0];
+        for (int i = 1; i < materialize().length; i++) {
+            result = op.applyAsDouble(result, materialize()[i]);
         }
         return OptionalDouble.of(result);
     }
@@ -210,7 +228,7 @@ public class DoubleStreamImpl implements DoubleStream {
                          ObjDoubleConsumer<R> accumulator,
                          BiConsumer<R, R> combiner) {
         R result = supplier.get();
-        for (double e : elements) {
+        for (double e : materialize()) {
             accumulator.accept(result, e);
         }
         return result;
@@ -219,7 +237,7 @@ public class DoubleStreamImpl implements DoubleStream {
     @Override
     public double sum() {
         double sum = 0;
-        for (double e : elements) {
+        for (double e : materialize()) {
             sum += e;
         }
         return sum;
@@ -227,37 +245,37 @@ public class DoubleStreamImpl implements DoubleStream {
 
     @Override
     public OptionalDouble min() {
-        if (elements.length == 0) return OptionalDouble.empty();
-        double min = elements[0];
-        for (int i = 1; i < elements.length; i++) {
-            if (Double.compare(elements[i], min) < 0) min = elements[i];
+        if (materialize().length == 0) return OptionalDouble.empty();
+        double min = materialize()[0];
+        for (int i = 1; i < materialize().length; i++) {
+            if (Double.compare(materialize()[i], min) < 0) min = materialize()[i];
         }
         return OptionalDouble.of(min);
     }
 
     @Override
     public OptionalDouble max() {
-        if (elements.length == 0) return OptionalDouble.empty();
-        double max = elements[0];
-        for (int i = 1; i < elements.length; i++) {
-            if (Double.compare(elements[i], max) > 0) max = elements[i];
+        if (materialize().length == 0) return OptionalDouble.empty();
+        double max = materialize()[0];
+        for (int i = 1; i < materialize().length; i++) {
+            if (Double.compare(materialize()[i], max) > 0) max = materialize()[i];
         }
         return OptionalDouble.of(max);
     }
 
     @Override
     public long count() {
-        return elements.length;
+        return materialize().length;
     }
 
     @Override
     public OptionalDouble average() {
-        if (elements.length == 0) return OptionalDouble.empty();
+        if (materialize().length == 0) return OptionalDouble.empty();
         double sum = 0;
-        for (double e : elements) {
+        for (double e : materialize()) {
             sum += e;
         }
-        return OptionalDouble.of(sum / elements.length);
+        return OptionalDouble.of(sum / materialize().length);
     }
 
     @Override
@@ -267,7 +285,7 @@ public class DoubleStreamImpl implements DoubleStream {
 
     @Override
     public boolean anyMatch(DoublePredicate predicate) {
-        for (double e : elements) {
+        for (double e : materialize()) {
             if (predicate.test(e)) return true;
         }
         return false;
@@ -275,7 +293,7 @@ public class DoubleStreamImpl implements DoubleStream {
 
     @Override
     public boolean allMatch(DoublePredicate predicate) {
-        for (double e : elements) {
+        for (double e : materialize()) {
             if (!predicate.test(e)) return false;
         }
         return true;
@@ -283,7 +301,7 @@ public class DoubleStreamImpl implements DoubleStream {
 
     @Override
     public boolean noneMatch(DoublePredicate predicate) {
-        for (double e : elements) {
+        for (double e : materialize()) {
             if (predicate.test(e)) return false;
         }
         return true;
@@ -291,20 +309,20 @@ public class DoubleStreamImpl implements DoubleStream {
 
     @Override
     public OptionalDouble findFirst() {
-        if (elements.length == 0) return OptionalDouble.empty();
-        return OptionalDouble.of(elements[0]);
+        if (materialize().length == 0) return OptionalDouble.empty();
+        return OptionalDouble.of(materialize()[0]);
     }
 
     @Override
     public OptionalDouble findAny() {
-        if (elements.length == 0) return OptionalDouble.empty();
-        return OptionalDouble.of(elements[0]);
+        if (materialize().length == 0) return OptionalDouble.empty();
+        return OptionalDouble.of(materialize()[0]);
     }
 
     @Override
     public Stream<Double> boxed() {
         List<Double> result = new ArrayList<>();
-        for (double e : elements) {
+        for (double e : materialize()) {
             result.add(e);
         }
         return new StreamImpl<>(result);
@@ -319,20 +337,20 @@ public class DoubleStreamImpl implements DoubleStream {
 
             @Override
             public boolean hasNext() {
-                return index < elements.length;
+                return index < materialize().length;
             }
 
             @Override
             public double nextDouble() {
                 if (!hasNext()) throw new NoSuchElementException();
-                return elements[index++];
+                return materialize()[index++];
             }
         };
     }
 
     @Override
     public Spliterator.OfDouble spliterator() {
-        return Spliterators.spliterator(elements, 0, elements.length,
+        return Spliterators.spliterator(materialize(), 0, materialize().length,
                 Spliterator.ORDERED | Spliterator.SIZED | Spliterator.SUBSIZED);
     }
 
