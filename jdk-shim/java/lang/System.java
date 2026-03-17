@@ -25,16 +25,77 @@
 
 package java.lang;
 
+import java.io.InputStream;
 import java.io.PrintStream;
+import java.util.Properties;
 
 public final class System {
     // These are resolved natively by the VM (resolve_static_field).
     public static PrintStream out;
     public static PrintStream err;
+    public static InputStream in;
+
+    private static Properties props;
 
     private System() {}
 
     public static native void arraycopy(Object src, int srcPos, Object dest, int destPos, int length);
     public static native long currentTimeMillis();
+    public static native long nanoTime();
     public static native int identityHashCode(Object x);
+
+    public static Properties getProperties() {
+        if (props == null) {
+            props = new Properties();
+            initProperties(props);
+        }
+        return props;
+    }
+
+    public static String getProperty(String key) {
+        return getProperties().getProperty(key);
+    }
+
+    public static String getProperty(String key, String def) {
+        return getProperties().getProperty(key, def);
+    }
+
+    public static String setProperty(String key, String value) {
+        return (String) getProperties().setProperty(key, value);
+    }
+
+    public static String clearProperty(String key) {
+        return (String) getProperties().remove(key);
+    }
+
+    public static void setProperties(Properties p) {
+        if (p == null) {
+            props = new Properties();
+            initProperties(props);
+        } else {
+            props = p;
+        }
+    }
+
+    private static native void initProperties(Properties props);
+
+    public static String lineSeparator() {
+        return "\n";
+    }
+
+    public static void exit(int status) {
+        throw new RuntimeException("System.exit(" + status + ")");
+    }
+
+    public static void gc() {
+        // no-op
+    }
+
+    public static SecurityManager getSecurityManager() {
+        return null;
+    }
+
+    public static String getenv(String name) {
+        return null;
+    }
 }

@@ -92,4 +92,37 @@ public final class Double extends Number implements Comparable<Double> {
     public static native long doubleToLongBits(double value);
     public static long doubleToRawLongBits(double value) { return doubleToLongBits(value); }
     public static native double longBitsToDouble(long bits);
+
+    public static String toHexString(double d) {
+        if (isNaN(d)) return "NaN";
+        if (isInfinite(d)) return d > 0 ? "Infinity" : "-Infinity";
+        if (d == 0.0) return (doubleToLongBits(d) < 0) ? "-0x0.0p0" : "0x0.0p0";
+
+        boolean negative = d < 0;
+        long bits = doubleToLongBits(Math.abs(d));
+        int exp = (int)((bits >> 52) & 0x7FFL) - 1023;
+        long mantissa = bits & 0x000FFFFFFFFFFFFFL;
+
+        StringBuilder sb = new StringBuilder();
+        if (negative) sb.append('-');
+        sb.append("0x");
+
+        if (exp == -1023) {
+            sb.append("0.");
+            exp = -1022;
+        } else {
+            sb.append("1.");
+        }
+
+        String hex = Long.toHexString(mantissa);
+        while (hex.length() < 13) hex = "0" + hex;
+        int end = hex.length();
+        while (end > 1 && hex.charAt(end - 1) == '0') end--;
+        sb.append(hex, 0, end);
+        sb.append('p');
+        sb.append(exp);
+        return sb.toString();
+    }
+
+    public static final double MIN_NORMAL = 0x1.0p-1022;
 }
