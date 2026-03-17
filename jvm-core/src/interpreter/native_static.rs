@@ -240,9 +240,54 @@ impl super::Vm {
                 }
                 Some(JValue::Ref(Some(self.class_object(internal))))
             }
+            ("java/lang/Class", "forName1", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;") => {
+                let runtime_name = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))?;
+                let initialize = _args.get(1).map(|v| v.as_int() != 0).unwrap_or(true);
+                if std::env::var("VM_DEBUG").is_ok() {
+                    eprintln!("[forName1] name={runtime_name:?} init={initialize}");
+                }
+                let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
+                self.ensure_class_ready(&internal);
+                match self.classes.get(&internal) {
+                    Some(super::LazyClass::Ready(_)) => {}
+                    Some(super::LazyClass::ParseError(msg)) => {
+                        let msg = msg.clone();
+                        self.throw_class_format_error(&msg);
+                        return Some(JValue::Void);
+                    }
+                    _ => {
+                        return Some(JValue::Ref(None)); // not found — caller checks null
+                    }
+                }
+                if initialize {
+                    if self.ensure_class_init(&internal).is_err() {
+                        return Some(JValue::Void);
+                    }
+                }
+                Some(JValue::Ref(Some(self.class_object(internal))))
+            }
             ("java/lang/ClassLoader", "getSystemClassLoader", "()Ljava/lang/ClassLoader;") => {
                 let cl = self.get_or_create_system_classloader();
                 Some(JValue::Ref(Some(cl)))
+            }
+            ("java/lang/Double", "doubleToLongBits", "(D)J") | ("java/lang/Double", "doubleToRawLongBits", "(D)J") => {
+                let d = _args.first().map(|v| v.as_double()).unwrap_or(0.0);
+                Some(JValue::Long(d.to_bits() as i64))
+            }
+            ("java/lang/Double", "longBitsToDouble", "(J)D") => {
+                let l = _args.first().map(|v| v.as_long()).unwrap_or(0);
+                Some(JValue::Double(f64::from_bits(l as u64)))
+            }
+            ("java/lang/Float", "floatToRawIntBits", "(F)I") | ("java/lang/Float", "floatToIntBits", "(F)I") => {
+                let f = _args.first().map(|v| v.as_float()).unwrap_or(0.0);
+                Some(JValue::Int(f.to_bits() as i32))
+            }
+            ("java/lang/Float", "intBitsToFloat", "(I)F") => {
+                let i = _args.first().map(|v| v.as_int()).unwrap_or(0);
+                Some(JValue::Float(f32::from_bits(i as u32)))
             }
             ("java/lang/System", "currentTimeMillis", "()J") => {
                 #[cfg(target_arch = "wasm32")]
