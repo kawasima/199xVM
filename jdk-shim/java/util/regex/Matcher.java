@@ -113,7 +113,9 @@ public final class Matcher {
     }
 
     public int groupCount() {
-        // 199xVM: simplified — count '(' in pattern excluding escaped and character classes
+        // 199xVM: count capturing groups only.
+        // Skip non-capturing (?:...), lookahead (?=, (?!, (?<=, (?<!),
+        // and flags (?i...) etc.  Named groups (?<name>...) DO capture.
         String p = pattern.pattern();
         int count = 0;
         boolean escaped = false;
@@ -124,7 +126,20 @@ public final class Matcher {
             if (c == '\\') { escaped = true; continue; }
             if (c == '[') { inClass = true; continue; }
             if (c == ']') { inClass = false; continue; }
-            if (c == '(' && !inClass) count++;
+            if (c == '(' && !inClass) {
+                // Check if this is a non-capturing construct (?...)
+                if (i + 1 < p.length() && p.charAt(i + 1) == '?') {
+                    // (?<name>...) is a named capturing group — count it
+                    if (i + 2 < p.length() && p.charAt(i + 2) == '<'
+                            && i + 3 < p.length() && p.charAt(i + 3) != '='
+                            && p.charAt(i + 3) != '!') {
+                        count++;
+                    }
+                    // all other (? constructs are non-capturing — skip
+                } else {
+                    count++;
+                }
+            }
         }
         return count;
     }
