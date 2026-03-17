@@ -611,3 +611,48 @@ fn jar_to_bundle_roundtrip() {
     );
     assert_eq!(result, "jar-ok");
 }
+
+// ---------------------------------------------------------------------------
+// Clojure smoke: AOT-compiled ClojureSmokeEntry.run() → "ok"
+// Requires: ./build-clj-smoke.sh (builds clj-smoke/smoke.jar)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clojure_smoke() {
+    let smoke_jar = std::path::Path::new("../clj-smoke/smoke.jar");
+    let jars_list = std::path::Path::new("../clj-smoke/clojure-jars.txt");
+    if !smoke_jar.exists() || !jars_list.exists() {
+        eprintln!("Skipping clojure_smoke: run ./build-clj-smoke.sh first");
+        return;
+    }
+
+    let mut vm = jvm_core::interpreter::Vm::new();
+    jvm_core::load_bundle(&mut vm, shim_bundle());
+
+    // Load smoke JAR
+    let smoke_data = std::fs::read(smoke_jar).expect("read smoke.jar");
+    vm.load_jar(&smoke_data).expect("load smoke.jar");
+
+    // Load Clojure runtime JARs
+    let jar_paths = std::fs::read_to_string(jars_list).expect("read jars list");
+    for line in jar_paths.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        let data = std::fs::read(line).unwrap_or_else(|e| panic!("read {line}: {e}"));
+        vm.load_jar(&data).unwrap_or_else(|e| panic!("load {line}: {e}"));
+    }
+
+    // Run ClojureSmokeEntry.run() → "ok"
+    let result = vm.invoke_static_threaded(
+        "ClojureSmokeEntry", "run", "()Ljava/lang/String;", vec![],
+    );
+    vm.flush_printstreams();
+    match result {
+        Ok(jvm_core::heap::JValue::Ref(Some(r))) => {
+            let s = r.borrow().as_java_string().unwrap_or_default().to_owned();
+            assert_eq!(s, "ok", "ClojureSmokeEntry.run() returned {s:?}");
+        }
+        Ok(other) => panic!("unexpected return: {other:?}"),
+        Err(e) => panic!("Clojure smoke failed: {e}"),
+    }
+}
