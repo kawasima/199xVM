@@ -208,10 +208,17 @@ impl super::Vm {
                 Some(JValue::Ref(Some(self.class_object(name))))
             }
             ("java/lang/Class", "forName0", "(Ljava/lang/String;)Ljava/lang/Class;") => {
-                let runtime_name = _args
+                let runtime_name = match _args
                     .first()
                     .and_then(|v| v.as_ref())
-                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))?;
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                {
+                    Some(n) => n,
+                    None => {
+                        self.throw_null_pointer("Class.forName: className is null");
+                        return Some(JValue::Void);
+                    }
+                };
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
                 // Primitive class names are VM-defined synthetic Class objects.
                 if matches!(
@@ -241,10 +248,17 @@ impl super::Vm {
                 Some(JValue::Ref(Some(self.class_object(internal))))
             }
             ("java/lang/Class", "forName1", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;") => {
-                let runtime_name = _args
+                let runtime_name = match _args
                     .first()
                     .and_then(|v| v.as_ref())
-                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))?;
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                {
+                    Some(n) => n,
+                    None => {
+                        self.throw_null_pointer("Class.forName: className is null");
+                        return Some(JValue::Void);
+                    }
+                };
                 let initialize = _args.get(1).map(|v| v.as_int() != 0).unwrap_or(true);
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
                 self.ensure_class_ready(&internal);

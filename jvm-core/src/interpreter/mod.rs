@@ -765,7 +765,7 @@ impl Vm {
         if let Some(ref cl) = self.system_classloader {
             return Rc::clone(cl);
         }
-        let cl = JObject::new("java/net/URLClassLoader");
+        let cl = JObject::new("java/lang/ClassLoader");
         self.system_classloader = Some(Rc::clone(&cl));
         cl
     }
