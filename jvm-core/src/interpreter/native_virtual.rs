@@ -437,20 +437,84 @@ impl super::Vm {
             ("java/util/regex/Matcher", "matches") => {
                 let (regex, input) = {
                     let mb = this.borrow();
-                    let regex = mb.fields.get("__pattern")
+                    // Try bytecode field names first, then native field names
+                    let pattern_ref = mb.fields.get("pattern")
+                        .or_else(|| mb.fields.get("__pattern"));
+                    let regex = pattern_ref
                         .and_then(|v| v.as_ref())
-                        .and_then(|p| p.borrow().fields.get("__regex").cloned())
-                        .and_then(|v| v.as_ref().cloned())
-                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .and_then(|p| {
+                            let pb = p.borrow();
+                            // Try bytecode field name "regex" first, then native "__regex"
+                            pb.fields.get("regex")
+                                .or_else(|| pb.fields.get("__regex"))
+                                .and_then(|v| v.as_ref().cloned())
+                                .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        })
                         .unwrap_or_default();
-                    let input = mb.fields.get("__input")
+                    let input = mb.fields.get("input")
+                        .or_else(|| mb.fields.get("__input"))
                         .and_then(|v| v.as_ref())
                         .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
                         .unwrap_or_default();
                     (regex, input)
                 };
-                let ok = super::native_static::regex_full_match(&regex, &input);
+                // Use captures to extract groups
+                if std::env::var("VM_DEBUG").is_ok() {
+                    eprintln!("[matches] regex={regex:?} input={input:?}");
+                }
+                let anchored = format!("^(?:{regex})$");
+                let re = regex::Regex::new(&anchored).ok();
+                let caps = re.as_ref().and_then(|r| r.captures(&input));
+                let ok = caps.is_some();
+                // Store captured groups in __groups array field + matchStart/matchEnd
+                if let Some(caps) = &caps {
+                    let mut groups = Vec::new();
+                    for i in 0..caps.len() {
+                        if let Some(m) = caps.get(i) {
+                            groups.push(JValue::Ref(Some(self.intern_string(m.as_str()))));
+                        } else {
+                            groups.push(JValue::Ref(None));
+                        }
+                    }
+                    let groups_arr = JObject::new_array("[Ljava/lang/String;", groups);
+                    let (ms, me) = caps.get(0).map(|m| (m.start() as i32, m.end() as i32)).unwrap_or((-1, -1));
+                    this.borrow_mut().fields.insert("__groups".to_owned(), JValue::Ref(Some(groups_arr)));
+                    this.borrow_mut().fields.insert("matchStart".to_owned(), JValue::Int(ms));
+                    this.borrow_mut().fields.insert("matchEnd".to_owned(), JValue::Int(me));
+                } else {
+                    this.borrow_mut().fields.remove("__groups");
+                    this.borrow_mut().fields.insert("matchStart".to_owned(), JValue::Int(-1));
+                    this.borrow_mut().fields.insert("matchEnd".to_owned(), JValue::Int(-1));
+                }
                 Some(JValue::Int(if ok { 1 } else { 0 }))
+            }
+            ("java/util/regex/Matcher", "group") => {
+                // group(int) — return captured group from __groups array
+                let idx = _args.first().map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let mb = this.borrow();
+                if let Some(JValue::Ref(Some(groups_ref))) = mb.fields.get("__groups") {
+                    if let NativePayload::Array(groups) = &groups_ref.borrow().native {
+                        if let Some(g) = groups.get(idx) {
+                            return Some(g.clone());
+                        }
+                    }
+                }
+                // Fallback: group 0 from __match fields
+                if idx == 0 {
+                    let start = mb.fields.get("matchStart").map(|v| v.as_int()).unwrap_or(-1);
+                    let end = mb.fields.get("matchEnd").map(|v| v.as_int()).unwrap_or(-1);
+                    let input = mb.fields.get("__input")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    drop(mb);
+                    if start >= 0 && end >= 0 && (end as usize) <= input.len() {
+                        return Some(JValue::Ref(Some(self.intern_string(&input[start as usize..end as usize]))));
+                    }
+                } else {
+                    drop(mb);
+                }
+                Some(JValue::Ref(None))
             }
             ("java/lang/Class", "getName") => {
                 let internal = self
