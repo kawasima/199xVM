@@ -45,10 +45,11 @@ It is **not** a full implementation of `javac` or HotSpot, and it should not cur
 │   │   ├── compiler.ts
 │   │   └── method-registry.ts
 │   └── javac.test.ts            # compiler tests
-├── jdk-shim/                    # Java standard library shims (pure Java)
-│   └── bundle.bin               # compiled shim class bundle
+├── jdk-shim/                    # Java standard library shims (pure Java, JDK 25 based)
+│   └── bundle.bin               # compiled shim class bundle (~793 classes)
 ├── build-shim.sh
 ├── build-test-bundle.sh
+├── build-clj-smoke.sh           # Clojure smoke test builder
 └── build-dist.sh
 ```
 
@@ -86,13 +87,35 @@ Status labels:
 | ID | Topic | Status | Evidence | Gap / next step |
 | --- | --- | --- | --- | --- |
 | JVMS-4 | ClassFile format and constant pool | Implemented | `class_file.rs` + parser tests | Add stricter validation where parser is permissive |
-| JVMS-5 | Linking/loading behavior (project scope) | Implemented | ClassLoader paths + linkage error tests | Bytecode verifier (§4.10), classloader hierarchy, multi-classloader namespace |
+| JVMS-5 | Linking/loading behavior (project scope) | Implemented | ClassLoader hierarchy (ClassLoader → SecureClassLoader → URLClassLoader), JAR loader, `defineClass`, linkage error tests | Bytecode verifier (§4.10), multi-classloader namespace |
 | JVMS-6 | Instruction set execution | Implemented | `dispatch.rs` + integration tests | Keep expanding opcode edge-case tests |
 | JVMS-6.5 | Invocation (`invoke*`, `invokedynamic`) | Implemented | `invoke.rs`/`dispatch.rs` + invoke tests | No CallSite caching; bootstrap support is intentionally narrow |
 | JVMS exceptions | Exception table dispatch / `athrow` | Implemented | runtime exception tests | Add more mixed `finally`/rethrow regressions |
 | JVMS verification | Bytecode verifier strictness | Limited | runtime checks only | Implement stricter verifier-like prechecks |
 | JVMS monitors/threads | Monitors + green threads (`Thread.start/join/yield`, `wait/notify/notifyAll`) | Partial | monitor/thread integration tests | Cooperative scheduler only (not OS/preemptive threads); timed wait/join/sleep and interruption semantics are intentionally limited |
 | JVMS memory model | GC / object lifecycle behavior | Limited | `heap.rs` (ref-count) | No cycle collector; keep scope explicit |
+
+## JAR loader
+
+199xVM can load classes directly from JAR files at runtime via `Vm::load_jar()`. The Rust `zip` crate (WASM-compatible) handles ZIP decompression. Non-class resources in JARs are stored in a resource map and accessible via `ClassLoader.getResourceAsStream()`.
+
+The frontend also exposes a `jar_to_bundle()` WASM export that converts JAR bytes to the flat bundle format, falling back to the JS-side `readJar()` when WASM is not available.
+
+## JVM language support
+
+199xVM supports running JVM languages beyond Java. **Clojure 1.12.0** has been validated via an AOT-compiled smoke test:
+
+```sh
+# Build the Clojure smoke test (requires clojure CLI)
+./build-clj-smoke.sh
+
+# Run it
+make clj-smoke-test
+```
+
+The smoke test AOT-compiles a minimal Clojure program, loads it via the JAR loader alongside the Clojure runtime JARs, and verifies that `ClojureSmokeEntry.run()` returns `"ok"`.
+
+This is an isolated diagnostic path — it is **not** part of `make test` or `cargo test`.
 
 ## JDK shim policy
 
@@ -125,10 +148,13 @@ npx serve .
 
 ```sh
 # Compiler tests
-npm test
+npm test                    # or: make test
 
-# VM integration tests
+# VM integration tests (42 fast tests, ~0.1s)
 cargo test --package jvm-core
+
+# Clojure smoke test (separate, ~44s)
+make clj-smoke-test
 
 # Rebuild core artifacts
 ./build-shim.sh
