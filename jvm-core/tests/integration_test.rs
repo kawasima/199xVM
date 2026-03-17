@@ -547,6 +547,12 @@ fn priority_queue_poll_order() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn clojure_bootstrap_shims() {
+    let result = run_jar_test("ClojureBootstrapShimsTest", "run", "()Ljava/lang/String;");
+    assert_eq!(result, "eqIC|concat|regex|vparse|sysprop|tlocal|atomic|props|charset|replace|double|rwlock|file|bool");
+}
+
+#[test]
 fn regex_capture_groups() {
     let result = run_jar_test("RegexGroupsTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "3|1.12.0|1|12|0");
