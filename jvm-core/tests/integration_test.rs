@@ -543,6 +543,16 @@ fn priority_queue_poll_order() {
 }
 
 // ---------------------------------------------------------------------------
+// String.replace
+// ---------------------------------------------------------------------------
+
+#[test]
+fn string_replace_char() {
+    let result = run_jar_test("StringReplaceTest", "run", "()Ljava/lang/String;");
+    assert_eq!(result, "clojure.core_proxy__init");
+}
+
+// ---------------------------------------------------------------------------
 // JAR loader: load classes from a JAR file
 // ---------------------------------------------------------------------------
 
