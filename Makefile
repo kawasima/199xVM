@@ -14,7 +14,7 @@ JAR_NAMES := $(RAOH_JAR) $(RAOH_JSON_JAR) $(JACKSON_ANN_JAR) \
 
 WEB_JARS := $(addprefix web/,$(JAR_NAMES))
 
-.PHONY: all dev-jars shim test-bundle javac wasm dist test clean deploy docker-playground dist-docker
+.PHONY: all dev-jars shim test-bundle clj-smoke-bundle clj-smoke-test javac wasm dist test clean deploy docker-playground dist-docker
 
 # ============================================================
 # all — build everything needed for local development
@@ -71,6 +71,15 @@ test-classes/bundle.bin: build-test-bundle.sh web/javac.js $(shell find test-sou
 	./build-test-bundle.sh
 
 test-bundle: test-classes/bundle.bin
+
+# ============================================================
+# clj-smoke — Clojure smoke test (not part of default test/deploy)
+# ============================================================
+clj-smoke-bundle:
+	./build-clj-smoke.sh
+
+clj-smoke-test: clj-smoke-bundle shim test-bundle
+	cargo test --package jvm-core clojure_smoke -- --ignored
 
 # ============================================================
 # javac — build web/javac.js from web/javac.ts

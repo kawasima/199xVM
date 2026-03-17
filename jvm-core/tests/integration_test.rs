@@ -618,11 +618,12 @@ fn jar_to_bundle_roundtrip() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore] // Slow (~44s). Run explicitly: cargo test --package jvm-core clojure_smoke -- --ignored
 fn clojure_smoke() {
     let smoke_jar = std::path::Path::new("../clj-smoke/smoke.jar");
     let jars_list = std::path::Path::new("../clj-smoke/clojure-jars.txt");
     if !smoke_jar.exists() || !jars_list.exists() {
-        eprintln!("Skipping clojure_smoke: run ./build-clj-smoke.sh first");
+        panic!("Run ./build-clj-smoke.sh first");
         return;
     }
 
