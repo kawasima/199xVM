@@ -31,15 +31,15 @@ import java.util.function.Supplier;
 /**
  * This class provides thread-local variables.
  *
- * <p>199xVM shim: backed by a simple per-instance value since the VM is
- * effectively single-threaded. The public API matches JDK 25.
+ * <p>199xVM shim: backed by a simple per-instance value since the VM uses
+ * cooperative green threads on a single OS thread. The public API matches JDK 25.
  *
  * @author  Josh Bloch and Doug Lea
  * @since   1.2
  */
 public class ThreadLocal<T> {
 
-    // 199xVM simplification: single-thread model — one value per ThreadLocal.
+    // 199xVM simplification: cooperative green threads on one OS thread — one value per ThreadLocal.
     private static final Object UNSET = new Object();
     private Object value = UNSET;
 

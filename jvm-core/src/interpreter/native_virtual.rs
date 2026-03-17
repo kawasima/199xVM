@@ -277,6 +277,12 @@ impl super::Vm {
                     if let Some(class_name) = crate::class_file::parse_class_name(&class_bytes) {
                         self.load_lazy(class_name.clone(), class_bytes);
                         self.ensure_class_ready(&class_name);
+                        // Check if parsing actually succeeded
+                        if let Some(super::LazyClass::ParseError(msg)) = self.classes.get(&class_name) {
+                            let msg = msg.clone();
+                            self.throw_class_format_error(&msg);
+                            return Some(JValue::Void);
+                        }
                         Some(JValue::Ref(Some(self.class_object(class_name))))
                     } else {
                         self.throw_class_format_error("defineClass: cannot parse class");
