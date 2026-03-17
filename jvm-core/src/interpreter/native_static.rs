@@ -199,6 +199,14 @@ impl super::Vm {
                 }
                 Some(JValue::Int(result))
             }
+            ("java/lang/Class", "getPrimitiveClass", "(Ljava/lang/String;)Ljava/lang/Class;") => {
+                let name = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                Some(JValue::Ref(Some(self.class_object(name))))
+            }
             ("java/lang/Class", "forName0", "(Ljava/lang/String;)Ljava/lang/Class;") => {
                 let runtime_name = _args
                     .first()
@@ -246,6 +254,50 @@ impl super::Vm {
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
                 Some(JValue::Long(ms))
+            }
+            ("java/lang/System", "nanoTime", "()J") => {
+                #[cfg(target_arch = "wasm32")]
+                let ns = (js_sys::Date::now() * 1_000_000.0) as i64;
+                #[cfg(not(target_arch = "wasm32"))]
+                let ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
+                Some(JValue::Long(ns))
+            }
+            ("java/lang/System", "initProperties", "(Ljava/util/Properties;)V") => {
+                // Populate system properties. The Properties object is passed as first arg.
+                let props_ref = _args.first().and_then(|v| v.as_ref()).cloned();
+                if let Some(props) = props_ref {
+                    let sys_props = [
+                        ("os.name", "199xVM"),
+                        ("os.arch", "wasm"),
+                        ("os.version", "1.0"),
+                        ("file.separator", "/"),
+                        ("path.separator", ":"),
+                        ("line.separator", "\n"),
+                        ("file.encoding", "UTF-8"),
+                        ("java.version", "25"),
+                        ("java.vm.name", "199xVM"),
+                        ("java.class.path", ""),
+                        ("user.dir", "/"),
+                        ("user.home", "/"),
+                    ];
+                    for (key, val) in sys_props {
+                        let k = self.intern_string(key);
+                        let v = self.intern_string(val);
+                        // Call Properties.setProperty(String, String) via bytecode
+                        let _ = self.invoke_virtual(
+                            props.clone(),
+                            "java/util/Properties",
+                            "setProperty",
+                            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Object;",
+                            vec![JValue::Ref(Some(k)), JValue::Ref(Some(v))],
+                        );
+                    }
+                }
+                Some(JValue::Void)
             }
             ("java/lang/System", "identityHashCode", "(Ljava/lang/Object;)I") => {
                 let hc = _args

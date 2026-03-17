@@ -43,6 +43,8 @@ public final class Class<T> implements Type {
 
     public native String getName();
 
+    static native Class<?> getPrimitiveClass(String name);
+
     public String getSimpleName() {
         String n = getName();
         int lastDot = n.lastIndexOf((int) '.');

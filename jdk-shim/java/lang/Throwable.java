@@ -25,28 +25,46 @@
 
 package java.lang;
 
+import java.io.PrintStream;
+import java.io.PrintWriter;
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 public class Throwable implements Serializable {
     private String detailMessage;
     private Throwable cause = this;
+    private StackTraceElement[] stackTrace = new StackTraceElement[0];
+    private List<Throwable> suppressedExceptions = null;
 
-    public Throwable() {}
-    public Throwable(String message) { this.detailMessage = message; }
+    public Throwable() {
+        fillInStackTrace();
+    }
+    public Throwable(String message) {
+        this.detailMessage = message;
+        fillInStackTrace();
+    }
     public Throwable(String message, Throwable cause) {
         this.detailMessage = message;
         this.cause = cause;
+        fillInStackTrace();
     }
     public Throwable(Throwable cause) {
         this.detailMessage = cause == null ? null : cause.toString();
         this.cause = cause;
+        fillInStackTrace();
     }
     protected Throwable(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
         this.detailMessage = message;
         this.cause = cause;
+        if (writableStackTrace) {
+            fillInStackTrace();
+        }
     }
 
     public String getMessage() { return detailMessage; }
+    public String getLocalizedMessage() { return getMessage(); }
     public synchronized Throwable getCause() { return (cause == this ? null : cause); }
     public synchronized Throwable initCause(Throwable cause) {
         if (this.cause != this) throw new IllegalStateException("Can't overwrite cause");
@@ -59,7 +77,63 @@ public class Throwable implements Serializable {
     }
     public String toString() {
         String s = getClass().getName();
-        String message = getMessage();
+        String message = getLocalizedMessage();
         return (message != null) ? (s + ": " + message) : s;
+    }
+
+    public StackTraceElement[] getStackTrace() {
+        return stackTrace.clone();
+    }
+
+    public void setStackTrace(StackTraceElement[] stackTrace) {
+        this.stackTrace = stackTrace.clone();
+    }
+
+    public Throwable fillInStackTrace() {
+        // 199xVM does not yet capture real stack frames
+        return this;
+    }
+
+    public void printStackTrace() {
+        printStackTrace(System.err);
+    }
+
+    public void printStackTrace(PrintStream s) {
+        s.println(this);
+        for (StackTraceElement ste : stackTrace) {
+            s.println("\tat " + ste);
+        }
+        Throwable ourCause = getCause();
+        if (ourCause != null) {
+            s.println("Caused by: " + ourCause);
+            ourCause.printStackTrace(s);
+        }
+    }
+
+    public void printStackTrace(PrintWriter s) {
+        s.println(this);
+        for (StackTraceElement ste : stackTrace) {
+            s.println("\tat " + ste);
+        }
+        Throwable ourCause = getCause();
+        if (ourCause != null) {
+            s.println("Caused by: " + ourCause);
+            ourCause.printStackTrace(s);
+        }
+    }
+
+    public final synchronized void addSuppressed(Throwable exception) {
+        if (exception == this) throw new IllegalArgumentException("Self-suppression not permitted");
+        if (suppressedExceptions == null) {
+            suppressedExceptions = new ArrayList<>();
+        }
+        suppressedExceptions.add(exception);
+    }
+
+    public final synchronized Throwable[] getSuppressed() {
+        if (suppressedExceptions == null) {
+            return new Throwable[0];
+        }
+        return suppressedExceptions.toArray(new Throwable[0]);
     }
 }
