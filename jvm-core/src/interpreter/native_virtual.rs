@@ -244,8 +244,68 @@ impl super::Vm {
                 }
             }
             "defineClass" => {
-                // Dynamic bytecode injection is not supported; return null.
-                // Per JDK spec, the name argument may be null — no NPE check here.
+                // Extract byte[] argument (2nd arg), off (3rd), len (4th).
+                // Supports both 4-arg and 5-arg (with ProtectionDomain) variants.
+                let byte_array = args.get(1)
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| {
+                        let obj = r.borrow();
+                        if let NativePayload::ByteArray(ref v) = obj.native {
+                            Some(v.clone())
+                        } else {
+                            None
+                        }
+                    });
+                let off = args.get(2).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let len = args.get(3).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+
+                if let Some(bytes) = byte_array {
+                    if off + len > bytes.len() {
+                        self.throw_class_format_error("defineClass: off+len exceeds byte array");
+                        return Some(JValue::Void);
+                    }
+                    let class_bytes = bytes[off..off + len].to_vec();
+                    if let Some(class_name) = crate::class_file::parse_class_name(&class_bytes) {
+                        self.load_lazy(class_name.clone(), class_bytes);
+                        self.ensure_class_ready(&class_name);
+                        Some(JValue::Ref(Some(self.class_object(class_name))))
+                    } else {
+                        self.throw_class_format_error("defineClass: cannot parse class");
+                        Some(JValue::Void)
+                    }
+                } else {
+                    self.throw_null_pointer("defineClass: byte array is null");
+                    Some(JValue::Void)
+                }
+            }
+            "getResourceAsStream" => {
+                let name = args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let normalized = name.strip_prefix('/').unwrap_or(&name);
+                if let Some(data) = self.resources.get(normalized).cloned() {
+                    // Create a [B array with the resource bytes
+                    let elems: Vec<JValue> = data.iter().map(|&b| JValue::Int(b as i8 as i32)).collect();
+                    let byte_array = JObject::new_array("[B", elems);
+                    // Create ByteArrayInputStream via its constructor logic
+                    let bais = JObject::new("java/io/ByteArrayInputStream");
+                    bais.borrow_mut().fields.insert("buf".to_owned(), JValue::Ref(Some(byte_array)));
+                    bais.borrow_mut().fields.insert("pos".to_owned(), JValue::Int(0));
+                    bais.borrow_mut().fields.insert("count".to_owned(), JValue::Int(data.len() as i32));
+                    bais.borrow_mut().fields.insert("mark".to_owned(), JValue::Int(0));
+                    Some(JValue::Ref(Some(bais)))
+                } else {
+                    Some(JValue::Ref(None))
+                }
+            }
+            "findResource" => {
+                // Return null — resources are accessed via getResourceAsStream
+                Some(JValue::Ref(None))
+            }
+            "findResources" => {
+                // Return empty enumeration — delegate to bytecode Collections.emptyEnumeration()
                 Some(JValue::Ref(None))
             }
             _ => None,
@@ -328,7 +388,7 @@ impl super::Vm {
         // ClassLoader methods must dispatch on the resolved owner (`_class_name`), not the
         // runtime class of `this`, so that subclasses of ClassLoader also hit these stubs.
         // Guard on method name first to avoid super-chain walks on unrelated calls.
-        if matches!(method_name, "loadClass" | "findClass" | "findLoadedClass" | "defineClass")
+        if matches!(method_name, "loadClass" | "findClass" | "findLoadedClass" | "defineClass" | "getResourceAsStream" | "findResource" | "findResources")
             && self.is_classloader_subtype(_class_name)
         {
             if let Some(v) = self.native_classloader(method_name, _args) {

@@ -23,6 +23,10 @@ fn test_bundle() -> &'static [u8] {
     include_bytes!("../../test-classes/bundle.bin")
 }
 
+fn test_jar() -> &'static [u8] {
+    include_bytes!("test.jar")
+}
+
 // ---------------------------------------------------------------------------
 // Integer.toString via shim bytecode
 // ---------------------------------------------------------------------------
@@ -575,3 +579,50 @@ fn priority_queue_poll_order() {
     assert_eq!(result, "10,20,30");
 }
 
+// ---------------------------------------------------------------------------
+// JAR loader: load classes from a JAR file
+// ---------------------------------------------------------------------------
+
+#[test]
+fn load_jar_and_run() {
+    let mut vm = jvm_core::interpreter::Vm::new();
+    jvm_core::load_bundle(&mut vm, shim_bundle());
+    let count = vm.load_jar(test_jar()).expect("load_jar failed");
+    assert!(count > 0, "expected at least one class from JAR");
+    let result = match vm.invoke_static_threaded(
+        "JarTestEntry", "run", "()Ljava/lang/String;", vec![],
+    ) {
+        Ok(v) => match v {
+            jvm_core::heap::JValue::Ref(Some(r)) => {
+                r.borrow().as_java_string().unwrap_or_default().to_owned()
+            }
+            _ => format!("{v:?}"),
+        },
+        Err(e) => format!("ERROR: {e}"),
+    };
+    assert_eq!(result, "jar-ok");
+}
+
+#[test]
+fn load_jar_resource() {
+    let mut vm = jvm_core::interpreter::Vm::new();
+    jvm_core::load_bundle(&mut vm, shim_bundle());
+    vm.load_jar(test_jar()).expect("load_jar failed");
+    assert!(vm.resources.contains_key("resource.txt"), "resource.txt not found");
+    let data = vm.resources.get("resource.txt").unwrap();
+    let text = std::str::from_utf8(data).unwrap().trim();
+    assert_eq!(text, "hello from jar resource");
+}
+
+#[test]
+fn jar_to_bundle_roundtrip() {
+    let bundle = jvm_core::jar_to_bundle_native(test_jar());
+    assert!(!bundle.is_empty(), "jar_to_bundle returned empty");
+    let result = jvm_core::run_static_native(
+        &[shim_bundle(), &bundle].concat(),
+        "JarTestEntry",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "jar-ok");
+}

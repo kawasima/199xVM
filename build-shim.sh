@@ -269,6 +269,14 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/net/InetAddress.java"
   "$SHIM_SRC/java/net/URLConnection.java"
   "$SHIM_SRC/java/net/URL.java"
+  "$SHIM_SRC/java/net/URLClassLoader.java"
+  "$SHIM_SRC/java/security/Principal.java"
+  "$SHIM_SRC/java/security/PermissionCollection.java"
+  "$SHIM_SRC/java/security/CodeSigner.java"
+  "$SHIM_SRC/java/security/CodeSource.java"
+  "$SHIM_SRC/java/security/ProtectionDomain.java"
+  "$SHIM_SRC/java/security/SecureClassLoader.java"
+  "$SHIM_SRC/java/security/cert/Certificate.java"
 )
 
 rm -rf "$OUT_DIR"
