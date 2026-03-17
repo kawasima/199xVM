@@ -657,3 +657,31 @@ fn clojure_smoke() {
         Err(e) => panic!("Clojure smoke failed: {e}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Boolean.TYPE — triggers Class.getPrimitiveClass native stub
+// ---------------------------------------------------------------------------
+
+#[test]
+fn boolean_type() {
+    let result = run_jar_test(
+        "BooleanTypeTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "boolean");
+}
+
+// ---------------------------------------------------------------------------
+// IO.println — verifies PrintStream native bridge does not silently fail
+// ---------------------------------------------------------------------------
+
+#[test]
+fn io_println() {
+    let result = run_jar_test(
+        "IOPrintlnTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ok");
+}

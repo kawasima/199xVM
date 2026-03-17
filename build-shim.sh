@@ -154,6 +154,7 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/text/ParsePosition.java"
   "$SHIM_SRC/java/text/FieldPosition.java"
   "$SHIM_SRC/java/text/ParseException.java"
+  "$SHIM_SRC/java/text/DecimalFormatSymbols.java"
   "$SHIM_SRC/java/text/DateFormat.java"
   "$SHIM_SRC/java/text/SimpleDateFormat.java"
   "$SHIM_SRC/java/time/Month.java"

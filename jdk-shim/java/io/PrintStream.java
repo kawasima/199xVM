@@ -605,120 +605,6 @@ public class PrintStream extends FilterOutputStream
         this.write(buf, 0, buf.length);
     }
 
-    /*
-     * The following private methods on the text- and character-output streams
-     * always flush the stream buffers, so that writes to the underlying byte
-     * stream occur as promptly as with the original PrintStream.
-     */
-
-    private void write(char[] buf) {
-        try {
-            synchronized (this) {
-                ensureOpen();
-                textOut.write(buf);
-                textOut.flushBuffer();
-                charOut.flushBuffer();
-                if (autoFlush) {
-                    for (int i = 0; i < buf.length; i++)
-                        if (buf[i] == '\n') {
-                            out.flush();
-                            break;
-                        }
-                }
-            }
-        } catch (InterruptedIOException x) {
-            Thread.currentThread().interrupt();
-        } catch (IOException x) {
-            trouble = true;
-        }
-    }
-
-    // Used to optimize away back-to-back flushing and synchronization when
-    // using println, but since subclasses could exist which depend on
-    // observing a call to print followed by newLine() we only use this if
-    // getClass() == PrintStream.class to avoid compatibility issues.
-    private void writeln(char[] buf) {
-        try {
-            synchronized (this) {
-                ensureOpen();
-                textOut.write(buf);
-                textOut.newLine();
-                textOut.flushBuffer();
-                charOut.flushBuffer();
-                if (autoFlush)
-                    out.flush();
-            }
-        }
-        catch (InterruptedIOException x) {
-            Thread.currentThread().interrupt();
-        }
-        catch (IOException x) {
-            trouble = true;
-        }
-    }
-
-    private void write(String s) {
-        try {
-            synchronized (this) {
-                ensureOpen();
-                textOut.write(s);
-                textOut.flushBuffer();
-                charOut.flushBuffer();
-                if (autoFlush && (s.indexOf('\n') >= 0))
-                    out.flush();
-            }
-        }
-        catch (InterruptedIOException x) {
-            Thread.currentThread().interrupt();
-        }
-        catch (IOException x) {
-            trouble = true;
-        }
-    }
-
-    // Used to optimize away back-to-back flushing and synchronization when
-    // using println, but since subclasses could exist which depend on
-    // observing a call to print followed by newLine we only use this if
-    // getClass() == PrintStream.class to avoid compatibility issues.
-    private void writeln(String s) {
-        try {
-            synchronized (this) {
-                ensureOpen();
-                textOut.write(s);
-                textOut.newLine();
-                textOut.flushBuffer();
-                charOut.flushBuffer();
-                if (autoFlush)
-                    out.flush();
-            }
-        }
-        catch (InterruptedIOException x) {
-            Thread.currentThread().interrupt();
-        }
-        catch (IOException x) {
-            trouble = true;
-        }
-    }
-
-    private void newLine() {
-        try {
-            synchronized (this) {
-                ensureOpen();
-                textOut.newLine();
-                textOut.flushBuffer();
-                charOut.flushBuffer();
-                if (autoFlush)
-                    out.flush();
-            }
-        }
-        catch (InterruptedIOException x) {
-            Thread.currentThread().interrupt();
-        }
-        catch (IOException x) {
-            trouble = true;
-        }
-    }
-
     /* Methods that do not terminate lines */
 
     /**
@@ -731,9 +617,9 @@ public class PrintStream extends FilterOutputStream
      * @param      b   The {@code boolean} to be printed
      * @see Charset#defaultCharset()
      */
-    public void print(boolean b) {
-        write(String.valueOf(b));
-    }
+    // 199xVM: print/println are handled by the VM's native PrintStream bridge.
+    // Declaring them native prevents bytecode dispatch from bypassing the bridge.
+    public native void print(boolean b);
 
     /**
      * Prints a character.  The character is translated into one or more bytes
@@ -744,9 +630,7 @@ public class PrintStream extends FilterOutputStream
      * @param      c   The {@code char} to be printed
      * @see Charset#defaultCharset()
      */
-    public void print(char c) {
-        write(String.valueOf(c));
-    }
+    public native void print(char c);
 
     /**
      * Prints an integer.  The string produced by {@link
@@ -759,9 +643,7 @@ public class PrintStream extends FilterOutputStream
      * @see        java.lang.Integer#toString(int)
      * @see Charset#defaultCharset()
      */
-    public void print(int i) {
-        write(String.valueOf(i));
-    }
+    public native void print(int i);
 
     /**
      * Prints a long integer.  The string produced by {@link
@@ -774,9 +656,7 @@ public class PrintStream extends FilterOutputStream
      * @see        java.lang.Long#toString(long)
      * @see Charset#defaultCharset()
      */
-    public void print(long l) {
-        write(String.valueOf(l));
-    }
+    public native void print(long l);
 
     /**
      * Prints a floating-point number.  The string produced by {@link
@@ -789,9 +669,7 @@ public class PrintStream extends FilterOutputStream
      * @see        java.lang.Float#toString(float)
      * @see Charset#defaultCharset()
      */
-    public void print(float f) {
-        write(String.valueOf(f));
-    }
+    public native void print(float f);
 
     /**
      * Prints a double-precision floating-point number.  The string produced by
@@ -804,9 +682,7 @@ public class PrintStream extends FilterOutputStream
      * @see        java.lang.Double#toString(double)
      * @see Charset#defaultCharset()
      */
-    public void print(double d) {
-        write(String.valueOf(d));
-    }
+    public native void print(double d);
 
     /**
      * Prints an array of characters.  The characters are converted into bytes
@@ -819,9 +695,7 @@ public class PrintStream extends FilterOutputStream
      *
      * @throws  NullPointerException  If {@code s} is {@code null}
      */
-    public void print(char[] s) {
-        write(s);
-    }
+    public native void print(char[] s);
 
     /**
      * Prints a string.  If the argument is {@code null} then the string
@@ -834,9 +708,7 @@ public class PrintStream extends FilterOutputStream
      * @param      s   The {@code String} to be printed
      * @see Charset#defaultCharset()
      */
-    public void print(String s) {
-        write(String.valueOf(s));
-    }
+    public native void print(String s);
 
     /**
      * Prints an object.  The string produced by the {@link
@@ -849,9 +721,7 @@ public class PrintStream extends FilterOutputStream
      * @see        java.lang.Object#toString()
      * @see Charset#defaultCharset()
      */
-    public void print(Object obj) {
-        write(String.valueOf(obj));
-    }
+    public native void print(Object obj);
 
 
     /* Methods that do terminate lines */
@@ -862,9 +732,7 @@ public class PrintStream extends FilterOutputStream
      * {@code line.separator}, and is not necessarily a single newline
      * character ({@code '\n'}).
      */
-    public void println() {
-        newLine();
-    }
+    public native void println();
 
     /**
      * Prints a boolean and then terminates the line.  This method behaves as
@@ -873,16 +741,7 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code boolean} to be printed
      */
-    public void println(boolean x) {
-        if (getClass() == PrintStream.class) {
-            writeln(String.valueOf(x));
-        } else {
-            synchronized (this) {
-                print(x);
-                newLine();
-            }
-        }
-    }
+    public native void println(boolean x);
 
     /**
      * Prints a character and then terminates the line.  This method behaves as
@@ -891,16 +750,7 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code char} to be printed.
      */
-    public void println(char x) {
-        if (getClass() == PrintStream.class) {
-            writeln(String.valueOf(x));
-        } else {
-            synchronized (this) {
-                print(x);
-                newLine();
-            }
-        }
-    }
+    public native void println(char x);
 
     /**
      * Prints an integer and then terminates the line.  This method behaves as
@@ -909,16 +759,7 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code int} to be printed.
      */
-    public void println(int x) {
-        if (getClass() == PrintStream.class) {
-            writeln(String.valueOf(x));
-        } else {
-            synchronized (this) {
-                print(x);
-                newLine();
-            }
-        }
-    }
+    public native void println(int x);
 
     /**
      * Prints a long and then terminates the line.  This method behaves as
@@ -927,16 +768,7 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  a The {@code long} to be printed.
      */
-    public void println(long x) {
-        if (getClass() == PrintStream.class) {
-            writeln(String.valueOf(x));
-        } else {
-            synchronized (this) {
-                print(x);
-                newLine();
-            }
-        }
-    }
+    public native void println(long x);
 
     /**
      * Prints a float and then terminates the line.  This method behaves as
@@ -945,16 +777,7 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code float} to be printed.
      */
-    public void println(float x) {
-        if (getClass() == PrintStream.class) {
-            writeln(String.valueOf(x));
-        } else {
-            synchronized (this) {
-                print(x);
-                newLine();
-            }
-        }
-    }
+    public native void println(float x);
 
     /**
      * Prints a double and then terminates the line.  This method behaves as
@@ -963,16 +786,7 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code double} to be printed.
      */
-    public void println(double x) {
-        if (getClass() == PrintStream.class) {
-            writeln(String.valueOf(x));
-        } else {
-            synchronized (this) {
-                print(x);
-                newLine();
-            }
-        }
-    }
+    public native void println(double x);
 
     /**
      * Prints an array of characters and then terminates the line.  This method
@@ -981,16 +795,7 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  an array of chars to print.
      */
-    public void println(char[] x) {
-        if (getClass() == PrintStream.class) {
-            writeln(x);
-        } else {
-            synchronized (this) {
-                print(x);
-                newLine();
-            }
-        }
-    }
+    public native void println(char[] x);
 
     /**
      * Prints a String and then terminates the line.  This method behaves as
@@ -999,16 +804,7 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code String} to be printed.
      */
-    public void println(String x) {
-        if (getClass() == PrintStream.class) {
-            writeln(String.valueOf(x));
-        } else {
-            synchronized (this) {
-                print(x);
-                newLine();
-            }
-        }
-    }
+    public native void println(String x);
 
     /**
      * Prints an Object and then terminates the line.  This method calls
@@ -1019,19 +815,7 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code Object} to be printed.
      */
-    public void println(Object x) {
-        String s = String.valueOf(x);
-        if (getClass() == PrintStream.class) {
-            // need to apply String.valueOf again since first invocation
-            // might return null
-            writeln(String.valueOf(s));
-        } else {
-            synchronized (this) {
-                print(s);
-                newLine();
-            }
-        }
-    }
+    public native void println(Object x);
 
 
     /**
