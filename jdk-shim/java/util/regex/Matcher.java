@@ -54,17 +54,7 @@ public final class Matcher {
         return reset();
     }
 
-    public boolean matches() {
-        boolean result = nativeMatches(pattern.pattern(), input);
-        if (result) {
-            matchStart = 0;
-            matchEnd = input.length();
-        } else {
-            matchStart = -1;
-            matchEnd = -1;
-        }
-        return result;
-    }
+    public native boolean matches();
 
     private static native boolean nativeMatches(String regex, String input);
 
@@ -116,12 +106,27 @@ public final class Matcher {
         return input.substring(matchStart, matchEnd);
     }
 
-    public String group(int group) {
-        return group == 0 ? group() : null;
-    }
+    public native String group(int group);
 
     public String group(String name) {
         return group();
+    }
+
+    public int groupCount() {
+        // 199xVM: simplified — count '(' in pattern excluding escaped and character classes
+        String p = pattern.pattern();
+        int count = 0;
+        boolean escaped = false;
+        boolean inClass = false;
+        for (int i = 0; i < p.length(); i++) {
+            char c = p.charAt(i);
+            if (escaped) { escaped = false; continue; }
+            if (c == '\\') { escaped = true; continue; }
+            if (c == '[') { inClass = true; continue; }
+            if (c == ']') { inClass = false; continue; }
+            if (c == '(' && !inClass) count++;
+        }
+        return count;
     }
 
     public String replaceAll(String replacement) {

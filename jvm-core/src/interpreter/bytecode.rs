@@ -892,6 +892,16 @@ impl Vm {
                 // ---- athrow ----
                 0xbf => {
                     let exc = frame.stack.pop().unwrap();
+                    // Debug: log all thrown exceptions when VM_DEBUG is set
+                    if std::env::var("VM_DEBUG").is_ok() {
+                        if let JValue::Ref(Some(ref r)) = exc {
+                            let cn = r.borrow().class_name.clone();
+                            let detail = r.borrow().fields.get("detailMessage")
+                                .and_then(|v| v.as_ref())
+                                .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()));
+                            eprintln!("[athrow] {} {}", cn, detail.unwrap_or_default());
+                        }
+                    }
                     let (msg, exc_ref) = match exc {
                         JValue::Ref(Some(r)) => {
                             let detail = r
@@ -1033,6 +1043,23 @@ impl Vm {
                     return Ok(v.clone());
                 }
                 let v = JValue::Ref(Some(JObject::new_print_stream(true)));
+                self.static_fields.entry(class_name).or_default().insert(field_name, v.clone());
+                Ok(v)
+            }
+            ("java/lang/System", "in") => {
+                if let Some(v) = self.static_fields.get("java/lang/System").and_then(|m| m.get("in")) {
+                    return Ok(v.clone());
+                }
+                // System.in is an empty InputStream (no stdin in 199xVM)
+                let v = JValue::Ref(Some(JObject::new("java/io/ByteArrayInputStream")));
+                {
+                    let empty_arr = JObject::new_array("[B", vec![]);
+                    let obj = v.as_ref().unwrap();
+                    obj.borrow_mut().fields.insert("buf".to_owned(), JValue::Ref(Some(empty_arr)));
+                    obj.borrow_mut().fields.insert("pos".to_owned(), JValue::Int(0));
+                    obj.borrow_mut().fields.insert("count".to_owned(), JValue::Int(0));
+                    obj.borrow_mut().fields.insert("mark".to_owned(), JValue::Int(0));
+                }
                 self.static_fields.entry(class_name).or_default().insert(field_name, v.clone());
                 Ok(v)
             }

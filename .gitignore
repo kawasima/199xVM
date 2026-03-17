@@ -9,3 +9,6 @@ jdk-shim/bundle.bin
 jdk-shim/out/
 web/javac.js
 web/*.jar
+/clj-smoke/
+/.clj-kondo/
+/.lsp/

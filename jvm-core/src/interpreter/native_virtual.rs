@@ -278,6 +278,32 @@ impl super::Vm {
                     Some(JValue::Void)
                 }
             }
+            "getResource" => {
+                let name = args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let normalized = name.strip_prefix('/').unwrap_or(&name);
+                if self.resources.contains_key(normalized) {
+                    // Return a bundle: URL pointing to the resource
+                    // Construct URL object via bytecode: new URL("bundle", "", "/" + name)
+                    let url = JObject::new("java/net/URL");
+                    let url_str = self.intern_string(format!("bundle:///{normalized}"));
+                    url.borrow_mut().fields.insert("protocol".to_owned(),
+                        JValue::Ref(Some(self.intern_string("bundle"))));
+                    url.borrow_mut().fields.insert("host".to_owned(),
+                        JValue::Ref(Some(self.intern_string(""))));
+                    url.borrow_mut().fields.insert("file".to_owned(),
+                        JValue::Ref(Some(self.intern_string(format!("/{normalized}")))));
+                    url.borrow_mut().fields.insert("path".to_owned(),
+                        JValue::Ref(Some(self.intern_string(format!("/{normalized}")))));
+                    url.borrow_mut().fields.insert("ref".to_owned(), JValue::Ref(None));
+                    Some(JValue::Ref(Some(url)))
+                } else {
+                    Some(JValue::Ref(None))
+                }
+            }
             "getResourceAsStream" => {
                 let name = args
                     .first()
@@ -388,7 +414,7 @@ impl super::Vm {
         // ClassLoader methods must dispatch on the resolved owner (`_class_name`), not the
         // runtime class of `this`, so that subclasses of ClassLoader also hit these stubs.
         // Guard on method name first to avoid super-chain walks on unrelated calls.
-        if matches!(method_name, "loadClass" | "findClass" | "findLoadedClass" | "defineClass" | "getResourceAsStream" | "findResource" | "findResources")
+        if matches!(method_name, "loadClass" | "findClass" | "findLoadedClass" | "defineClass" | "getResource" | "getResourceAsStream" | "findResource" | "findResources")
             && self.is_classloader_subtype(_class_name)
         {
             if let Some(v) = self.native_classloader(method_name, _args) {
@@ -411,20 +437,84 @@ impl super::Vm {
             ("java/util/regex/Matcher", "matches") => {
                 let (regex, input) = {
                     let mb = this.borrow();
-                    let regex = mb.fields.get("__pattern")
+                    // Try bytecode field names first, then native field names
+                    let pattern_ref = mb.fields.get("pattern")
+                        .or_else(|| mb.fields.get("__pattern"));
+                    let regex = pattern_ref
                         .and_then(|v| v.as_ref())
-                        .and_then(|p| p.borrow().fields.get("__regex").cloned())
-                        .and_then(|v| v.as_ref().cloned())
-                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .and_then(|p| {
+                            let pb = p.borrow();
+                            // Try bytecode field name "regex" first, then native "__regex"
+                            pb.fields.get("regex")
+                                .or_else(|| pb.fields.get("__regex"))
+                                .and_then(|v| v.as_ref().cloned())
+                                .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        })
                         .unwrap_or_default();
-                    let input = mb.fields.get("__input")
+                    let input = mb.fields.get("input")
+                        .or_else(|| mb.fields.get("__input"))
                         .and_then(|v| v.as_ref())
                         .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
                         .unwrap_or_default();
                     (regex, input)
                 };
-                let ok = super::native_static::regex_full_match(&regex, &input);
+                // Use captures to extract groups
+                if std::env::var("VM_DEBUG").is_ok() {
+                    eprintln!("[matches] regex={regex:?} input={input:?}");
+                }
+                let anchored = format!("^(?:{regex})$");
+                let re = regex::Regex::new(&anchored).ok();
+                let caps = re.as_ref().and_then(|r| r.captures(&input));
+                let ok = caps.is_some();
+                // Store captured groups in __groups array field + matchStart/matchEnd
+                if let Some(caps) = &caps {
+                    let mut groups = Vec::new();
+                    for i in 0..caps.len() {
+                        if let Some(m) = caps.get(i) {
+                            groups.push(JValue::Ref(Some(self.intern_string(m.as_str()))));
+                        } else {
+                            groups.push(JValue::Ref(None));
+                        }
+                    }
+                    let groups_arr = JObject::new_array("[Ljava/lang/String;", groups);
+                    let (ms, me) = caps.get(0).map(|m| (m.start() as i32, m.end() as i32)).unwrap_or((-1, -1));
+                    this.borrow_mut().fields.insert("__groups".to_owned(), JValue::Ref(Some(groups_arr)));
+                    this.borrow_mut().fields.insert("matchStart".to_owned(), JValue::Int(ms));
+                    this.borrow_mut().fields.insert("matchEnd".to_owned(), JValue::Int(me));
+                } else {
+                    this.borrow_mut().fields.remove("__groups");
+                    this.borrow_mut().fields.insert("matchStart".to_owned(), JValue::Int(-1));
+                    this.borrow_mut().fields.insert("matchEnd".to_owned(), JValue::Int(-1));
+                }
                 Some(JValue::Int(if ok { 1 } else { 0 }))
+            }
+            ("java/util/regex/Matcher", "group") => {
+                // group(int) — return captured group from __groups array
+                let idx = _args.first().map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let mb = this.borrow();
+                if let Some(JValue::Ref(Some(groups_ref))) = mb.fields.get("__groups") {
+                    if let NativePayload::Array(groups) = &groups_ref.borrow().native {
+                        if let Some(g) = groups.get(idx) {
+                            return Some(g.clone());
+                        }
+                    }
+                }
+                // Fallback: group 0 from __match fields
+                if idx == 0 {
+                    let start = mb.fields.get("matchStart").map(|v| v.as_int()).unwrap_or(-1);
+                    let end = mb.fields.get("matchEnd").map(|v| v.as_int()).unwrap_or(-1);
+                    let input = mb.fields.get("__input")
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    drop(mb);
+                    if start >= 0 && end >= 0 && (end as usize) <= input.len() {
+                        return Some(JValue::Ref(Some(self.intern_string(&input[start as usize..end as usize]))));
+                    }
+                } else {
+                    drop(mb);
+                }
+                Some(JValue::Ref(None))
             }
             ("java/lang/Class", "getName") => {
                 let internal = self
@@ -1299,6 +1389,28 @@ impl super::Vm {
                 let s = this.borrow().as_java_string().unwrap_or("").to_owned();
                 let bytes: Vec<JValue> = s.bytes().map(|b| JValue::Int(b as i32)).collect();
                 Some(JValue::Ref(Some(JObject::new_array("[B", bytes))))
+            }
+            ("java/lang/String", "replace") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                if _args.len() >= 2 {
+                    // replace(char, char)
+                    if let (JValue::Int(old_c), JValue::Int(new_c)) = (&_args[0], &_args[1]) {
+                        let old_ch = char::from_u32(*old_c as u32).unwrap_or('\0');
+                        let new_ch = char::from_u32(*new_c as u32).unwrap_or('\0');
+                        let result = s.replace(old_ch, &new_ch.to_string());
+                        Some(JValue::Ref(Some(self.intern_string(result))))
+                    } else if let (JValue::Ref(Some(old_s)), JValue::Ref(Some(new_s))) = (&_args[0], &_args[1]) {
+                        // replace(CharSequence, CharSequence)
+                        let old_str = old_s.borrow().as_java_string().unwrap_or("").to_owned();
+                        let new_str = new_s.borrow().as_java_string().unwrap_or("").to_owned();
+                        let result = s.replace(&old_str, &new_str);
+                        Some(JValue::Ref(Some(self.intern_string(result))))
+                    } else {
+                        Some(JValue::Ref(Some(Rc::clone(this))))
+                    }
+                } else {
+                    Some(JValue::Ref(Some(Rc::clone(this))))
+                }
             }
             (c, "clone") if c == "java/lang/Object" || c.starts_with('[') => {
                 let src = this.borrow();

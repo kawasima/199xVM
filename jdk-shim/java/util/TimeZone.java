@@ -56,6 +56,14 @@ public class TimeZone implements Serializable, Cloneable {
         this.ID = (ID == null) ? "UTC" : ID;
     }
 
+    public String getDisplayName(boolean daylight, int style, Locale locale) {
+        return ID;
+    }
+
+    public String getDisplayName() {
+        return ID;
+    }
+
     public int getRawOffset() {
         return 0;
     }

@@ -43,6 +43,8 @@ public final class Class<T> implements Type {
 
     public native String getName();
 
+    static native Class<?> getPrimitiveClass(String name);
+
     public String getSimpleName() {
         String n = getName();
         int lastDot = n.lastIndexOf((int) '.');
@@ -153,9 +155,11 @@ public final class Class<T> implements Type {
         return c;
     }
 
+    private static native Class<?> forName1(String className, boolean initialize, ClassLoader loader);
+
     public static Class<?> forName(String className, boolean initialize, ClassLoader loader)
             throws ClassNotFoundException {
-        Class<?> c = forName0(className);
+        Class<?> c = forName1(className, initialize, loader);
         if (c == null) {
             throw new ClassNotFoundException(className);
         }

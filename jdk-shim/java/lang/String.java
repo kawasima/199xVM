@@ -142,7 +142,10 @@ public final class String implements CharSequence, Comparable<String>, Serializa
     }
 
     public boolean equalsIgnoreCase(String anotherString) {
-        return compareToIgnoreCase(anotherString) == 0;
+        return (this == anotherString) ? true
+                : (anotherString != null)
+                && (anotherString.length() == length())
+                && compareToIgnoreCase(anotherString) == 0;
     }
 
     public int compareTo(String anotherString) {

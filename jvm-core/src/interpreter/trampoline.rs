@@ -371,6 +371,9 @@ impl Vm {
             if let Some((handler_pc, exc_obj)) = self.find_exception_handler(
                 &fi.frame, &fi.exception_table, &fi.cp, pc, err_msg,
             ) {
+                if std::env::var("VM_DEBUG").is_ok() {
+                    eprintln!("[catch] {} in {}", err_msg.lines().next().unwrap_or(""), &fi.frame_owner);
+                }
                 fi.frame.stack.clear();
                 fi.frame.stack.push(exc_obj);
                 fi.frame.pc = handler_pc;
@@ -381,6 +384,9 @@ impl Vm {
             }
             trace.push_str("\n  at ");
             trace.push_str(&fi.frame_owner);
+            if std::env::var("VM_TRACE").is_ok() && err_msg.contains("NumberFormatException") {
+                eprintln!("[unwind] {} pc={}", &fi.frame_owner, pc);
+            }
             let popped = call_stack.pop().unwrap();
             self.release_synchronized_monitor(&popped)?;
         }
