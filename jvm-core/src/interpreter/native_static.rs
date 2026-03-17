@@ -219,9 +219,9 @@ impl super::Vm {
                 }
                 self.ensure_class_ready(&internal);
                 match self.classes.get(&internal) {
-                    Some(super::LazyClass::Ready(_)) => {}
-                    Some(super::LazyClass::ParseError(msg)) => {
-                        let msg = msg.clone();
+                    Some(super::LazyClass::Ready { .. }) => {}
+                    Some(super::LazyClass::ParseError { message, .. }) => {
+                        let msg = message.clone();
                         self.throw_class_format_error(&msg);
                         return Some(JValue::Void);
                     }
@@ -232,9 +232,75 @@ impl super::Vm {
                 }
                 Some(JValue::Ref(Some(self.class_object(internal))))
             }
+            ("java/lang/Class", "forName1", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;") => {
+                let runtime_name = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))?;
+                let initialize = _args.get(1).map(|v| v.as_int() != 0).unwrap_or(false);
+                let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
+                if matches!(
+                    internal.as_str(),
+                    "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void"
+                ) {
+                    return Some(JValue::Ref(Some(self.class_object(internal))));
+                }
+                if internal.starts_with('[') {
+                    return Some(JValue::Ref(Some(self.class_object(internal))));
+                }
+                self.ensure_class_ready(&internal);
+                match self.classes.get(&internal) {
+                    Some(super::LazyClass::Ready { .. }) => {}
+                    Some(super::LazyClass::ParseError { message, .. }) => {
+                        let msg = message.clone();
+                        self.throw_class_format_error(&msg);
+                        return Some(JValue::Void);
+                    }
+                    _ => {
+                        self.throw_class_not_found(&runtime_name);
+                        return Some(JValue::Void);
+                    }
+                }
+                if initialize && self.ensure_class_init(&internal).is_err() {
+                    return Some(JValue::Void);
+                }
+                Some(JValue::Ref(Some(self.class_object(internal))))
+            }
             ("java/lang/ClassLoader", "getSystemClassLoader", "()Ljava/lang/ClassLoader;") => {
                 let cl = self.get_or_create_system_classloader();
                 Some(JValue::Ref(Some(cl)))
+            }
+            ("java/lang/ClassLoader", "resourceCount0", "(Ljava/lang/String;)I") => {
+                let name = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                Some(JValue::Int(self.resource_count(&name) as i32))
+            }
+            ("java/net/URL", "bundleResourceBytes0", "(Ljava/lang/String;I)[B") => {
+                let name = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let index = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                match self.resource_bytes(&name, index) {
+                    Some(bytes) => {
+                        let elems = bytes.into_iter().map(|b| JValue::Int(i32::from(b))).collect();
+                        Some(JValue::Ref(Some(JObject::new_array("[B", elems))))
+                    }
+                    None => Some(JValue::Ref(None)),
+                }
+            }
+            ("java/net/URL", "bundleResourceLastModified0", "(Ljava/lang/String;I)J") => {
+                let name = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let index = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                Some(JValue::Long(self.resource_last_modified(&name, index).unwrap_or(0)))
             }
             ("java/lang/System", "currentTimeMillis", "()J") => {
                 #[cfg(target_arch = "wasm32")]

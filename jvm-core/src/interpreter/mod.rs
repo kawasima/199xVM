@@ -49,14 +49,28 @@ pub(super) struct MethodExecInfo {
 /// implementing standard ClassLoader lazy-loading semantics.
 pub(in crate::interpreter) enum LazyClass {
     /// Raw bytes not yet parsed.
-    Pending(Vec<u8>),
+    Pending(Rc<Vec<u8>>),
     /// Fully parsed class file.
-    Ready(ClassFile),
+    Ready {
+        class_file: ClassFile,
+        bytes: Option<Rc<Vec<u8>>>,
+    },
     /// Bytes were present but could not be parsed (malformed class).
     /// The entry is preserved so callers can distinguish "never registered"
     /// from "registered but broken", and to avoid repeated parse attempts.
     /// The inner `String` holds the original parse error message.
-    ParseError(String),
+    ParseError {
+        message: String,
+        bytes: Option<Rc<Vec<u8>>>,
+    },
+}
+
+/// A non-class resource registered in the VM's bundle image.
+pub(in crate::interpreter) struct ResourceEntry {
+    /// Resource payload bytes.
+    pub bytes: Vec<u8>,
+    /// Source timestamp exposed via URLConnection#getLastModified.
+    pub last_modified: i64,
 }
 
 mod annotations;
@@ -306,6 +320,12 @@ pub struct Vm {
     /// Static field storage keyed by class name → field name.
     /// Avoids allocating a `"ClassName.fieldName"` string on every getstatic/putstatic.
     pub(in crate::interpreter) static_fields: HashMap<String, HashMap<String, JValue>>,
+    /// Non-class resources keyed by classpath-relative name.
+    pub(in crate::interpreter) resources: HashMap<String, Vec<ResourceEntry>>,
+    /// Stable synthetic timestamp exposed for synthesized `*.class` resources.
+    /// Updated when newer explicit resources are loaded so AOT classes look at
+    /// least as fresh as bundled source resources during bootstrap.
+    synthetic_class_last_modified: i64,
     /// Classes whose `<clinit>` has already been run successfully.
     pub(in crate::interpreter) clinit_done: HashSet<String>,
     /// Classes whose `<clinit>` threw an exception (erroneous state per JVMS §5.5).
@@ -334,6 +354,8 @@ impl Vm {
             classes: HashMap::new(),
             string_pool: HashMap::new(),
             static_fields: HashMap::new(),
+            resources: HashMap::new(),
+            synthetic_class_last_modified: 1,
             clinit_done: HashSet::new(),
             clinit_failed: HashSet::new(),
             class_pool: HashMap::new(),
@@ -641,16 +663,77 @@ impl Vm {
     /// Register a pre-parsed class file (always stored as `Ready`).
     pub fn load_class(&mut self, class_file: ClassFile) {
         let name = class_file.constant_pool.class_name(class_file.this_class).to_owned();
-        self.classes.insert(name, LazyClass::Ready(class_file));
+        self.classes.insert(name, LazyClass::Ready { class_file, bytes: None });
     }
 
     /// Register raw `.class` bytes for lazy parsing.
     /// The class is parsed only when first accessed via [`Self::ensure_class_ready`].
     /// If the class is already registered (e.g., as `Ready`), the existing entry is kept.
     pub fn load_lazy(&mut self, name: String, bytes: Vec<u8>) {
-        self.classes.entry(name).or_insert(LazyClass::Pending(bytes));
+        self.classes.entry(name).or_insert(LazyClass::Pending(Rc::new(bytes)));
     }
 
+    fn normalize_resource_name(name: &str) -> &str {
+        name.trim_start_matches('/')
+    }
+
+    /// Register a non-class resource from a bundle.
+    pub fn load_resource(&mut self, name: String, bytes: Vec<u8>, last_modified: i64) {
+        let normalized = Self::normalize_resource_name(&name).to_owned();
+        self.synthetic_class_last_modified = self
+            .synthetic_class_last_modified
+            .max(last_modified.saturating_add(1));
+        self.resources
+            .entry(normalized)
+            .or_default()
+            .push(ResourceEntry { bytes, last_modified });
+    }
+
+    /// Return how many classpath resources are registered for the given name.
+    pub(in crate::interpreter) fn resource_count(&self, name: &str) -> usize {
+        let normalized = Self::normalize_resource_name(name);
+        if let Some(entries) = self.resources.get(normalized) {
+            entries.len()
+        } else if self.class_resource_bytes(normalized).is_some() {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Clone the bytes for a resource entry by logical name and classpath order index.
+    pub(in crate::interpreter) fn resource_bytes(&self, name: &str, index: usize) -> Option<Vec<u8>> {
+        let normalized = Self::normalize_resource_name(name);
+        if let Some(entries) = self.resources.get(normalized) {
+            entries.get(index).map(|entry| entry.bytes.clone())
+        } else if index == 0 {
+            self.class_resource_bytes(normalized).map(|bytes| bytes.to_vec())
+        } else {
+            None
+        }
+    }
+
+    /// Get the last-modified timestamp for a resource entry by logical name and index.
+    pub(in crate::interpreter) fn resource_last_modified(&self, name: &str, index: usize) -> Option<i64> {
+        let normalized = Self::normalize_resource_name(name);
+        if let Some(entries) = self.resources.get(normalized) {
+            entries.get(index).map(|entry| entry.last_modified)
+        } else if index == 0 && self.class_resource_bytes(normalized).is_some() {
+            Some(self.synthetic_class_last_modified)
+        } else {
+            None
+        }
+    }
+
+    fn class_resource_bytes(&self, resource_name: &str) -> Option<&[u8]> {
+        let class_name = resource_name.strip_suffix(".class")?;
+        match self.classes.get(class_name)? {
+            LazyClass::Pending(bytes) => Some(bytes.as_slice()),
+            LazyClass::Ready { bytes: Some(bytes), .. } => Some(bytes.as_slice()),
+            LazyClass::ParseError { bytes: Some(bytes), .. } => Some(bytes.as_slice()),
+            LazyClass::Ready { bytes: None, .. } | LazyClass::ParseError { bytes: None, .. } => None,
+        }
+    }
     /// Ensure the named class is fully parsed (`Ready`).
     /// If the entry is `Pending`, parses it in place and promotes it to `Ready`.
     /// On parse failure the entry is set to `ParseError` so the failure is
@@ -662,11 +745,19 @@ impl Vm {
             return;
         }
         if let Some(LazyClass::Pending(bytes)) = self.classes.remove(name) {
-            match class_file::parse(&bytes) {
-                Ok(cf) => { self.classes.insert(name.to_owned(), LazyClass::Ready(cf)); }
+            match class_file::parse(bytes.as_slice()) {
+                Ok(cf) => {
+                    self.classes.insert(name.to_owned(), LazyClass::Ready {
+                        class_file: cf,
+                        bytes: Some(bytes),
+                    });
+                }
                 Err(e) => {
                     eprintln!("Warning: failed to parse class '{name}': {e}");
-                    self.classes.insert(name.to_owned(), LazyClass::ParseError(e.to_string()));
+                    self.classes.insert(name.to_owned(), LazyClass::ParseError {
+                        message: e.to_string(),
+                        bytes: Some(bytes),
+                    });
                 }
             }
         }
@@ -676,8 +767,8 @@ impl Vm {
     /// Caller must have called `ensure_class_ready` first (or know the class is already Ready).
     pub(in crate::interpreter) fn get_class(&self, name: &str) -> Option<&ClassFile> {
         match self.classes.get(name)? {
-            LazyClass::Ready(cf) => Some(cf),
-            LazyClass::Pending(_) | LazyClass::ParseError(_) => None,
+            LazyClass::Ready { class_file, .. } => Some(class_file),
+            LazyClass::Pending(_) | LazyClass::ParseError { .. } => None,
         }
     }
 

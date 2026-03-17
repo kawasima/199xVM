@@ -144,18 +144,15 @@ public final class Class<T> implements Type {
     }
 
     private static native Class<?> forName0(String className);
+    private static native Class<?> forName1(String className, boolean initialize, ClassLoader loader);
 
     public static Class<?> forName(String className) throws ClassNotFoundException {
-        Class<?> c = forName0(className);
-        if (c == null) {
-            throw new ClassNotFoundException(className);
-        }
-        return c;
+        return forName1(className, true, ClassLoader.getSystemClassLoader());
     }
 
     public static Class<?> forName(String className, boolean initialize, ClassLoader loader)
             throws ClassNotFoundException {
-        Class<?> c = forName0(className);
+        Class<?> c = forName1(className, initialize, loader);
         if (c == null) {
             throw new ClassNotFoundException(className);
         }

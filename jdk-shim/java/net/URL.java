@@ -25,6 +25,8 @@
 
 package java.net;
 
+import java.io.ByteArrayInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 
@@ -32,9 +34,9 @@ import java.io.InputStream;
  * Class {@code URL} represents a Uniform Resource Locator, a pointer to a
  * "resource" on the World Wide Web.
  *
- * <p>This shim implementation delegates parsing to {@link URI} and does not
- * support network I/O. {@link #openConnection()} and {@link #openStream()}
- * always throw {@link UnsupportedOperationException}.
+ * <p>This shim implementation delegates parsing to {@link URI}. Network I/O is
+ * not supported, but {@code bundle:} URLs are backed by the 199xVM bundle
+ * resource table.
  *
  * @author  James Gosling
  * @since   1.0
@@ -49,6 +51,32 @@ public final class URL implements java.io.Serializable {
     private final int port;
     private final String file;
     private final String ref;
+
+    private static native byte[] bundleResourceBytes0(String name, int index);
+    private static native long bundleResourceLastModified0(String name, int index);
+
+    private static String bundleResourceName(URL url) {
+        String path = url.getPath();
+        if (path == null || path.isEmpty()) {
+            return "";
+        }
+        return path.charAt(0) == '/' ? path.substring(1) : path;
+    }
+
+    private static int bundleResourceIndex(URL url) {
+        String query = url.getQuery();
+        if (query == null || query.isEmpty()) {
+            return 0;
+        }
+        if (!query.startsWith("entry=")) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(query.substring("entry=".length()));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
 
     /**
      * Creates a {@code URL} object from the {@code String} representation.
@@ -247,23 +275,52 @@ public final class URL implements java.io.Serializable {
     /**
      * Opens a connection to this {@code URL}.
      *
-     * <p>Network I/O is not supported in 199xVM.
-     *
-     * @throws UnsupportedOperationException always.
+     * <p>Network I/O is not supported in 199xVM. {@code bundle:} URLs resolve
+     * against the VM's embedded resource table.
      */
     public java.net.URLConnection openConnection() throws IOException {
+        if ("bundle".equals(protocol)) {
+            final String resourceName = bundleResourceName(this);
+            final int resourceIndex = bundleResourceIndex(this);
+            return new URLConnection(this) {
+                @Override
+                public void connect() throws IOException {}
+
+                @Override
+                public InputStream getInputStream() throws IOException {
+                    byte[] bytes = bundleResourceBytes0(resourceName, resourceIndex);
+                    if (bytes == null) {
+                        throw new FileNotFoundException(resourceName);
+                    }
+                    return new ByteArrayInputStream(bytes);
+                }
+
+                @Override
+                public int getContentLength() {
+                    byte[] bytes = bundleResourceBytes0(resourceName, resourceIndex);
+                    return bytes != null ? bytes.length : -1;
+                }
+
+                @Override
+                public long getContentLengthLong() {
+                    return getContentLength();
+                }
+
+                @Override
+                public long getLastModified() {
+                    return bundleResourceLastModified0(resourceName, resourceIndex);
+                }
+            };
+        }
         throw new UnsupportedOperationException("Network I/O not supported in 199xVM");
     }
 
     /**
      * Opens a connection to this {@code URL} and returns an {@code InputStream}.
      *
-     * <p>Network I/O is not supported in 199xVM.
-     *
-     * @throws UnsupportedOperationException always.
      */
     public InputStream openStream() throws IOException {
-        throw new UnsupportedOperationException("Network I/O not supported in 199xVM");
+        return openConnection().getInputStream();
     }
 
     /**

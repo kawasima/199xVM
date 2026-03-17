@@ -126,7 +126,7 @@ public class Thread implements Runnable {
     }
 
     public final ClassLoader getContextClassLoader() {
-        return contextClassLoader;
+        return contextClassLoader != null ? contextClassLoader : ClassLoader.getSystemClassLoader();
     }
 
     public void setContextClassLoader(ClassLoader cl) {

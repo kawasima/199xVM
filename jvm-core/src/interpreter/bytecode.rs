@@ -759,7 +759,7 @@ impl Vm {
                     self.ensure_class_init(&new_class)?;
                     // A ParseError entry means the class was registered but malformed —
                     // surface consistently as ClassFormatError (same as Class.forName0 path).
-                    if matches!(self.classes.get(&new_class), Some(super::LazyClass::ParseError(_))) {
+                    if matches!(self.classes.get(&new_class), Some(super::LazyClass::ParseError { .. })) {
                         self.throw_class_format_error(&new_class);
                         return Err(format!("java/lang/ClassFormatError: malformed class file for {new_class}"));
                     }

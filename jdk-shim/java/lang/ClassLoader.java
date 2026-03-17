@@ -25,13 +25,108 @@
 
 package java.lang;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
+import java.net.MalformedURLException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Enumeration;
+
 public class ClassLoader {
-    protected ClassLoader() {}
+    private final ClassLoader parent;
+
+    protected ClassLoader() {
+        this(null);
+    }
+
+    protected ClassLoader(ClassLoader parent) {
+        this.parent = parent;
+    }
+
+    protected ClassLoader(String name, ClassLoader parent) {
+        this(parent);
+    }
 
     public static native ClassLoader getSystemClassLoader();
 
+    private static native int resourceCount0(String name);
+
+    private static String normalizeResourceName(String name) {
+        if (name == null) {
+            throw new NullPointerException("name");
+        }
+        int index = 0;
+        while (index < name.length() && name.charAt(index) == '/') {
+            index++;
+        }
+        return index == 0 ? name : name.substring(index);
+    }
+
+    private static URL newBundleUrl(String name, int index) {
+        try {
+            String suffix = index == 0 ? "" : "?entry=" + index;
+            return new URL("bundle", "", "/" + name + suffix);
+        } catch (MalformedURLException e) {
+            return null;
+        }
+    }
+
+    public static URL getSystemResource(String name) {
+        String resourceName = normalizeResourceName(name);
+        return resourceCount0(resourceName) > 0 ? newBundleUrl(resourceName, 0) : null;
+    }
+
+    public static InputStream getSystemResourceAsStream(String name) {
+        URL url = getSystemResource(name);
+        if (url == null) {
+            return null;
+        }
+        try {
+            return url.openStream();
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    public static Enumeration<URL> getSystemResources(String name) throws IOException {
+        String resourceName = normalizeResourceName(name);
+        int count = resourceCount0(resourceName);
+        if (count == 0) {
+            return Collections.emptyEnumeration();
+        }
+        ArrayList<URL> urls = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            URL url = newBundleUrl(resourceName, i);
+            if (url != null) {
+                urls.add(url);
+            }
+        }
+        return Collections.enumeration(urls);
+    }
+
     public Class<?> loadClass(String name) throws ClassNotFoundException {
         return loadClass(name, false);
+    }
+
+    public URL getResource(String name) {
+        return getSystemResource(name);
+    }
+
+    public InputStream getResourceAsStream(String name) {
+        return getSystemResourceAsStream(name);
+    }
+
+    public Enumeration<URL> getResources(String name) throws IOException {
+        return getSystemResources(name);
+    }
+
+    protected URL findResource(String name) {
+        return getSystemResource(name);
+    }
+
+    protected Enumeration<URL> findResources(String name) throws IOException {
+        return getSystemResources(name);
     }
 
     // Simplified parent-delegation: checks the local registry via native stubs only.
@@ -48,6 +143,12 @@ public class ClassLoader {
     protected native Class<?> findLoadedClass(String name);
 
     protected native Class<?> findClass(String name) throws ClassNotFoundException;
+
+    public final ClassLoader getParent() {
+        return parent;
+    }
+
+    protected final void resolveClass(Class<?> c) {}
 
     protected final Class<?> defineClass(String name, byte[] b, int off, int len) {
         return null;

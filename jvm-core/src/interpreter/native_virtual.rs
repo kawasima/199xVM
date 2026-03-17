@@ -217,9 +217,9 @@ impl super::Vm {
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
                 self.ensure_class_ready(&internal);
                 match self.classes.get(&internal) {
-                    Some(LazyClass::Ready(_)) => {}
-                    Some(LazyClass::ParseError(msg)) => {
-                        let msg = msg.clone();
+                    Some(LazyClass::Ready { .. }) => {}
+                    Some(LazyClass::ParseError { message, .. }) => {
+                        let msg = message.clone();
                         self.throw_class_format_error(&msg);
                         return Some(JValue::Void);
                     }
@@ -237,7 +237,7 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
-                if matches!(self.classes.get(&internal), Some(LazyClass::Ready(_))) {
+                if matches!(self.classes.get(&internal), Some(LazyClass::Ready { .. })) {
                     Some(JValue::Ref(Some(self.class_object(internal))))
                 } else {
                     Some(JValue::Ref(None))
@@ -348,29 +348,25 @@ impl super::Vm {
                 m.borrow_mut().fields.insert("__input".to_owned(), JValue::Ref(Some(self.intern_string(input))));
                 Some(JValue::Ref(Some(m)))
             }
-            ("java/util/regex/Matcher", "matches") => {
-                let (regex, input) = {
-                    let mb = this.borrow();
-                    let regex = mb.fields.get("__pattern")
-                        .and_then(|v| v.as_ref())
-                        .and_then(|p| p.borrow().fields.get("__regex").cloned())
-                        .and_then(|v| v.as_ref().cloned())
-                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
-                        .unwrap_or_default();
-                    let input = mb.fields.get("__input")
-                        .and_then(|v| v.as_ref())
-                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
-                        .unwrap_or_default();
-                    (regex, input)
-                };
-                let ok = super::native_static::regex_full_match(&regex, &input);
-                Some(JValue::Int(if ok { 1 } else { 0 }))
-            }
             ("java/lang/Class", "getName") => {
                 let internal = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 Some(JValue::Ref(Some(self.intern_string(Self::class_display_name(&internal)))))
+            }
+            ("java/lang/Class", "getClassLoader") => {
+                let target = self
+                    .class_internal_name_from_obj(this)
+                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let loader = if matches!(
+                    target.as_str(),
+                    "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void"
+                ) {
+                    None
+                } else {
+                    Some(self.get_or_create_system_classloader())
+                };
+                Some(JValue::Ref(loader))
             }
             ("java/lang/Class", "getModifiers") => {
                 let target = self

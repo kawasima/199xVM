@@ -208,6 +208,18 @@ fn classloader_api() {
 }
 
 #[test]
+fn class_resource_lookup() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "ClassResourceLookupTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "202|254|186|190|true");
+}
+
+#[test]
 fn classloader_missing_class_throws_cnfe() {
     let bundle = combined_bundle(shim_bundle(), test_bundle());
     let result = jvm_core::run_static_native(
@@ -574,4 +586,3 @@ fn priority_queue_poll_order() {
     );
     assert_eq!(result, "10,20,30");
 }
-

@@ -14,12 +14,14 @@ use class_file::{parse, parse_class_name};
 use heap::JValue;
 use interpreter::Vm;
 
-/// Load one or more `.class` files and invoke a static method.
+const RESOURCE_MAGIC: &[u8; 4] = b"RSRC";
+
+/// Load a bundle image and invoke a static method.
 ///
 /// # Arguments
 ///
-/// * `class_data` — concatenated raw `.class` bytes (each class preceded by a
-///   4-byte big-endian length).
+/// * `class_data` — concatenated bundle entries (each entry preceded by a
+///   4-byte big-endian payload length).
 /// * `main_class` — internal class name of the entry point (e.g.
 ///   `"net/unit8/raoh/Decoders"`).
 /// * `method_name` — static method to invoke (e.g. `"run"`).
@@ -92,11 +94,13 @@ pub fn run_static_native(
     out
 }
 
-/// Load classes from bundle bytes into a VM using lazy parsing.
+/// Load classes and resources from bundle bytes into a VM using lazy parsing.
 ///
-/// Each class's raw bytes are registered under its internal class name.
-/// The class is not parsed until it is first accessed during execution,
-/// matching standard ClassLoader lazy-loading semantics.
+/// Class entries are raw `.class` bytes registered under their internal class
+/// name. Resource entries use a small `RSRC` envelope carrying path, payload,
+/// and last-modified metadata. Classes are not parsed until first access,
+/// matching standard ClassLoader lazy-loading semantics, and `*.class`
+/// resources are synthesized from the loaded class table.
 pub fn load_bundle(vm: &mut Vm, class_bundle: &[u8]) {
     let mut pos = 0usize;
     while pos + 4 <= class_bundle.len() {
@@ -110,9 +114,15 @@ pub fn load_bundle(vm: &mut Vm, class_bundle: &[u8]) {
         if pos + len > class_bundle.len() { break; }
         let class_bytes = &class_bundle[pos..pos + len];
         pos += len;
+        if let Some((name, last_modified, bytes)) = parse_resource_entry(class_bytes) {
+            vm.load_resource(name, bytes, last_modified);
+            continue;
+        }
         match parse_class_name(class_bytes) {
-            Some(name) => vm.load_lazy(name, class_bytes.to_vec()),
-            None => eprintln!("Warning: skipping class with unreadable name"),
+            Some(name) => {
+                vm.load_lazy(name, class_bytes.to_vec());
+            }
+            None => eprintln!("Warning: skipping bundle entry with unreadable name"),
         }
     }
 }
@@ -139,4 +149,21 @@ fn jvalue_to_string(v: &JValue) -> String {
         }
         JValue::ReturnAddress(a) => format!("ret:{a}"),
     }
+}
+
+fn parse_resource_entry(payload: &[u8]) -> Option<(String, i64, Vec<u8>)> {
+    if payload.len() < 20 || &payload[..4] != RESOURCE_MAGIC {
+        return None;
+    }
+    let path_len = u32::from_be_bytes(payload[4..8].try_into().ok()?) as usize;
+    let last_modified = i64::from_be_bytes(payload[8..16].try_into().ok()?);
+    let data_len = u32::from_be_bytes(payload[16..20].try_into().ok()?) as usize;
+    let expected_len = 20usize.checked_add(path_len)?.checked_add(data_len)?;
+    if payload.len() != expected_len {
+        return None;
+    }
+    let path_bytes = &payload[20..20 + path_len];
+    let data_bytes = payload[20 + path_len..].to_vec();
+    let path = std::str::from_utf8(path_bytes).ok()?.to_owned();
+    Some((path, last_modified, data_bytes))
 }
