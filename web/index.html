@@ -1643,11 +1643,12 @@ public class JvmInterfaceDefault implements Describable {
       }
     }
 
-    /** Load a JAR from a URL, register its methods, and append to classBundle. */
     /** Parse JAR bytes, register methods/interfaces, and append to classBundle. */
     async function registerJarBytes(url, jarBytes) {
-      const classFiles = await readJar(jarBytes);
-      const jarBundle = classFilesToBundle(classFiles);
+      // Use Rust-side JAR→bundle conversion if WASM is available, else fall back to JS
+      const jarBundle = (jvmModule && jvmModule.jar_to_bundle)
+        ? jvmModule.jar_to_bundle(jarBytes)
+        : classFilesToBundle(await readJar(jarBytes));
       const metas = parseBundleMeta(jarBundle);
       const reg = buildMethodRegistry(metas);
       setMethodRegistry(reg);
@@ -1660,7 +1661,7 @@ public class JvmInterfaceDefault implements Describable {
       } else {
         classBundle = jarBundle;
       }
-      log("info", `JAR loaded: ${classFiles.size} classes, ${Object.keys(reg).length} methods from ${url}`);
+      log("info", `JAR loaded: ${metas.length} classes, ${Object.keys(reg).length} methods from ${url}`);
     }
 
     window.loadJar = async function(url) {

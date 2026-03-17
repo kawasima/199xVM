@@ -5,8 +5,8 @@
 //! receiving the string representation of the return value.
 
 mod class_file;
-mod heap;
-mod interpreter;
+pub mod heap;
+pub mod interpreter;
 
 use wasm_bindgen::prelude::*;
 
@@ -40,6 +40,33 @@ pub fn run_static(
     run_static_native(class_bundle, main_class, method_name, descriptor)
 }
 
+/// Load a shim bundle + application JARs and invoke a static method.
+///
+/// * `shim_bundle` — JDK shim classes in flat bundle format.
+/// * `jar_data` — concatenated JAR files, each preceded by a 4-byte big-endian
+///   length (`[u32 len][jar bytes] × N`).  Pass an empty slice if no JARs.
+#[wasm_bindgen]
+pub fn run_with_jars(
+    shim_bundle: &[u8],
+    jar_data: &[u8],
+    main_class: &str,
+    method_name: &str,
+    descriptor: &str,
+) -> String {
+    #[cfg(feature = "console_error_panic_hook")]
+    console_error_panic_hook::set_once();
+
+    run_with_jars_native(shim_bundle, jar_data, main_class, method_name, descriptor)
+}
+
+/// Convert a single JAR to the flat bundle format (for use with `run_static`).
+///
+/// Returns the bundle bytes, or an empty array if the JAR is invalid.
+#[wasm_bindgen]
+pub fn jar_to_bundle(jar_bytes: &[u8]) -> Vec<u8> {
+    jar_to_bundle_native(jar_bytes)
+}
+
 /// Parse a single `.class` file and return the class name if successful.
 /// Useful for validating that a class loaded correctly.
 #[wasm_bindgen]
@@ -67,6 +94,74 @@ pub fn run_static_native(
 ) -> String {
     let mut vm = Vm::new();
     load_bundle(&mut vm, class_bundle);
+    invoke_and_collect(&mut vm, main_class, method_name, descriptor)
+}
+
+/// Load a shim bundle + application JARs and invoke a static method.
+pub fn run_with_jars_native(
+    shim_bundle: &[u8],
+    jar_data: &[u8],
+    main_class: &str,
+    method_name: &str,
+    descriptor: &str,
+) -> String {
+    let mut vm = Vm::new();
+    load_bundle(&mut vm, shim_bundle);
+    load_jars(&mut vm, jar_data);
+    invoke_and_collect(&mut vm, main_class, method_name, descriptor)
+}
+
+/// Convert a single JAR to flat bundle format.
+pub fn jar_to_bundle_native(jar_bytes: &[u8]) -> Vec<u8> {
+    use std::io::Cursor;
+    let reader = Cursor::new(jar_bytes);
+    let mut archive = match zip::ZipArchive::new(reader) {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for i in 0..archive.len() {
+        let mut file = match archive.by_index(i) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if !file.name().ends_with(".class") {
+            continue;
+        }
+        let mut buf = Vec::with_capacity(file.size() as usize);
+        if std::io::Read::read_to_end(&mut file, &mut buf).is_err() {
+            continue;
+        }
+        let len = buf.len() as u32;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&buf);
+    }
+    out
+}
+
+/// Load JARs from a framed byte array into a VM.
+///
+/// Each JAR is preceded by a 4-byte big-endian length: `[u32 len][jar bytes] × N`.
+pub fn load_jars(vm: &mut Vm, jar_data: &[u8]) {
+    let mut pos = 0usize;
+    while pos + 4 <= jar_data.len() {
+        let len = u32::from_be_bytes([
+            jar_data[pos],
+            jar_data[pos + 1],
+            jar_data[pos + 2],
+            jar_data[pos + 3],
+        ]) as usize;
+        pos += 4;
+        if pos + len > jar_data.len() { break; }
+        let jar_bytes = &jar_data[pos..pos + len];
+        pos += len;
+        if let Err(e) = vm.load_jar(jar_bytes) {
+            eprintln!("Warning: failed to load JAR: {e}");
+        }
+    }
+}
+
+fn invoke_and_collect(vm: &mut Vm, main_class: &str, method_name: &str, descriptor: &str) -> String {
     let out = match vm.invoke_static_threaded(main_class, method_name, descriptor, vec![]) {
         Ok(result) => {
             // If the result is a non-String object, call toString() on it.

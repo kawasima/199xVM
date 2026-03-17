@@ -325,6 +325,8 @@ pub struct Vm {
     /// Method resolution cache: (class, method_name, descriptor) → owner class name.
     /// Avoids repeated super-chain walks for the same method lookup.
     method_owner_cache: HashMap<(String, String, String), Option<String>>,
+    /// Non-class resources from loaded JARs, keyed by path (e.g. "clojure/core.clj").
+    pub resources: HashMap<String, Vec<u8>>,
 }
 
 impl Vm {
@@ -343,6 +345,7 @@ impl Vm {
             scheduler: Scheduler::new(),
             monitors: HashMap::new(),
             method_owner_cache: HashMap::new(),
+            resources: HashMap::new(),
         }
     }
 
@@ -651,6 +654,35 @@ impl Vm {
         self.classes.entry(name).or_insert(LazyClass::Pending(bytes));
     }
 
+    /// Load classes and resources from a JAR (ZIP) byte array.
+    /// `.class` entries are registered via [`Self::load_lazy`]; all other
+    /// non-directory entries are stored in the resource map.
+    /// Returns the number of classes loaded.
+    pub fn load_jar(&mut self, jar_bytes: &[u8]) -> Result<usize, String> {
+        use std::io::Cursor;
+        let reader = Cursor::new(jar_bytes);
+        let mut archive = zip::ZipArchive::new(reader)
+            .map_err(|e| format!("Invalid JAR/ZIP: {e}"))?;
+        let mut count = 0;
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)
+                .map_err(|e| format!("ZIP entry error: {e}"))?;
+            let name = file.name().to_owned();
+            let mut buf = Vec::with_capacity(file.size() as usize);
+            std::io::Read::read_to_end(&mut file, &mut buf)
+                .map_err(|e| format!("Read error for {name}: {e}"))?;
+            if name.ends_with(".class") {
+                if let Some(class_name) = crate::class_file::parse_class_name(&buf) {
+                    self.load_lazy(class_name, buf);
+                    count += 1;
+                }
+            } else if !name.ends_with('/') {
+                self.resources.insert(name, buf);
+            }
+        }
+        Ok(count)
+    }
+
     /// Ensure the named class is fully parsed (`Ready`).
     /// If the entry is `Pending`, parses it in place and promotes it to `Ready`.
     /// On parse failure the entry is set to `ParseError` so the failure is
@@ -733,7 +765,7 @@ impl Vm {
         if let Some(ref cl) = self.system_classloader {
             return Rc::clone(cl);
         }
-        let cl = JObject::new("java/lang/ClassLoader");
+        let cl = JObject::new("java/net/URLClassLoader");
         self.system_classloader = Some(Rc::clone(&cl));
         cl
     }

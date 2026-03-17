@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 1996, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2013, 2024, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, Azul Systems, Inc. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,8 +26,26 @@
 
 package java.lang;
 
-public class ClassLoader {
-    protected ClassLoader() {}
+import java.io.InputStream;
+import java.io.IOException;
+import java.net.URL;
+import java.util.Enumeration;
+
+public abstract class ClassLoader {
+
+    private final ClassLoader parent;
+
+    protected ClassLoader() {
+        this(getSystemClassLoader());
+    }
+
+    protected ClassLoader(ClassLoader parent) {
+        this.parent = parent;
+    }
+
+    protected ClassLoader(String name, ClassLoader parent) {
+        this(parent);
+    }
 
     public static native ClassLoader getSystemClassLoader();
 
@@ -34,22 +53,72 @@ public class ClassLoader {
         return loadClass(name, false);
     }
 
-    // Simplified parent-delegation: checks the local registry via native stubs only.
-    // No parent-loader chain and no link-resolution step (the 'resolve' flag is ignored)
-    // — both are intentional simplifications for 199xVM's pre-bundled class model.
     protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
         Class<?> c = findLoadedClass(name);
         if (c == null) {
-            c = findClass(name);
+            try {
+                if (parent != null) {
+                    c = parent.loadClass(name, false);
+                }
+            } catch (ClassNotFoundException e) {
+                // parent didn't find it
+            }
+            if (c == null) {
+                c = findClass(name);
+            }
+        }
+        if (resolve) {
+            resolveClass(c);
         }
         return c;
     }
 
     protected native Class<?> findLoadedClass(String name);
 
-    protected native Class<?> findClass(String name) throws ClassNotFoundException;
+    protected Class<?> findClass(String name) throws ClassNotFoundException {
+        throw new ClassNotFoundException(name);
+    }
 
-    protected final Class<?> defineClass(String name, byte[] b, int off, int len) {
+    protected final native Class<?> defineClass(String name, byte[] b, int off, int len);
+
+    protected final Class<?> defineClass(String name, byte[] b, int off, int len,
+            java.security.ProtectionDomain protectionDomain) {
+        return defineClass(name, b, off, len);
+    }
+
+    protected final void resolveClass(Class<?> c) {
+        // intentional no-op in 199xVM
+    }
+
+    public final ClassLoader getParent() {
+        return parent;
+    }
+
+    public URL getResource(String name) {
         return null;
+    }
+
+    public InputStream getResourceAsStream(String name) {
+        return null;
+    }
+
+    public Enumeration<URL> getResources(String name) throws IOException {
+        return java.util.Collections.emptyEnumeration();
+    }
+
+    protected URL findResource(String name) {
+        return null;
+    }
+
+    protected Enumeration<URL> findResources(String name) throws IOException {
+        return java.util.Collections.emptyEnumeration();
+    }
+
+    protected Package getPackage(String name) {
+        return null;
+    }
+
+    protected Package[] getPackages() {
+        return new Package[0];
     }
 }
