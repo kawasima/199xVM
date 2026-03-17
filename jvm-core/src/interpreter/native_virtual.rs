@@ -256,14 +256,20 @@ impl super::Vm {
                             None
                         }
                     });
-                let off = args.get(2).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
-                let len = args.get(3).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let off_raw = args.get(2).map(|v| v.as_int()).unwrap_or(0);
+                let len_raw = args.get(3).map(|v| v.as_int()).unwrap_or(0);
 
                 if let Some(bytes) = byte_array {
-                    if off + len > bytes.len() {
-                        self.throw_class_format_error("defineClass: off+len exceeds byte array");
+                    if off_raw < 0 || len_raw < 0 || (off_raw as usize) + (len_raw as usize) > bytes.len() {
+                        let detail = format!("defineClass: off={off_raw}, len={len_raw}, array length={}", bytes.len());
+                        let exc = JObject::new("java/lang/IndexOutOfBoundsException");
+                        let msg = self.intern_string(detail);
+                        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+                        *self.pending_exception_mut() = Some(exc);
                         return Some(JValue::Void);
                     }
+                    let off = off_raw as usize;
+                    let len = len_raw as usize;
                     let class_bytes = bytes[off..off + len].to_vec();
                     if let Some(class_name) = crate::class_file::parse_class_name(&class_bytes) {
                         self.load_lazy(class_name.clone(), class_bytes);
@@ -286,17 +292,13 @@ impl super::Vm {
                     .unwrap_or_default();
                 let normalized = name.strip_prefix('/').unwrap_or(&name);
                 if self.resources.contains_key(normalized) {
-                    // Return a bundle: URL pointing to the resource
-                    // Construct URL object via bytecode: new URL("bundle", "", "/" + name)
                     let url = JObject::new("java/net/URL");
-                    let _url_str = self.intern_string(format!("bundle:///{normalized}"));
                     url.borrow_mut().fields.insert("protocol".to_owned(),
                         JValue::Ref(Some(self.intern_string("bundle"))));
                     url.borrow_mut().fields.insert("host".to_owned(),
                         JValue::Ref(Some(self.intern_string(""))));
+                    url.borrow_mut().fields.insert("port".to_owned(), JValue::Int(-1));
                     url.borrow_mut().fields.insert("file".to_owned(),
-                        JValue::Ref(Some(self.intern_string(format!("/{normalized}")))));
-                    url.borrow_mut().fields.insert("path".to_owned(),
                         JValue::Ref(Some(self.intern_string(format!("/{normalized}")))));
                     url.borrow_mut().fields.insert("ref".to_owned(), JValue::Ref(None));
                     Some(JValue::Ref(Some(url)))
@@ -331,8 +333,14 @@ impl super::Vm {
                 Some(JValue::Ref(None))
             }
             "findResources" => {
-                // Return empty enumeration — delegate to bytecode Collections.emptyEnumeration()
-                Some(JValue::Ref(None))
+                // Return empty Enumeration via Collections.emptyEnumeration()
+                match self.invoke_static(
+                    "java/util/Collections", "emptyEnumeration",
+                    "()Ljava/util/Enumeration;", vec![],
+                ) {
+                    Ok(v) => Some(v),
+                    Err(_) => Some(JValue::Ref(None)),
+                }
             }
             _ => None,
         }
