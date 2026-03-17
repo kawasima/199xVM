@@ -246,9 +246,6 @@ impl super::Vm {
                     .and_then(|v| v.as_ref())
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))?;
                 let initialize = _args.get(1).map(|v| v.as_int() != 0).unwrap_or(true);
-                if std::env::var("VM_DEBUG").is_ok() {
-                    eprintln!("[forName1] name={runtime_name:?} init={initialize}");
-                }
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
                 self.ensure_class_ready(&internal);
                 match self.classes.get(&internal) {

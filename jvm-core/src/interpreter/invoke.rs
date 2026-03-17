@@ -25,7 +25,7 @@ impl Vm {
                     if let Some(err) = self.pending_exception_err() { return Err(err); }
                     return Ok(v);
                 }
-                { let msg = format!("Method not found: {class_name}.{method_name}{descriptor}"); if std::env::var("VM_DEBUG").is_ok() { eprintln!("[debug] {msg}"); } return Err(msg); }
+                return Err(format!("Method not found: {class_name}.{method_name}{descriptor}"));
             }
         };
         let desc = resolved_desc.as_str();
@@ -46,7 +46,7 @@ impl Vm {
                 // Try with full locals construction for proper slot mapping.
                 let info = match self.resolve_method_exec_info(class_name, method_name, desc) {
                     Some(info) => info,
-                    None => { let msg = format!("Method not found: {class_name}.{method_name}{desc}"); if std::env::var("VM_DEBUG").is_ok() { eprintln!("[debug] {msg}"); } return Err(msg); }
+                    None => return Err(format!("Method not found: {class_name}.{method_name}{desc}")),
                 };
                 if !info.has_code {
                     let (param_tokens, _) = Self::parse_method_descriptor_tokens(&info.descriptor);
@@ -394,7 +394,7 @@ impl Vm {
                     if let Some(err) = self.pending_exception_err() { return Err(err); }
                     return Ok(v);
                 }
-                { let msg = format!("Method not found: {class_name}.{method_name}{descriptor}"); if std::env::var("VM_DEBUG").is_ok() { eprintln!("[debug] {msg}"); } return Err(msg); }
+                return Err(format!("Method not found: {class_name}.{method_name}{descriptor}"));
             }
         };
         let desc = resolved_desc.as_str();

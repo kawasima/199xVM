@@ -289,7 +289,7 @@ impl super::Vm {
                     // Return a bundle: URL pointing to the resource
                     // Construct URL object via bytecode: new URL("bundle", "", "/" + name)
                     let url = JObject::new("java/net/URL");
-                    let url_str = self.intern_string(format!("bundle:///{normalized}"));
+                    let _url_str = self.intern_string(format!("bundle:///{normalized}"));
                     url.borrow_mut().fields.insert("protocol".to_owned(),
                         JValue::Ref(Some(self.intern_string("bundle"))));
                     url.borrow_mut().fields.insert("host".to_owned(),
@@ -459,9 +459,6 @@ impl super::Vm {
                     (regex, input)
                 };
                 // Use captures to extract groups
-                if std::env::var("VM_DEBUG").is_ok() {
-                    eprintln!("[matches] regex={regex:?} input={input:?}");
-                }
                 let anchored = format!("^(?:{regex})$");
                 let re = regex::Regex::new(&anchored).ok();
                 let caps = re.as_ref().and_then(|r| r.captures(&input));
