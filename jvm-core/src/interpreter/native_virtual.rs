@@ -250,10 +250,13 @@ impl super::Vm {
                     .and_then(|v| v.as_ref())
                     .and_then(|r| {
                         let obj = r.borrow();
-                        if let NativePayload::ByteArray(ref v) = obj.native {
-                            Some(v.clone())
-                        } else {
-                            None
+                        match &obj.native {
+                            NativePayload::ByteArray(v) => Some(v.clone()),
+                            // newarray-created byte[] uses Array of JValue::Int
+                            NativePayload::Array(v) => {
+                                Some(v.iter().map(|e| e.as_int() as u8).collect())
+                            }
+                            _ => None,
                         }
                     });
                 let off_raw = args.get(2).map(|v| v.as_int()).unwrap_or(0);
@@ -1404,14 +1407,18 @@ impl super::Vm {
                         let new_ch = char::from_u32(*new_c as u32).unwrap_or('\0');
                         let result = s.replace(old_ch, &new_ch.to_string());
                         Some(JValue::Ref(Some(self.intern_string(result))))
-                    } else if let (JValue::Ref(Some(old_s)), JValue::Ref(Some(new_s))) = (&_args[0], &_args[1]) {
-                        // replace(CharSequence, CharSequence)
-                        let old_str = old_s.borrow().as_java_string().unwrap_or("").to_owned();
-                        let new_str = new_s.borrow().as_java_string().unwrap_or("").to_owned();
+                    } else {
+                        // replace(CharSequence, CharSequence) — null args throw NPE per JDK spec
+                        let old_ref = _args[0].as_ref();
+                        let new_ref = _args[1].as_ref();
+                        if old_ref.is_none() || new_ref.is_none() {
+                            self.throw_null_pointer("String.replace: null argument");
+                            return Some(JValue::Ref(Some(Rc::clone(this))));
+                        }
+                        let old_str = old_ref.unwrap().borrow().as_java_string().unwrap_or("").to_owned();
+                        let new_str = new_ref.unwrap().borrow().as_java_string().unwrap_or("").to_owned();
                         let result = s.replace(&old_str, &new_str);
                         Some(JValue::Ref(Some(self.intern_string(result))))
-                    } else {
-                        Some(JValue::Ref(Some(Rc::clone(this))))
                     }
                 } else {
                     Some(JValue::Ref(Some(Rc::clone(this))))
