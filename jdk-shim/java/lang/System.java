@@ -25,16 +25,51 @@
 
 package java.lang;
 
+import java.io.InputStream;
 import java.io.PrintStream;
+import java.util.Properties;
 
 public final class System {
     // These are resolved natively by the VM (resolve_static_field).
+    public static InputStream in = InputStream.nullInputStream();
     public static PrintStream out;
     public static PrintStream err;
+    private static final Properties props = initProperties();
 
     private System() {}
 
+    public static String getProperty(String key) {
+        return getProperties().getProperty(key);
+    }
+
+    public static String getProperty(String key, String def) {
+        return getProperties().getProperty(key, def);
+    }
+
+    public static Properties getProperties() {
+        return props;
+    }
+
+    public static String lineSeparator() {
+        return getProperty("line.separator", "\n");
+    }
+
     public static native void arraycopy(Object src, int srcPos, Object dest, int destPos, int length);
     public static native long currentTimeMillis();
+    public static native long nanoTime();
     public static native int identityHashCode(Object x);
+
+    private static Properties initProperties() {
+        Properties properties = new Properties();
+        properties.setProperty("line.separator", "\n");
+        properties.setProperty("file.separator", "/");
+        properties.setProperty("path.separator", ":");
+        properties.setProperty("java.version", "25");
+        properties.setProperty("file.encoding", "UTF-8");
+        properties.setProperty("native.encoding", "UTF-8");
+        properties.setProperty("sun.jnu.encoding", "UTF-8");
+        properties.setProperty("user.dir", ".");
+        properties.setProperty("clojure.read.eval", "true");
+        return properties;
+    }
 }

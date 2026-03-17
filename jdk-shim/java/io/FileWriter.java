@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,26 +23,22 @@
  * questions.
  */
 
-package java.net;
+package java.io;
 
-import java.io.IOException;
-
-public class SocketException extends IOException {
-    @java.io.Serial
-    private static final long serialVersionUID = -5935874303556886934L;
-
-    public SocketException(String msg) {
-        super(msg);
+public class FileWriter extends OutputStreamWriter {
+    public FileWriter(String fileName) throws IOException {
+        super(new FileOutputStream(fileName));
     }
 
-    public SocketException() {
+    public FileWriter(String fileName, boolean append) throws IOException {
+        super(new FileOutputStream(fileName, append));
     }
 
-    public SocketException(String msg, Throwable cause) {
-        super(msg, cause);
+    public FileWriter(File file) throws IOException {
+        super(new FileOutputStream(file));
     }
 
-    public SocketException(Throwable cause) {
-        super(cause);
+    public FileWriter(File file, boolean append) throws IOException {
+        super(new FileOutputStream(file, append));
     }
 }

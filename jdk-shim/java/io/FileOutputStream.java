@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1994, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,26 +23,22 @@
  * questions.
  */
 
-package java.net;
+package java.io;
 
-import java.io.IOException;
-
-public class SocketException extends IOException {
-    @java.io.Serial
-    private static final long serialVersionUID = -5935874303556886934L;
-
-    public SocketException(String msg) {
-        super(msg);
+public class FileOutputStream extends OutputStream {
+    public FileOutputStream(String name) throws FileNotFoundException {
+        this(new File(name), false);
     }
 
-    public SocketException() {
+    public FileOutputStream(String name, boolean append) throws FileNotFoundException {
+        this(new File(name), append);
     }
 
-    public SocketException(String msg, Throwable cause) {
-        super(msg, cause);
+    public FileOutputStream(File file) throws FileNotFoundException {
+        this(file, false);
     }
 
-    public SocketException(Throwable cause) {
-        super(cause);
-    }
+    public FileOutputStream(File file, boolean append) throws FileNotFoundException {}
+
+    public void write(int b) throws IOException {}
 }

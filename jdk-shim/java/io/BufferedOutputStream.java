@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1994, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,26 +23,32 @@
  * questions.
  */
 
-package java.net;
+package java.io;
 
-import java.io.IOException;
+public class BufferedOutputStream extends OutputStream {
+    protected OutputStream out;
 
-public class SocketException extends IOException {
-    @java.io.Serial
-    private static final long serialVersionUID = -5935874303556886934L;
-
-    public SocketException(String msg) {
-        super(msg);
+    public BufferedOutputStream(OutputStream out) {
+        this(out, 8192);
     }
 
-    public SocketException() {
+    public BufferedOutputStream(OutputStream out, int size) {
+        this.out = out == null ? OutputStream.nullOutputStream() : out;
     }
 
-    public SocketException(String msg, Throwable cause) {
-        super(msg, cause);
+    public void write(int b) throws IOException {
+        out.write(b);
     }
 
-    public SocketException(Throwable cause) {
-        super(cause);
+    public void write(byte[] b, int off, int len) throws IOException {
+        out.write(b, off, len);
+    }
+
+    public void flush() throws IOException {
+        out.flush();
+    }
+
+    public void close() throws IOException {
+        out.close();
     }
 }

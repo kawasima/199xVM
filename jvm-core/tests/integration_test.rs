@@ -491,6 +491,30 @@ fn matcher_test() {
     assert_eq!(result, "true|false|true|true|true|false|false");
 }
 
+#[test]
+fn regex_groups_test() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "RegexGroupsTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|gc=5|g0=1.12.0|g1=1|g2=12|g3=0|g4=null|g5=null");
+}
+
+#[test]
+fn clojure_bootstrap_shims_test() {
+    let bundle = combined_bundle(shim_bundle(), test_bundle());
+    let result = jvm_core::run_static_native(
+        &bundle,
+        "ClojureBootstrapShimsTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|true|4321|127.0.0.1|false|true");
+}
+
 // ---------------------------------------------------------------------------
 // Stream.filter().map().collect(Collectors.toList())
 // ---------------------------------------------------------------------------

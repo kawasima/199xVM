@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,26 +23,17 @@
  * questions.
  */
 
-package java.net;
+package java.nio.charset;
 
-import java.io.IOException;
+public class IllegalCharsetNameException extends IllegalArgumentException {
+    private String charsetName;
 
-public class SocketException extends IOException {
-    @java.io.Serial
-    private static final long serialVersionUID = -5935874303556886934L;
-
-    public SocketException(String msg) {
-        super(msg);
+    public IllegalCharsetNameException(String charsetName) {
+        super(String.valueOf(charsetName));
+        this.charsetName = charsetName;
     }
 
-    public SocketException() {
-    }
-
-    public SocketException(String msg, Throwable cause) {
-        super(msg, cause);
-    }
-
-    public SocketException(Throwable cause) {
-        super(cause);
+    public String getCharsetName() {
+        return charsetName;
     }
 }

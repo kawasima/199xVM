@@ -42,87 +42,31 @@ public final class Matcher {
         return pattern;
     }
 
-    public Matcher reset() {
-        this.searchIndex = 0;
-        this.matchStart = -1;
-        this.matchEnd = -1;
-        return this;
-    }
+    public native Matcher reset();
 
-    public Matcher reset(CharSequence input) {
-        this.input = (input == null) ? "" : input.toString();
-        return reset();
-    }
+    public native Matcher reset(CharSequence input);
 
-    public boolean matches() {
-        boolean result = nativeMatches(pattern.pattern(), input);
-        if (result) {
-            matchStart = 0;
-            matchEnd = input.length();
-        } else {
-            matchStart = -1;
-            matchEnd = -1;
-        }
-        return result;
-    }
+    public native boolean matches();
 
     private static native boolean nativeMatches(String regex, String input);
 
-    public boolean find() {
-        String r = pattern.pattern();
-        if (r.length() == 0) {
-            matchStart = -1;
-            matchEnd = -1;
-            return false;
-        }
-        int at = -1;
-        if (searchIndex <= input.length()) {
-            int rel = input.substring(searchIndex).indexOf(r);
-            if (rel >= 0) {
-                at = searchIndex + rel;
-            }
-        }
-        if (at < 0) {
-            matchStart = -1;
-            matchEnd = -1;
-            return false;
-        }
-        matchStart = at;
-        matchEnd = at + r.length();
-        searchIndex = matchEnd;
-        return true;
-    }
+    public native boolean find();
 
-    public int start() {
-        return matchStart;
-    }
+    public native int start();
 
-    public int start(int group) {
-        return group == 0 ? matchStart : -1;
-    }
+    public native int start(int group);
 
-    public int end() {
-        return matchEnd;
-    }
+    public native int end();
 
-    public int end(int group) {
-        return group == 0 ? matchEnd : -1;
-    }
+    public native int end(int group);
 
-    public String group() {
-        if (matchStart < 0 || matchEnd < 0) {
-            return null;
-        }
-        return input.substring(matchStart, matchEnd);
-    }
+    public native String group();
 
-    public String group(int group) {
-        return group == 0 ? group() : null;
-    }
+    public native String group(int group);
 
-    public String group(String name) {
-        return group();
-    }
+    public native String group(String name);
+
+    public native int groupCount();
 
     public String replaceAll(String replacement) {
         String r = pattern.pattern();

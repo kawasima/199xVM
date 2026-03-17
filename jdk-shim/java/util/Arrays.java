@@ -789,16 +789,7 @@ public final class Arrays {
      */
     @SuppressWarnings("unchecked")
     public static <T extends Comparable<? super T>> void parallelSort(T[] a) {
-        int n = a.length, p, g;
-        if (n <= MIN_ARRAY_SORT_GRAN ||
-            (p = ForkJoinPool.getCommonPoolParallelism()) == 1)
-            TimSort.sort(a, 0, n, NaturalOrder.INSTANCE, null, 0, 0);
-        else
-            new ArraysParallelSortHelpers.FJObject.Sorter<>
-                (null, a,
-                 (T[]) new Object[n],
-                 0, n, 0, ((g = n / (p << 2)) <= MIN_ARRAY_SORT_GRAN) ?
-                 MIN_ARRAY_SORT_GRAN : g, NaturalOrder.INSTANCE).invoke();
+        sort(a);
     }
 
     /**
@@ -847,17 +838,7 @@ public final class Arrays {
     @SuppressWarnings("unchecked")
     public static <T extends Comparable<? super T>>
     void parallelSort(T[] a, int fromIndex, int toIndex) {
-        rangeCheck(a.length, fromIndex, toIndex);
-        int n = toIndex - fromIndex, p, g;
-        if (n <= MIN_ARRAY_SORT_GRAN ||
-            (p = ForkJoinPool.getCommonPoolParallelism()) == 1)
-            TimSort.sort(a, fromIndex, toIndex, NaturalOrder.INSTANCE, null, 0, 0);
-        else
-            new ArraysParallelSortHelpers.FJObject.Sorter<>
-                (null, a,
-                 (T[]) new Object[n],
-                 fromIndex, n, 0, ((g = n / (p << 2)) <= MIN_ARRAY_SORT_GRAN) ?
-                 MIN_ARRAY_SORT_GRAN : g, NaturalOrder.INSTANCE).invoke();
+        sort(a, fromIndex, toIndex);
     }
 
     /**
@@ -895,18 +876,7 @@ public final class Arrays {
      */
     @SuppressWarnings("unchecked")
     public static <T> void parallelSort(T[] a, Comparator<? super T> cmp) {
-        if (cmp == null)
-            cmp = NaturalOrder.INSTANCE;
-        int n = a.length, p, g;
-        if (n <= MIN_ARRAY_SORT_GRAN ||
-            (p = ForkJoinPool.getCommonPoolParallelism()) == 1)
-            TimSort.sort(a, 0, n, cmp, null, 0, 0);
-        else
-            new ArraysParallelSortHelpers.FJObject.Sorter<>
-                (null, a,
-                 (T[]) new Object[n],
-                 0, n, 0, ((g = n / (p << 2)) <= MIN_ARRAY_SORT_GRAN) ?
-                 MIN_ARRAY_SORT_GRAN : g, cmp).invoke();
+        sort(a, cmp);
     }
 
     /**
@@ -955,19 +925,7 @@ public final class Arrays {
     @SuppressWarnings("unchecked")
     public static <T> void parallelSort(T[] a, int fromIndex, int toIndex,
                                         Comparator<? super T> cmp) {
-        rangeCheck(a.length, fromIndex, toIndex);
-        if (cmp == null)
-            cmp = NaturalOrder.INSTANCE;
-        int n = toIndex - fromIndex, p, g;
-        if (n <= MIN_ARRAY_SORT_GRAN ||
-            (p = ForkJoinPool.getCommonPoolParallelism()) == 1)
-            TimSort.sort(a, fromIndex, toIndex, cmp, null, 0, 0);
-        else
-            new ArraysParallelSortHelpers.FJObject.Sorter<>
-                (null, a,
-                 (T[]) new Object[n],
-                 fromIndex, n, 0, ((g = n / (p << 2)) <= MIN_ARRAY_SORT_GRAN) ?
-                 MIN_ARRAY_SORT_GRAN : g, cmp).invoke();
+        sort(a, fromIndex, toIndex, cmp);
     }
 
     /*
@@ -1028,10 +986,7 @@ public final class Arrays {
      *         {@link Comparable} contract
      */
     public static void sort(Object[] a) {
-        if (LegacyMergeSort.userRequested)
-            legacyMergeSort(a);
-        else
-            ComparableTimSort.sort(a, 0, a.length, null, 0, 0);
+        legacyMergeSort(a);
     }
 
     /** To be removed in a future release. */
@@ -1094,10 +1049,7 @@ public final class Arrays {
      */
     public static void sort(Object[] a, int fromIndex, int toIndex) {
         rangeCheck(a.length, fromIndex, toIndex);
-        if (LegacyMergeSort.userRequested)
-            legacyMergeSort(a, fromIndex, toIndex);
-        else
-            ComparableTimSort.sort(a, fromIndex, toIndex, null, 0, 0);
+        legacyMergeSort(a, fromIndex, toIndex);
     }
 
     /** To be removed in a future release. */
@@ -1220,10 +1172,7 @@ public final class Arrays {
         if (c == null) {
             sort(a);
         } else {
-            if (LegacyMergeSort.userRequested)
-                legacyMergeSort(a, c);
-            else
-                TimSort.sort(a, 0, a.length, c, null, 0, 0);
+            legacyMergeSort(a, c);
         }
     }
 
@@ -1294,10 +1243,7 @@ public final class Arrays {
             sort(a, fromIndex, toIndex);
         } else {
             rangeCheck(a.length, fromIndex, toIndex);
-            if (LegacyMergeSort.userRequested)
-                legacyMergeSort(a, fromIndex, toIndex, c);
-            else
-                TimSort.sort(a, fromIndex, toIndex, c, null, 0, 0);
+            legacyMergeSort(a, fromIndex, toIndex, c);
         }
     }
 

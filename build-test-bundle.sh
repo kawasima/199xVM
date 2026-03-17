@@ -5,7 +5,10 @@ set -euo pipefail
 SRC_DIR="test-sources"
 OUT_DIR="test-classes"
 OUT_FILE="$OUT_DIR/bundle.bin"
+BENCH_CLASS_DIR="test-bench-classes"
+BUILD_HELPER="tools/BundleWriter.java"
 
+rm -rf "$OUT_DIR" "$BENCH_CLASS_DIR"
 mkdir -p "$OUT_DIR"
 
 # Ensure web/javac.js exists for compact source compilation
@@ -40,43 +43,15 @@ for f in "${COMPACT_SOURCES[@]}"; do
   node compile-compact.mjs "$f" "$OUT_DIR/$classname.class"
 done
 
-# Bundle
-: > "$OUT_FILE"
-count=0
-while IFS= read -r -d '' classfile; do
-  size=$(wc -c < "$classfile")
-  printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
-    $(( (size >> 24) & 0xff )) \
-    $(( (size >> 16) & 0xff )) \
-    $(( (size >>  8) & 0xff )) \
-    $(( size & 0xff )))" >> "$OUT_FILE"
-  cat "$classfile" >> "$OUT_FILE"
-  count=$((count + 1))
-done < <(find "$OUT_DIR" -maxdepth 1 -name '*.class' -print0 | sort -z)
-
-total=$(wc -c < "$OUT_FILE")
-echo "Bundled $count test classes → $OUT_FILE ($total bytes)"
+java "$BUILD_HELPER" "$OUT_FILE" --class-root "$OUT_DIR"
 
 # Benchmark bundle
 BENCH_SRC="$SRC_DIR/bench"
 BENCH_OUT="$OUT_DIR/bench-bundle.bin"
 
-mkdir -p "$OUT_DIR/bench"
+rm -rf "$BENCH_CLASS_DIR"
+mkdir -p "$BENCH_CLASS_DIR"
 
-javac "$BENCH_SRC"/*.java -d "$OUT_DIR/bench"
+javac "$BENCH_SRC"/*.java -d "$BENCH_CLASS_DIR"
 
-: > "$BENCH_OUT"
-bench_count=0
-while IFS= read -r -d '' classfile; do
-  size=$(wc -c < "$classfile")
-  printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
-    $(( (size >> 24) & 0xff )) \
-    $(( (size >> 16) & 0xff )) \
-    $(( (size >>  8) & 0xff )) \
-    $(( size & 0xff )))" >> "$BENCH_OUT"
-  cat "$classfile" >> "$BENCH_OUT"
-  bench_count=$((bench_count + 1))
-done < <(find "$OUT_DIR/bench" -name '*.class' -print0 | sort -z)
-
-bench_total=$(wc -c < "$BENCH_OUT")
-echo "Bundled $bench_count bench classes → $BENCH_OUT ($bench_total bytes)"
+java "$BUILD_HELPER" "$BENCH_OUT" --class-root "$BENCH_CLASS_DIR"

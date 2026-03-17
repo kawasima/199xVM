@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1995, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,22 +27,40 @@ package java.net;
 
 import java.io.IOException;
 
-public class SocketException extends IOException {
-    @java.io.Serial
-    private static final long serialVersionUID = -5935874303556886934L;
+public class ServerSocket {
+    private final int localPort;
+    private final InetAddress bindAddr;
+    private boolean closed;
 
-    public SocketException(String msg) {
-        super(msg);
+    public ServerSocket(int port) throws IOException {
+        this(port, 50, null);
     }
 
-    public SocketException() {
+    public ServerSocket(int port, int backlog, InetAddress bindAddr) throws IOException {
+        this.localPort = port;
+        this.bindAddr = bindAddr == null ? InetAddress.getByName(null) : bindAddr;
     }
 
-    public SocketException(String msg, Throwable cause) {
-        super(msg, cause);
+    public Socket accept() throws IOException {
+        if (closed) {
+            throw new SocketException("Socket is closed");
+        }
+        return new Socket();
     }
 
-    public SocketException(Throwable cause) {
-        super(cause);
+    public void close() throws IOException {
+        closed = true;
+    }
+
+    public boolean isClosed() {
+        return closed;
+    }
+
+    public int getLocalPort() {
+        return localPort;
+    }
+
+    public InetAddress getInetAddress() {
+        return bindAddr;
     }
 }

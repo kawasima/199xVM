@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1994, 2020, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,26 +23,27 @@
  * questions.
  */
 
-package java.net;
+package java.io;
 
-import java.io.IOException;
-
-public class SocketException extends IOException {
+/**
+ * Signals that an attempt to open the file denoted by a specified pathname
+ * has failed.
+ *
+ * @since 1.0
+ */
+public class FileNotFoundException extends IOException {
     @java.io.Serial
-    private static final long serialVersionUID = -5935874303556886934L;
+    private static final long serialVersionUID = -897856973823710492L;
 
-    public SocketException(String msg) {
-        super(msg);
+    public FileNotFoundException() {
+        super();
     }
 
-    public SocketException() {
+    public FileNotFoundException(String s) {
+        super(s);
     }
 
-    public SocketException(String msg, Throwable cause) {
-        super(msg, cause);
-    }
-
-    public SocketException(Throwable cause) {
-        super(cause);
+    private FileNotFoundException(String path, String reason) {
+        super(path + ((reason == null) ? "" : " (" + reason + ")"));
     }
 }

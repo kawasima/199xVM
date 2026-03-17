@@ -30,6 +30,7 @@ import java.io.Serializable;
 public class Throwable implements Serializable {
     private String detailMessage;
     private Throwable cause = this;
+    private StackTraceElement[] stackTrace = new StackTraceElement[0];
 
     public Throwable() {}
     public Throwable(String message) { this.detailMessage = message; }
@@ -57,6 +58,23 @@ public class Throwable implements Serializable {
     final void setCause(Throwable cause) {
         this.cause = cause;
     }
+
+    public Throwable fillInStackTrace() {
+        stackTrace = new StackTraceElement[0];
+        return this;
+    }
+
+    public StackTraceElement[] getStackTrace() {
+        return stackTrace.clone();
+    }
+
+    public void setStackTrace(StackTraceElement[] stackTrace) {
+        if (stackTrace == null) {
+            throw new NullPointerException();
+        }
+        this.stackTrace = stackTrace.clone();
+    }
+
     public String toString() {
         String s = getClass().getName();
         String message = getMessage();

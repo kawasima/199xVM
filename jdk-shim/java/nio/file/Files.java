@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2007, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,26 +23,19 @@
  * questions.
  */
 
-package java.net;
+package java.nio.file;
 
-import java.io.IOException;
+import java.nio.file.attribute.FileAttribute;
 
-public class SocketException extends IOException {
-    @java.io.Serial
-    private static final long serialVersionUID = -5935874303556886934L;
+public final class Files {
+    private static int tempCounter;
 
-    public SocketException(String msg) {
-        super(msg);
-    }
+    private Files() {}
 
-    public SocketException() {
-    }
-
-    public SocketException(String msg, Throwable cause) {
-        super(msg, cause);
-    }
-
-    public SocketException(Throwable cause) {
-        super(cause);
+    public static Path createTempFile(String prefix, String suffix, FileAttribute<?>[] attrs) {
+        String p = prefix == null ? "tmp" : prefix;
+        String s = suffix == null ? ".tmp" : suffix;
+        int id = ++tempCounter;
+        return new SimplePath("/tmp/" + p + id + s);
     }
 }

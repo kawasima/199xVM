@@ -470,8 +470,13 @@ impl Vm {
                         // Substitute argument — call toString() for objects.
                         if let Some(a) = args.get(arg_idx) {
                             let is_bool = arg_types.get(arg_idx) == Some(&'Z');
+                            let is_char = arg_types.get(arg_idx) == Some(&'C');
                             match a {
                                 JValue::Int(v) if is_bool => result.push_str(if *v != 0 { "true" } else { "false" }),
+                                JValue::Int(v) if is_char => {
+                                    let ch = char::from_u32((*v as u32) & 0xffff).unwrap_or('\u{fffd}');
+                                    result.push(ch);
+                                }
                                 JValue::Int(v) => result.push_str(&v.to_string()),
                                 JValue::Long(v) => result.push_str(&v.to_string()),
                                 JValue::Float(v) => result.push_str(&v.to_string()),

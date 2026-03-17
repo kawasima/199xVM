@@ -60,6 +60,9 @@ impl super::Vm {
                 let p = JObject::new("java/util/regex/Pattern");
                 p.borrow_mut().fields.insert("__regex".to_owned(), JValue::Ref(Some(self.intern_string(regex))));
                 p.borrow_mut().fields.insert("__flags".to_owned(), JValue::Int(0));
+                let regex_ref = p.borrow().fields.get("__regex").cloned().unwrap_or(JValue::Ref(None));
+                p.borrow_mut().fields.insert("regex".to_owned(), regex_ref);
+                p.borrow_mut().fields.insert("flags".to_owned(), JValue::Int(0));
                 Some(JValue::Ref(Some(p)))
             }
             ("java/util/regex/Pattern", "compile", "(Ljava/lang/String;I)Ljava/util/regex/Pattern;") => {
@@ -72,6 +75,9 @@ impl super::Vm {
                 let p = JObject::new("java/util/regex/Pattern");
                 p.borrow_mut().fields.insert("__regex".to_owned(), JValue::Ref(Some(self.intern_string(regex))));
                 p.borrow_mut().fields.insert("__flags".to_owned(), JValue::Int(flags));
+                let regex_ref = p.borrow().fields.get("__regex").cloned().unwrap_or(JValue::Ref(None));
+                p.borrow_mut().fields.insert("regex".to_owned(), regex_ref);
+                p.borrow_mut().fields.insert("flags".to_owned(), JValue::Int(flags));
                 Some(JValue::Ref(Some(p)))
             }
             ("java/util/regex/Pattern", "matches", "(Ljava/lang/String;Ljava/lang/CharSequence;)Z") => {
@@ -312,6 +318,17 @@ impl super::Vm {
                     .map(|d| d.as_millis() as i64)
                     .unwrap_or(0);
                 Some(JValue::Long(ms))
+            }
+            ("java/lang/System", "nanoTime", "()J") => {
+                #[cfg(target_arch = "wasm32")]
+                let ns = (js_sys::Date::now() * 1_000_000.0) as i64;
+                #[cfg(not(target_arch = "wasm32"))]
+                let ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_nanos() as i64)
+                    .unwrap_or(0);
+                Some(JValue::Long(ns))
             }
             ("java/lang/System", "identityHashCode", "(Ljava/lang/Object;)I") => {
                 let hc = _args

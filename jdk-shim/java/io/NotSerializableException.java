@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2022, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,26 +23,23 @@
  * questions.
  */
 
-package java.net;
+package java.io;
 
-import java.io.IOException;
+/**
+ * Thrown when an instance is required to have a Serializable interface.
+ *
+ * @since 1.1
+ */
+public class NotSerializableException extends ObjectStreamException {
 
-public class SocketException extends IOException {
     @java.io.Serial
-    private static final long serialVersionUID = -5935874303556886934L;
+    private static final long serialVersionUID = 2906642554793891381L;
 
-    public SocketException(String msg) {
-        super(msg);
+    public NotSerializableException(String classname) {
+        super(classname);
     }
 
-    public SocketException() {
-    }
-
-    public SocketException(String msg, Throwable cause) {
-        super(msg, cause);
-    }
-
-    public SocketException(Throwable cause) {
-        super(cause);
+    public NotSerializableException() {
+        super();
     }
 }

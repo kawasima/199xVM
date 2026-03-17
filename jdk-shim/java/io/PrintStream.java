@@ -31,7 +31,7 @@ import java.util.Formatter;
  * Minimal PrintStream stub.
  * println/print are handled natively by the VM.
  */
-public class PrintStream {
+public class PrintStream extends OutputStream {
     public native void println(String s);
     public native void println(Object o);
     public native void println(int i);
@@ -39,6 +39,10 @@ public class PrintStream {
     public native void print(String s);
     public native void print(Object o);
     public native void print(int i);
+
+    public void write(int b) {
+        print(String.valueOf((char) (b & 0xff)));
+    }
 
     public PrintStream format(String format, Object... args) {
         String s = new Formatter().format(format, args).toString();

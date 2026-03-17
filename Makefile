@@ -14,7 +14,7 @@ JAR_NAMES := $(RAOH_JAR) $(RAOH_JSON_JAR) $(JACKSON_ANN_JAR) \
 
 WEB_JARS := $(addprefix web/,$(JAR_NAMES))
 
-.PHONY: all dev-jars shim test-bundle clj-smoke-bundle clj-smoke-run clj-smoke-docker javac wasm dist test clean deploy docker-playground dist-docker
+.PHONY: all dev-jars shim test-bundle clj-smoke-bundle clj-smoke-run clj-smoke-test clj-smoke-docker clj-smoke-test-docker javac wasm dist test clean deploy docker-playground dist-docker
 
 # ============================================================
 # all — build everything needed for local development
@@ -59,7 +59,7 @@ dev-jars: $(WEB_JARS)
 # ============================================================
 # shim — compile JDK shim classes → jdk-shim/bundle.bin
 # ============================================================
-jdk-shim/bundle.bin: build-shim.sh $(shell find jdk-shim -name '*.java' 2>/dev/null)
+jdk-shim/bundle.bin: build-shim.sh tools/BundleWriter.java $(shell find jdk-shim -name '*.java' 2>/dev/null)
 	./build-shim.sh
 
 shim: jdk-shim/bundle.bin
@@ -67,7 +67,7 @@ shim: jdk-shim/bundle.bin
 # ============================================================
 # test-bundle — compile test Java classes → test-classes/bundle.bin
 # ============================================================
-test-classes/bundle.bin: build-test-bundle.sh web/javac.js $(shell find test-sources -name '*.java' 2>/dev/null)
+test-classes/bundle.bin: build-test-bundle.sh tools/BundleWriter.java web/javac.js $(shell find test-sources -name '*.java' 2>/dev/null)
 	./build-test-bundle.sh
 
 test-bundle: test-classes/bundle.bin
@@ -75,7 +75,7 @@ test-bundle: test-classes/bundle.bin
 # ============================================================
 # clj-smoke-bundle — compile isolated Clojure smoke classes → clj-smoke/bundle.bin
 # ============================================================
-clj-smoke/bundle.bin: build-clj-smoke.sh test-sources/clojure/deps.edn $(shell find test-sources/clojure -type f 2>/dev/null)
+clj-smoke/bundle.bin: build-clj-smoke.sh tools/BundleWriter.java test-sources/clojure/deps.edn $(shell find test-sources/clojure -type f 2>/dev/null)
 	./build-clj-smoke.sh
 
 clj-smoke-bundle: clj-smoke/bundle.bin
@@ -87,12 +87,31 @@ clj-smoke-run: clj-smoke/bundle.bin jdk-shim/bundle.bin
 	cargo run --package jvm-core --bin run_bundle jdk-shim/bundle.bin clj-smoke/bundle.bin ClojureSmokeEntry run '()Ljava/lang/String;'
 
 # ============================================================
+# clj-smoke-test — assert the isolated Clojure smoke bundle returns "ok"
+# ============================================================
+clj-smoke-test: clj-smoke/bundle.bin jdk-shim/bundle.bin
+	@out="$$(cargo run --quiet --package jvm-core --bin run_bundle jdk-shim/bundle.bin clj-smoke/bundle.bin ClojureSmokeEntry run '()Ljava/lang/String;')"; \
+	if [ "$$out" != "ok" ]; then \
+	  printf '%s\n' "$$out"; \
+	  exit 1; \
+	fi; \
+	printf '%s\n' "$$out"
+
+# ============================================================
 # clj-smoke-docker — build + run the isolated Clojure smoke flow in containers
 # ============================================================
 clj-smoke-docker:
 	docker-compose run --rm java make shim
 	docker-compose run --rm clj make clj-smoke-bundle
-	docker-compose run --rm rust cargo run --package jvm-core --bin run_bundle /app/jdk-shim/bundle.bin /app/clj-smoke/bundle.bin ClojureSmokeEntry run '()Ljava/lang/String;'
+	docker-compose run --rm rust make clj-smoke-run
+
+# ============================================================
+# clj-smoke-test-docker — build + assert the isolated Clojure smoke flow in containers
+# ============================================================
+clj-smoke-test-docker:
+	docker-compose run --rm java make shim
+	docker-compose run --rm clj make clj-smoke-bundle
+	docker-compose run --rm rust make clj-smoke-test
 
 # ============================================================
 # javac — build web/javac.js from web/javac.ts
@@ -211,6 +230,7 @@ clean:
 	rm -rf dist
 	rm -rf jdk-shim/out jdk-shim/bundle.bin
 	rm -rf test-classes
+	rm -rf test-bench-classes
 	rm -rf clj-smoke/target clj-smoke/bundle.bin
 	rm -f  web/javac.js
 	rm -rf jvm-core/pkg

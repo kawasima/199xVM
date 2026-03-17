@@ -12,6 +12,7 @@ set -euo pipefail
 SHIM_SRC="jdk-shim"
 OUT_DIR="$SHIM_SRC/out"
 BUNDLE="$SHIM_SRC/bundle.bin"
+BUILD_HELPER="tools/BundleWriter.java"
 
 # Entry points — javac resolves transitive deps via -sourcepath.
 ENTRY_POINTS=(
@@ -38,12 +39,15 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/lang/NoSuchMethodException.java"
   "$SHIM_SRC/java/lang/ReflectiveOperationException.java"
   "$SHIM_SRC/java/lang/Runtime.java"
+  "$SHIM_SRC/java/lang/System.java"
   "$SHIM_SRC/java/lang/Thread.java"
+  "$SHIM_SRC/java/lang/ThreadLocal.java"
   "$SHIM_SRC/java/lang/ref/Reference.java"
   "$SHIM_SRC/java/lang/ref/ReferenceQueue.java"
   "$SHIM_SRC/java/lang/ref/SoftReference.java"
   "$SHIM_SRC/java/lang/ref/WeakReference.java"
   "$SHIM_SRC/java/lang/SecurityException.java"
+  "$SHIM_SRC/java/lang/StackTraceElement.java"
   "$SHIM_SRC/java/lang/StackOverflowError.java"
   "$SHIM_SRC/java/lang/ThreadDeath.java"
   "$SHIM_SRC/java/lang/VerifyError.java"
@@ -90,7 +94,14 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/io/Flushable.java"
   "$SHIM_SRC/java/io/IOException.java"
   "$SHIM_SRC/java/io/CharConversionException.java"
+  "$SHIM_SRC/java/io/BufferedInputStream.java"
+  "$SHIM_SRC/java/io/BufferedOutputStream.java"
+  "$SHIM_SRC/java/io/BufferedReader.java"
+  "$SHIM_SRC/java/io/BufferedWriter.java"
   "$SHIM_SRC/java/io/EOFException.java"
+  "$SHIM_SRC/java/io/File.java"
+  "$SHIM_SRC/java/io/FileNotFoundException.java"
+  "$SHIM_SRC/java/io/NotSerializableException.java"
   "$SHIM_SRC/java/io/ObjectStreamException.java"
   "$SHIM_SRC/java/io/InvalidObjectException.java"
   "$SHIM_SRC/java/io/DataInput.java"
@@ -98,10 +109,18 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/io/ObjectInput.java"
   "$SHIM_SRC/java/io/ObjectOutput.java"
   "$SHIM_SRC/java/io/Externalizable.java"
+  "$SHIM_SRC/java/io/FileInputStream.java"
+  "$SHIM_SRC/java/io/FileOutputStream.java"
+  "$SHIM_SRC/java/io/FileWriter.java"
   "$SHIM_SRC/java/io/InputStream.java"
   "$SHIM_SRC/java/io/ByteArrayInputStream.java"
   "$SHIM_SRC/java/io/ByteArrayOutputStream.java"
+  "$SHIM_SRC/java/io/InputStreamReader.java"
+  "$SHIM_SRC/java/io/LineNumberReader.java"
   "$SHIM_SRC/java/io/OutputStream.java"
+  "$SHIM_SRC/java/io/OutputStreamWriter.java"
+  "$SHIM_SRC/java/io/PrintWriter.java"
+  "$SHIM_SRC/java/io/PushbackReader.java"
   "$SHIM_SRC/java/io/CharArrayReader.java"
   "$SHIM_SRC/java/io/Reader.java"
   "$SHIM_SRC/java/io/StringReader.java"
@@ -109,6 +128,7 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/io/Writer.java"
   "$SHIM_SRC/java/util/ArrayList.java"
   "$SHIM_SRC/java/util/AbstractCollection.java"
+  "$SHIM_SRC/java/util/RandomAccess.java"
   "$SHIM_SRC/java/util/AbstractQueue.java"
   "$SHIM_SRC/java/util/AbstractList.java"
   "$SHIM_SRC/java/util/AbstractMap.java"
@@ -124,6 +144,7 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/util/OptionalInt.java"
   "$SHIM_SRC/java/util/OptionalLong.java"
   "$SHIM_SRC/java/util/OptionalDouble.java"
+  "$SHIM_SRC/java/util/Properties.java"
   "$SHIM_SRC/java/util/SortedMap.java"
   "$SHIM_SRC/java/util/NavigableMap.java"
   "$SHIM_SRC/java/util/TreeMap.java"
@@ -140,6 +161,7 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/util/ArrayDeque.java"
   "$SHIM_SRC/java/util/Date.java"
   "$SHIM_SRC/java/util/Locale.java"
+  "$SHIM_SRC/java/util/UUID.java"
   "$SHIM_SRC/java/util/TimeZone.java"
   "$SHIM_SRC/java/util/regex/Pattern.java"
   "$SHIM_SRC/java/math/BigInteger.java"
@@ -205,6 +227,14 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/time/YearMonth.java"
   "$SHIM_SRC/java/time/MonthDay.java"
   "$SHIM_SRC/java/time/DayOfWeek.java"
+  "$SHIM_SRC/java/nio/charset/Charset.java"
+  "$SHIM_SRC/java/nio/charset/IllegalCharsetNameException.java"
+  "$SHIM_SRC/java/nio/charset/StandardCharsets.java"
+  "$SHIM_SRC/java/nio/charset/UnsupportedCharsetException.java"
+  "$SHIM_SRC/java/nio/file/Files.java"
+  "$SHIM_SRC/java/nio/file/Path.java"
+  "$SHIM_SRC/java/nio/file/SimplePath.java"
+  "$SHIM_SRC/java/nio/file/attribute/FileAttribute.java"
   "$SHIM_SRC/java/lang/IO.java"
   "$SHIM_SRC/java/lang/StrictMath.java"
   "$SHIM_SRC/java/lang/Record.java"
@@ -219,6 +249,7 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/util/stream/Gatherers.java"
   "$SHIM_SRC/java/util/concurrent/atomic/AtomicBoolean.java"
   "$SHIM_SRC/java/util/concurrent/atomic/AtomicReference.java"
+  "$SHIM_SRC/java/util/concurrent/atomic/AtomicInteger.java"
   "$SHIM_SRC/java/util/concurrent/atomic/AtomicReferenceArray.java"
   "$SHIM_SRC/java/util/concurrent/atomic/AtomicLongArray.java"
   "$SHIM_SRC/java/util/concurrent/atomic/AtomicLong.java"
@@ -257,10 +288,16 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/util/concurrent/locks/Condition.java"
   "$SHIM_SRC/java/util/concurrent/locks/Lock.java"
   "$SHIM_SRC/java/util/concurrent/locks/ReentrantLock.java"
+  "$SHIM_SRC/java/util/concurrent/locks/ReentrantReadWriteLock.java"
   "$SHIM_SRC/java/io/UnsupportedEncodingException.java"
+  "$SHIM_SRC/java/security/PrivilegedAction.java"
+  "$SHIM_SRC/java/security/AccessController.java"
+  "$SHIM_SRC/java/security/SecureClassLoader.java"
   "$SHIM_SRC/java/net/MalformedURLException.java"
   "$SHIM_SRC/java/net/URISyntaxException.java"
   "$SHIM_SRC/java/net/UnknownHostException.java"
+  "$SHIM_SRC/java/net/ServerSocket.java"
+  "$SHIM_SRC/java/net/Socket.java"
   "$SHIM_SRC/java/net/SocketException.java"
   "$SHIM_SRC/java/net/ProtocolException.java"
   "$SHIM_SRC/java/net/URLEncoder.java"
@@ -269,6 +306,7 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/net/InetAddress.java"
   "$SHIM_SRC/java/net/URLConnection.java"
   "$SHIM_SRC/java/net/URL.java"
+  "$SHIM_SRC/java/net/URLClassLoader.java"
 )
 
 rm -rf "$OUT_DIR"
@@ -280,19 +318,4 @@ javac --patch-module java.base="$SHIM_SRC" \
       -d "$OUT_DIR" \
       "${ENTRY_POINTS[@]}"
 
-# Build bundle.bin from compiled classes.
-: > "$BUNDLE"
-count=0
-while IFS= read -r -d '' classfile; do
-  size=$(wc -c < "$classfile")
-  printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
-    $(( (size >> 24) & 0xff )) \
-    $(( (size >> 16) & 0xff )) \
-    $(( (size >>  8) & 0xff )) \
-    $(( size & 0xff )))" >> "$BUNDLE"
-  cat "$classfile" >> "$BUNDLE"
-  count=$((count + 1))
-done < <(find "$OUT_DIR" -name '*.class' -print0 | sort -z)
-
-total=$(wc -c < "$BUNDLE")
-echo "Bundled $count shim classes → $BUNDLE ($total bytes)"
+java "$BUILD_HELPER" "$BUNDLE" --class-root "$OUT_DIR"

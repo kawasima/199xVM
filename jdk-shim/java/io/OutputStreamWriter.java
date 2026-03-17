@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1996, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,26 +23,41 @@
  * questions.
  */
 
-package java.net;
+package java.io;
 
-import java.io.IOException;
+import java.nio.charset.Charset;
 
-public class SocketException extends IOException {
-    @java.io.Serial
-    private static final long serialVersionUID = -5935874303556886934L;
+public class OutputStreamWriter extends Writer {
+    private final OutputStream out;
+    private final Charset charset;
 
-    public SocketException(String msg) {
-        super(msg);
+    public OutputStreamWriter(OutputStream out) {
+        this(out, Charset.defaultCharset());
     }
 
-    public SocketException() {
+    public OutputStreamWriter(OutputStream out, Charset cs) {
+        super(out);
+        if (out == null) throw new NullPointerException();
+        if (cs == null) throw new NullPointerException();
+        this.out = out;
+        this.charset = cs;
     }
 
-    public SocketException(String msg, Throwable cause) {
-        super(msg, cause);
+    public String getEncoding() {
+        return charset.name();
     }
 
-    public SocketException(Throwable cause) {
-        super(cause);
+    public void write(char[] cbuf, int off, int len) throws IOException {
+        for (int i = 0; i < len; i++) {
+            out.write((byte) cbuf[off + i]);
+        }
+    }
+
+    public void flush() throws IOException {
+        out.flush();
+    }
+
+    public void close() throws IOException {
+        out.close();
     }
 }

@@ -8,6 +8,7 @@ TARGET_DIR="$SMOKE_DIR/target"
 AOT_DIR="$TARGET_DIR/aot"
 UNPACK_DIR="$TARGET_DIR/unpacked"
 BUNDLE_FILE="$SMOKE_DIR/bundle.bin"
+BUILD_HELPER="$ROOT_DIR/tools/BundleWriter.java"
 CLJ_DEPS="$(tr '\n' ' ' < "$CLJ_SRC_DIR/deps.edn")"
 
 rm -rf "$AOT_DIR" "$UNPACK_DIR"
@@ -44,24 +45,18 @@ for jar_file in "${cp_entries[@]}"; do
   )
 done
 
-: > "$BUNDLE_FILE"
-count=0
-while IFS= read -r -d '' classfile; do
-  size=$(wc -c < "$classfile")
-  printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \
-    $(( (size >> 24) & 0xff )) \
-    $(( (size >> 16) & 0xff )) \
-    $(( (size >>  8) & 0xff )) \
-    $(( size & 0xff )))" >> "$BUNDLE_FILE"
-  cat "$classfile" >> "$BUNDLE_FILE"
-  count=$((count + 1))
-done < <(
-  {
-    find "$AOT_DIR" -type f -name '*.class' \( -path "$AOT_DIR/smoke/*" -o -name 'ClojureSmokeEntry.class' \) -print0
-    find "$UNPACK_DIR" -type f -name '*.class' -print0
-  } | sort -z
+bundle_args=(
+  "$BUNDLE_FILE"
+  --class-root "$AOT_DIR"
+  --resource-root "$CLJ_SRC_DIR/src"
 )
+for jar_file in "${cp_entries[@]}"; do
+  [[ "$jar_file" == *.jar ]] || continue
+  [[ "$jar_file" = /* ]] || jar_file="$ROOT_DIR/$jar_file"
+  jar_name="$(basename "$jar_file" .jar)"
+  jar_root="$UNPACK_DIR/$jar_name"
+  bundle_args+=(--class-root "$jar_root" --resource-root "$jar_root")
+done
 
-total=$(wc -c < "$BUNDLE_FILE")
-echo "Bundled $count Clojure smoke classes → $BUNDLE_FILE ($total bytes)"
+java "$BUILD_HELPER" "${bundle_args[@]}"
 echo "Entry point: ClojureSmokeEntry.run()Ljava/lang/String;"

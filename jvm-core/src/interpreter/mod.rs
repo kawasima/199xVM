@@ -803,19 +803,51 @@ impl Vm {
         }
     }
 
-    fn pending_exception_err(&self) -> Option<String> {
-        self.scheduler.current_thread().pending_exception.as_ref().map(|r| {
-            let b = r.borrow();
-            let mut s = format!("Exception: {}", b.class_name);
-            if let Some(JValue::Ref(Some(msg_ref))) = b.fields.get("detailMessage") {
-                if let Some(msg) = msg_ref.borrow().as_java_string() {
-                    if !msg.is_empty() {
-                        s.push_str(": ");
-                        s.push_str(msg);
-                    }
+    fn pending_exception_err(&mut self) -> Option<String> {
+        let pending = self.scheduler.current_thread().pending_exception.clone();
+        pending.as_ref().map(|r| {
+            let mut parts = Vec::new();
+            let mut seen = HashSet::new();
+            let mut current = Some(Rc::clone(r));
+            while let Some(exc) = current {
+                let ptr = Rc::as_ptr(&exc) as usize;
+                if !seen.insert(ptr) {
+                    break;
                 }
+                let (class_name, part, direct_cause) = {
+                    let b = exc.borrow();
+                    let mut part = b.class_name.clone();
+                    if let Some(JValue::Ref(Some(msg_ref))) = b.fields.get("detailMessage") {
+                        if let Some(msg) = msg_ref.borrow().as_java_string() {
+                            if !msg.is_empty() {
+                                part.push_str(": ");
+                                part.push_str(msg);
+                            }
+                        }
+                    }
+                    let cause = b
+                        .fields
+                        .get("cause")
+                        .and_then(|v| v.as_ref())
+                        .cloned()
+                        .filter(|cause| Rc::as_ptr(cause) as usize != ptr);
+                    (b.class_name.clone(), part, cause)
+                };
+                parts.push(part);
+                current = direct_cause.or_else(|| {
+                    match self.invoke_virtual(
+                        exc.clone(),
+                        &class_name,
+                        "getCause",
+                        "()Ljava/lang/Throwable;",
+                        vec![],
+                    ) {
+                        Ok(JValue::Ref(Some(cause))) if Rc::as_ptr(&cause) as usize != ptr => Some(cause),
+                        _ => None,
+                    }
+                });
             }
-            s
+            format!("Exception: {}", parts.join(" <- "))
         })
     }
 

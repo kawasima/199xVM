@@ -3,11 +3,13 @@
 /.cpcache/
 /.clj-kondo/
 /.lsp/
+/.vscode/
 node_modules/
 jvm-core/pkg/
 jvm-core/target/
 hello-classes/
 test-classes/
+test-bench-classes/
 jdk-shim/bundle.bin
 jdk-shim/out/
 web/javac.js

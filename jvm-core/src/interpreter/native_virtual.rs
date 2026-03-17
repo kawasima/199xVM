@@ -20,6 +20,10 @@ fn char_to_byte_offset(s: &str, char_idx: usize) -> usize {
     s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
 }
 
+fn regex_full_pattern(regex: &str) -> String {
+    format!("^(?:{regex})$")
+}
+
 impl super::Vm {
     /// Extract a Rust `String` from `java/lang/String` constructor arguments based on the method descriptor.
     /// Returns an empty string if the descriptor is not recognized or arguments are invalid.
@@ -252,6 +256,80 @@ impl super::Vm {
         }
     }
 
+    fn matcher_regex_and_input(&self, this: &JRef) -> (String, String, usize) {
+        let mb = this.borrow();
+        let pattern_ref = mb.fields.get("__pattern")
+            .or_else(|| mb.fields.get("pattern"))
+            .and_then(|v| v.as_ref())
+            .cloned();
+        let regex = pattern_ref
+            .as_ref()
+            .and_then(|p| p.borrow().fields.get("__regex").cloned()
+                .or_else(|| p.borrow().fields.get("regex").cloned()))
+            .and_then(|v| v.as_ref().cloned())
+            .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+            .unwrap_or_default();
+        let input = mb.fields.get("__input")
+            .or_else(|| mb.fields.get("input"))
+            .and_then(|v| v.as_ref())
+            .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+            .unwrap_or_default();
+        let search_index = mb.fields.get("__search_index")
+            .or_else(|| mb.fields.get("searchIndex"))
+            .map(|v| v.as_int().max(0) as usize)
+            .unwrap_or(0);
+        (regex, input, search_index)
+    }
+
+    fn clear_matcher_state(&mut self, this: &JRef, search_index: usize) {
+        let mut mb = this.borrow_mut();
+        mb.fields.insert("__group_count".to_owned(), JValue::Int(0));
+        mb.fields.insert("__search_index".to_owned(), JValue::Int(search_index as i32));
+        mb.fields.insert("searchIndex".to_owned(), JValue::Int(search_index as i32));
+        mb.fields.insert("matchStart".to_owned(), JValue::Int(-1));
+        mb.fields.insert("matchEnd".to_owned(), JValue::Int(-1));
+    }
+
+    fn store_matcher_captures(
+        &mut self,
+        this: &JRef,
+        input: &str,
+        base_byte: usize,
+        captures: &regex::Captures<'_>,
+        next_search_chars: usize,
+    ) {
+        let group_count = captures.len().saturating_sub(1) as i32;
+        let mut group_values: Vec<(String, JValue, i32, i32)> = Vec::with_capacity(captures.len());
+        for i in 0..captures.len() {
+            let key = format!("__group_{i}");
+            if let Some(m) = captures.get(i) {
+                let start_byte = base_byte + m.start();
+                let end_byte = base_byte + m.end();
+                let start_char = input[..start_byte].chars().count() as i32;
+                let end_char = input[..end_byte].chars().count() as i32;
+                let text = self.intern_string(m.as_str());
+                group_values.push((key, JValue::Ref(Some(text)), start_char, end_char));
+            } else {
+                group_values.push((key, JValue::Ref(None), -1, -1));
+            }
+        }
+        let (match_start, match_end) = group_values
+            .first()
+            .map(|(_, _, s, e)| (*s, *e))
+            .unwrap_or((-1, -1));
+        let mut mb = this.borrow_mut();
+        mb.fields.insert("__group_count".to_owned(), JValue::Int(group_count));
+        mb.fields.insert("__search_index".to_owned(), JValue::Int(next_search_chars as i32));
+        mb.fields.insert("searchIndex".to_owned(), JValue::Int(next_search_chars as i32));
+        mb.fields.insert("matchStart".to_owned(), JValue::Int(match_start));
+        mb.fields.insert("matchEnd".to_owned(), JValue::Int(match_end));
+        for (i, (key, value, start, end)) in group_values.into_iter().enumerate() {
+            mb.fields.insert(key, value);
+            mb.fields.insert(format!("__start_{i}"), JValue::Int(start));
+            mb.fields.insert(format!("__end_{i}"), JValue::Int(end));
+        }
+    }
+
     pub(super) fn native_virtual(
         &mut self,
         this: &JRef,
@@ -337,6 +415,13 @@ impl super::Vm {
         }
         let cn = this.borrow().class_name.clone();
         match (cn.as_str(), method_name) {
+            ("java/util/regex/Pattern", "pattern") => {
+                let regex = this.borrow().fields.get("__regex").cloned().unwrap_or(JValue::Ref(None));
+                Some(regex)
+            }
+            ("java/util/regex/Pattern", "flags") => {
+                Some(this.borrow().fields.get("__flags").cloned().unwrap_or(JValue::Int(0)))
+            }
             ("java/util/regex/Pattern", "matcher") => {
                 let input = _args
                     .first()
@@ -346,7 +431,97 @@ impl super::Vm {
                 let m = JObject::new("java/util/regex/Matcher");
                 m.borrow_mut().fields.insert("__pattern".to_owned(), JValue::Ref(Some(this.clone())));
                 m.borrow_mut().fields.insert("__input".to_owned(), JValue::Ref(Some(self.intern_string(input))));
+                m.borrow_mut().fields.insert("pattern".to_owned(), JValue::Ref(Some(this.clone())));
+                let input_ref = m.borrow().fields.get("__input").cloned().unwrap_or(JValue::Ref(None));
+                m.borrow_mut().fields.insert("input".to_owned(), input_ref);
+                m.borrow_mut().fields.insert("__search_index".to_owned(), JValue::Int(0));
+                m.borrow_mut().fields.insert("searchIndex".to_owned(), JValue::Int(0));
+                m.borrow_mut().fields.insert("matchStart".to_owned(), JValue::Int(-1));
+                m.borrow_mut().fields.insert("matchEnd".to_owned(), JValue::Int(-1));
                 Some(JValue::Ref(Some(m)))
+            }
+            ("java/util/regex/Matcher", "matches") => {
+                let (regex, input, _) = self.matcher_regex_and_input(this);
+                let anchored = regex_full_pattern(&regex);
+                match regex::Regex::new(&anchored).ok().and_then(|re| re.captures(&input)) {
+                    Some(caps) => {
+                        self.store_matcher_captures(this, &input, 0, &caps, input.chars().count());
+                        Some(JValue::Int(1))
+                    }
+                    None => {
+                        self.clear_matcher_state(this, 0);
+                        Some(JValue::Int(0))
+                    }
+                }
+            }
+            ("java/util/regex/Matcher", "find") => {
+                let (regex, input, search_index) = self.matcher_regex_and_input(this);
+                let start_byte = char_to_byte_offset(&input, search_index);
+                match regex::Regex::new(&regex)
+                    .ok()
+                    .and_then(|re| re.captures(&input[start_byte..]))
+                {
+                    Some(caps) => {
+                        let whole = caps.get(0);
+                        let next_chars = whole
+                            .map(|m| input[..start_byte + m.end()].chars().count())
+                            .unwrap_or(search_index);
+                        self.store_matcher_captures(this, &input, start_byte, &caps, next_chars);
+                        Some(JValue::Int(1))
+                    }
+                    None => {
+                        self.clear_matcher_state(this, search_index);
+                        Some(JValue::Int(0))
+                    }
+                }
+            }
+            ("java/util/regex/Matcher", "groupCount") => {
+                Some(this.borrow().fields.get("__group_count").cloned().unwrap_or(JValue::Int(0)))
+            }
+            ("java/util/regex/Matcher", "group") if _descriptor == "()Ljava/lang/String;" => {
+                Some(this.borrow().fields.get("__group_0").cloned().unwrap_or(JValue::Ref(None)))
+            }
+            ("java/util/regex/Matcher", "group") if _descriptor == "(I)Ljava/lang/String;" => {
+                let idx = _args.first().map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let max = this.borrow().fields.get("__group_count").map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                if idx > max {
+                    Some(JValue::Ref(None))
+                } else {
+                    Some(this.borrow().fields.get(&format!("__group_{idx}")).cloned().unwrap_or(JValue::Ref(None)))
+                }
+            }
+            ("java/util/regex/Matcher", "group") if _descriptor == "(Ljava/lang/String;)Ljava/lang/String;" => {
+                Some(this.borrow().fields.get("__group_0").cloned().unwrap_or(JValue::Ref(None)))
+            }
+            ("java/util/regex/Matcher", "start") if _descriptor == "()I" => {
+                Some(this.borrow().fields.get("__start_0").cloned().unwrap_or(JValue::Int(-1)))
+            }
+            ("java/util/regex/Matcher", "start") if _descriptor == "(I)I" => {
+                let idx = _args.first().map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                Some(this.borrow().fields.get(&format!("__start_{idx}")).cloned().unwrap_or(JValue::Int(-1)))
+            }
+            ("java/util/regex/Matcher", "end") if _descriptor == "()I" => {
+                Some(this.borrow().fields.get("__end_0").cloned().unwrap_or(JValue::Int(-1)))
+            }
+            ("java/util/regex/Matcher", "end") if _descriptor == "(I)I" => {
+                let idx = _args.first().map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                Some(this.borrow().fields.get(&format!("__end_{idx}")).cloned().unwrap_or(JValue::Int(-1)))
+            }
+            ("java/util/regex/Matcher", "reset") if _descriptor == "()Ljava/util/regex/Matcher;" => {
+                self.clear_matcher_state(this, 0);
+                Some(JValue::Ref(Some(this.clone())))
+            }
+            ("java/util/regex/Matcher", "reset") if _descriptor == "(Ljava/lang/CharSequence;)Ljava/util/regex/Matcher;" => {
+                let input = _args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let input_ref = self.intern_string(input);
+                this.borrow_mut().fields.insert("__input".to_owned(), JValue::Ref(Some(input_ref.clone())));
+                this.borrow_mut().fields.insert("input".to_owned(), JValue::Ref(Some(input_ref)));
+                self.clear_matcher_state(this, 0);
+                Some(JValue::Ref(Some(this.clone())))
             }
             ("java/lang/Class", "getName") => {
                 let internal = self

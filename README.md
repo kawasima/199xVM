@@ -47,8 +47,11 @@ It is **not** a full implementation of `javac` or HotSpot, and it should not cur
 │   └── javac.test.ts            # compiler tests
 ├── jdk-shim/                    # Java standard library shims (pure Java)
 │   └── bundle.bin               # compiled shim class bundle
+├── tools/
+│   └── BundleWriter.java        # bundle writer for class/resource images
 ├── build-shim.sh
 ├── build-test-bundle.sh
+├── build-clj-smoke.sh
 └── build-dist.sh
 ```
 
@@ -101,6 +104,7 @@ JDK APIs are provided primarily as **pure Java shims** under `jdk-shim/` and com
 - Target is Java 25 API compatibility where practical
 - Prefer Java shim implementations over Rust native stubs
 - Keep Rust natives only for runtime-boundary functionality (for example output/time/string bridging)
+- The current bootstrap surface is broad enough to run a minimal AOT-compiled Clojure program through the isolated smoke path documented below
 
 ## Quick start
 
@@ -175,12 +179,21 @@ Then open <http://localhost:3000/>. Alternatively, use `make docker-playground` 
 
 > **Note:** `docker-compose up` (web service) serves `dist/`. Run `dist-docker` or the manual steps above before starting it, otherwise `dist/` will be empty.
 
-**4. Clojure smoke (isolated diagnostic path)**
+**4. Clojure smoke (isolated path)**
 
-This path is intentionally separate from `make test`, `cargo test`, and the normal Java/Web build flow. It exists to bundle a tiny AOT-compiled Clojure entrypoint plus the Clojure runtime, then run it through 199xVM so missing shim/runtime support is surfaced incrementally.
+This path is intentionally separate from `make test`, `cargo test`, and the normal Java/Web build flow. It bundles a tiny AOT-compiled Clojure entrypoint plus the Clojure runtime, then runs it through 199xVM.
 
 The `clj` service uses the Docker Official Image for Clojure on Temurin Java 25 with `tools.deps`.
 The smoke source and `deps.edn` live under `test-sources/clojure/`; `clj-smoke/` is only generated output and cache.
+Bundle assembly is handled by `tools/BundleWriter.java`: non-class resources are stored explicitly, while `*.class` resources are synthesized by the VM from the loaded class table.
+
+Stable green-path smoke test:
+
+```sh
+make clj-smoke-test-docker
+```
+
+Raw diagnostic run if you want the VM's direct output:
 
 ```sh
 make clj-smoke-docker
@@ -197,7 +210,16 @@ docker-compose run --rm rust cargo run --package jvm-core --bin run_bundle \
   ClojureSmokeEntry run '()Ljava/lang/String;'
 ```
 
-The smoke command prints either the returned string or the first VM error encountered. It is a diagnostic command, not a required test gate.
+`clj-smoke-test-docker` is the maintenance target: it expects `ClojureSmokeEntry.run()` to return `ok` and fails otherwise. `clj-smoke-docker` prints the raw VM result for debugging and is intentionally looser.
+
+This isolated path has already exercised and driven shim/runtime work in these areas:
+
+- `java.lang.ref`
+- `java.nio.charset`
+- `java.lang.ThreadLocal`
+- classpath/resource lookup and synthetic `*.class` resources
+- regex capture/group handling
+- minimal bootstrap `java.io`, `java.nio.file`, and `java.net` shims used by Clojure startup
 
 ## Known limitations (high level)
 
