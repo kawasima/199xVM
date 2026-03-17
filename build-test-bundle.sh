@@ -5,6 +5,7 @@ set -euo pipefail
 SRC_DIR="test-sources"
 OUT_DIR="test-classes"
 OUT_FILE="$OUT_DIR/bundle.bin"
+JAR_FILE="$OUT_DIR/test.jar"
 
 mkdir -p "$OUT_DIR"
 
@@ -56,6 +57,12 @@ done < <(find "$OUT_DIR" -maxdepth 1 -name '*.class' -print0 | sort -z)
 
 total=$(wc -c < "$OUT_FILE")
 echo "Bundled $count test classes → $OUT_FILE ($total bytes)"
+
+# JAR — same classes packaged as a JAR for the JAR loader path
+rm -f "$JAR_FILE"
+(cd "$OUT_DIR" && jar cf test.jar *.class)
+jar_total=$(wc -c < "$JAR_FILE")
+echo "Packed $count test classes → $JAR_FILE ($jar_total bytes)"
 
 # Benchmark bundle
 BENCH_SRC="$SRC_DIR/bench"

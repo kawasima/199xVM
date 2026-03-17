@@ -1,30 +1,65 @@
 //! Integration tests for the 199xVM.
 //!
-//! These tests load pre-compiled `.class` bundles and verify bytecode execution
-//! without requiring a browser or WASM runtime.
+//! These tests load pre-compiled test classes from a JAR file and verify
+//! bytecode execution without requiring a browser or WASM runtime.
 //!
 //! Prerequisites:
 //!   ./build-shim.sh          (builds jdk-shim/bundle.bin)
-//!   ./build-test-bundle.sh   (builds test-classes/bundle.bin)
-
-/// Combine shim + app bundles.
-fn combined_bundle(shim: &[u8], app: &[u8]) -> Vec<u8> {
-    let mut combined = Vec::with_capacity(shim.len() + app.len());
-    combined.extend_from_slice(shim);
-    combined.extend_from_slice(app);
-    combined
-}
+//!   ./build-test-bundle.sh   (builds test-classes/test.jar)
 
 fn shim_bundle() -> &'static [u8] {
     include_bytes!("../../jdk-shim/bundle.bin")
 }
 
-fn test_bundle() -> &'static [u8] {
-    include_bytes!("../../test-classes/bundle.bin")
+fn test_jar() -> &'static [u8] {
+    include_bytes!("../../test-classes/test.jar")
 }
 
-fn test_jar() -> &'static [u8] {
+fn jar_loader_test_jar() -> &'static [u8] {
     include_bytes!("test.jar")
+}
+
+/// Run a test class from the test JAR via the JAR loader.
+fn run_jar_test(class: &str, method: &str, descriptor: &str) -> String {
+    let mut vm = jvm_core::interpreter::Vm::new();
+    jvm_core::load_bundle(&mut vm, shim_bundle());
+    vm.load_jar(test_jar()).expect("failed to load test JAR");
+    let result = vm.invoke_static_threaded(class, method, descriptor, vec![]);
+    vm.flush_printstreams();
+    match result {
+        Ok(v) => {
+            if let jvm_core::heap::JValue::Ref(Some(ref r)) = v {
+                let is_str = matches!(r.borrow().native, jvm_core::heap::NativePayload::JavaString(_));
+                if !is_str {
+                    let cn = r.borrow().class_name.clone();
+                    if let Ok(s) = vm.invoke_virtual(r.clone(), &cn, "toString", "()Ljava/lang/String;", vec![]) {
+                        return jvalue_to_string(&s);
+                    }
+                }
+            }
+            jvalue_to_string(&v)
+        }
+        Err(e) => format!("ERROR: {e}"),
+    }
+}
+
+fn jvalue_to_string(v: &jvm_core::heap::JValue) -> String {
+    match v {
+        jvm_core::heap::JValue::Void => "void".to_owned(),
+        jvm_core::heap::JValue::Int(i) => i.to_string(),
+        jvm_core::heap::JValue::Long(l) => l.to_string(),
+        jvm_core::heap::JValue::Float(f) => f.to_string(),
+        jvm_core::heap::JValue::Double(d) => d.to_string(),
+        jvm_core::heap::JValue::Ref(None) => "null".to_owned(),
+        jvm_core::heap::JValue::Ref(Some(r)) => {
+            let obj = r.borrow();
+            match &obj.native {
+                jvm_core::heap::NativePayload::JavaString(s) => s.clone(),
+                _ => format!("{}@obj", obj.class_name),
+            }
+        }
+        jvm_core::heap::JValue::ReturnAddress(a) => format!("ret:{a}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -33,9 +68,7 @@ fn test_jar() -> &'static [u8] {
 
 #[test]
 fn integer_tostring() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "IntToStringTest",
         "run",
         "()Ljava/lang/String;",
@@ -49,9 +82,7 @@ fn integer_tostring() {
 
 #[test]
 fn string_concat() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "StringConcatTest",
         "run",
         "()Ljava/lang/String;",
@@ -67,9 +98,7 @@ fn string_concat() {
 
 #[test]
 fn local_datetime_now() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "LocalDateTimeNowTest",
         "run",
         "()Ljava/lang/String;",
@@ -81,9 +110,7 @@ fn local_datetime_now() {
 
 #[test]
 fn arraylist_basics() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "ListTest",
         "run",
         "()Ljava/lang/String;",
@@ -97,9 +124,7 @@ fn arraylist_basics() {
 
 #[test]
 fn try_catch_npe() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "TryCatchTest",
         "run",
         "()Ljava/lang/String;",
@@ -109,9 +134,7 @@ fn try_catch_npe() {
 
 #[test]
 fn factorial_long() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "Factorial",
         "run",
         "()Ljava/lang/String;",
@@ -125,9 +148,7 @@ fn factorial_long() {
 
 #[test]
 fn arrays_copy_of_int() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "ArraysCopyOfTest",
         "run",
         "()Ljava/lang/String;",
@@ -141,9 +162,7 @@ fn arrays_copy_of_int() {
 
 #[test]
 fn stream_reduce_optional() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "StreamReduceTest",
         "run",
         "()Ljava/lang/String;",
@@ -157,9 +176,7 @@ fn stream_reduce_optional() {
 
 #[test]
 fn lambda_overload_arity() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "LambdaOverloadTest",
         "run",
         "()Ljava/lang/String;",
@@ -173,9 +190,7 @@ fn lambda_overload_arity() {
 
 #[test]
 fn synchronized_blocks() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "SynchronizedTest",
         "run",
         "()Ljava/lang/String;",
@@ -185,9 +200,7 @@ fn synchronized_blocks() {
 
 #[test]
 fn synchronized_null_monitor_throws_npe() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "SynchronizedNullTest",
         "run",
         "()Ljava/lang/String;",
@@ -201,9 +214,7 @@ fn synchronized_null_monitor_throws_npe() {
 
 #[test]
 fn classloader_api() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "ClassLoaderTest",
         "run",
         "()Ljava/lang/String;",
@@ -213,9 +224,7 @@ fn classloader_api() {
 
 #[test]
 fn classloader_missing_class_throws_cnfe() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "ClassLoaderNegativeTest",
         "run",
         "()Ljava/lang/String;",
@@ -229,9 +238,7 @@ fn classloader_missing_class_throws_cnfe() {
 
 #[test]
 fn clinit_exception_wrapped_in_eiie() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "ClinitExceptionTest",
         "run",
         "()Ljava/lang/String;",
@@ -245,9 +252,7 @@ fn clinit_exception_wrapped_in_eiie() {
 
 #[test]
 fn concrete_interface_method_no_abstract_method_error() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "AbstractMethodTest",
         "run",
         "()Ljava/lang/String;",
@@ -261,9 +266,7 @@ fn concrete_interface_method_no_abstract_method_error() {
 
 #[test]
 fn reference_queue_basics() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "ReferenceQueueTest",
         "run",
         "()Ljava/lang/String;",
@@ -277,9 +280,7 @@ fn reference_queue_basics() {
 
 #[test]
 fn clinit_erroneous_state_throws_ncdfe_on_second_access() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "ClinitErroneousStateTest",
         "run",
         "()Ljava/lang/String;",
@@ -293,9 +294,7 @@ fn clinit_erroneous_state_throws_ncdfe_on_second_access() {
 
 #[test]
 fn interface_default_method_dispatch() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "InterfaceDefaultMethodTest",
         "run",
         "()Ljava/lang/String;",
@@ -309,9 +308,7 @@ fn interface_default_method_dispatch() {
 
 #[test]
 fn thread_start_join_basic() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "ThreadBasicTest",
         "run",
         "()Ljava/lang/String;",
@@ -321,9 +318,7 @@ fn thread_start_join_basic() {
 
 #[test]
 fn monitor_contention_two_threads() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "MonitorContentionTest",
         "run",
         "()Ljava/lang/String;",
@@ -333,9 +328,7 @@ fn monitor_contention_two_threads() {
 
 #[test]
 fn wait_notify_producer_consumer() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "WaitNotifyTest",
         "run",
         "()Ljava/lang/String;",
@@ -345,9 +338,7 @@ fn wait_notify_producer_consumer() {
 
 #[test]
 fn notify_all_wakes_multiple_waiters() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "NotifyAllTest",
         "run",
         "()Ljava/lang/String;",
@@ -357,9 +348,7 @@ fn notify_all_wakes_multiple_waiters() {
 
 #[test]
 fn wait_without_lock_throws_imse() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "WaitWithoutLockTest",
         "run",
         "()Ljava/lang/String;",
@@ -369,9 +358,7 @@ fn wait_without_lock_throws_imse() {
 
 #[test]
 fn reentrant_wait_restores_count() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "ReentrantWaitTest",
         "run",
         "()Ljava/lang/String;",
@@ -385,9 +372,7 @@ fn reentrant_wait_restores_count() {
 
 #[test]
 fn synchronized_methods() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "SynchronizedMethodTest",
         "run",
         "()Ljava/lang/String;",
@@ -401,9 +386,7 @@ fn synchronized_methods() {
 
 #[test]
 fn compact_source_file() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "CompactTest",
         "run",
         "()Ljava/lang/String;",
@@ -417,9 +400,7 @@ fn compact_source_file() {
 
 #[test]
 fn lambda_default_method() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "LambdaDefaultMethodTest",
         "run",
         "()Ljava/lang/String;",
@@ -433,9 +414,7 @@ fn lambda_default_method() {
 
 #[test]
 fn net_test() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "NetTest",
         "run",
         "()Ljava/lang/String;",
@@ -449,9 +428,7 @@ fn net_test() {
 
 #[test]
 fn url_test() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "URLTest",
         "run",
         "()Ljava/lang/String;",
@@ -465,9 +442,7 @@ fn url_test() {
 
 #[test]
 fn matcher_test() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "MatcherTest",
         "run",
         "()Ljava/lang/String;",
@@ -489,9 +464,7 @@ fn matcher_test() {
 
 #[test]
 fn stream_collect_filter_map() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "StreamCollectTest",
         "run",
         "()Ljava/lang/String;",
@@ -505,9 +478,7 @@ fn stream_collect_filter_map() {
 
 #[test]
 fn stream_collectors_joining() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "StreamJoinTest",
         "run",
         "()Ljava/lang/String;",
@@ -521,9 +492,7 @@ fn stream_collectors_joining() {
 
 #[test]
 fn int_stream_range_filter_sum() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "IntStreamTest",
         "run",
         "()Ljava/lang/String;",
@@ -537,9 +506,7 @@ fn int_stream_range_filter_sum() {
 
 #[test]
 fn tree_map_natural_ordering() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "TreeMapTest",
         "run",
         "()Ljava/lang/String;",
@@ -553,9 +520,7 @@ fn tree_map_natural_ordering() {
 
 #[test]
 fn tree_set_sorted_iteration() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "TreeSetTest",
         "run",
         "()Ljava/lang/String;",
@@ -569,9 +534,7 @@ fn tree_set_sorted_iteration() {
 
 #[test]
 fn priority_queue_poll_order() {
-    let bundle = combined_bundle(shim_bundle(), test_bundle());
-    let result = jvm_core::run_static_native(
-        &bundle,
+    let result = run_jar_test(
         "PriorityQueueTest",
         "run",
         "()Ljava/lang/String;",
@@ -587,7 +550,7 @@ fn priority_queue_poll_order() {
 fn load_jar_and_run() {
     let mut vm = jvm_core::interpreter::Vm::new();
     jvm_core::load_bundle(&mut vm, shim_bundle());
-    let count = vm.load_jar(test_jar()).expect("load_jar failed");
+    let count = vm.load_jar(jar_loader_test_jar()).expect("load_jar failed");
     assert!(count > 0, "expected at least one class from JAR");
     let result = match vm.invoke_static_threaded(
         "JarTestEntry", "run", "()Ljava/lang/String;", vec![],
@@ -607,7 +570,7 @@ fn load_jar_and_run() {
 fn load_jar_resource() {
     let mut vm = jvm_core::interpreter::Vm::new();
     jvm_core::load_bundle(&mut vm, shim_bundle());
-    vm.load_jar(test_jar()).expect("load_jar failed");
+    vm.load_jar(jar_loader_test_jar()).expect("load_jar failed");
     assert!(vm.resources.contains_key("resource.txt"), "resource.txt not found");
     let data = vm.resources.get("resource.txt").unwrap();
     let text = std::str::from_utf8(data).unwrap().trim();
@@ -616,7 +579,7 @@ fn load_jar_resource() {
 
 #[test]
 fn jar_to_bundle_roundtrip() {
-    let bundle = jvm_core::jar_to_bundle_native(test_jar());
+    let bundle = jvm_core::jar_to_bundle_native(jar_loader_test_jar());
     assert!(!bundle.is_empty(), "jar_to_bundle returned empty");
     let result = jvm_core::run_static_native(
         &[shim_bundle(), &bundle].concat(),
