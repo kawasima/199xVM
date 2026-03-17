@@ -124,6 +124,23 @@ public final class Matcher {
         return group();
     }
 
+    public int groupCount() {
+        // 199xVM: simplified — count '(' in pattern excluding escaped and character classes
+        String p = pattern.pattern();
+        int count = 0;
+        boolean escaped = false;
+        boolean inClass = false;
+        for (int i = 0; i < p.length(); i++) {
+            char c = p.charAt(i);
+            if (escaped) { escaped = false; continue; }
+            if (c == '\\') { escaped = true; continue; }
+            if (c == '[') { inClass = true; continue; }
+            if (c == ']') { inClass = false; continue; }
+            if (c == '(' && !inClass) count++;
+        }
+        return count;
+    }
+
     public String replaceAll(String replacement) {
         String r = pattern.pattern();
         if (r.length() == 0) {

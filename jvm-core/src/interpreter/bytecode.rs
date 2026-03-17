@@ -1046,6 +1046,23 @@ impl Vm {
                 self.static_fields.entry(class_name).or_default().insert(field_name, v.clone());
                 Ok(v)
             }
+            ("java/lang/System", "in") => {
+                if let Some(v) = self.static_fields.get("java/lang/System").and_then(|m| m.get("in")) {
+                    return Ok(v.clone());
+                }
+                // System.in is an empty InputStream (no stdin in 199xVM)
+                let v = JValue::Ref(Some(JObject::new("java/io/ByteArrayInputStream")));
+                {
+                    let empty_arr = JObject::new_array("[B", vec![]);
+                    let obj = v.as_ref().unwrap();
+                    obj.borrow_mut().fields.insert("buf".to_owned(), JValue::Ref(Some(empty_arr)));
+                    obj.borrow_mut().fields.insert("pos".to_owned(), JValue::Int(0));
+                    obj.borrow_mut().fields.insert("count".to_owned(), JValue::Int(0));
+                    obj.borrow_mut().fields.insert("mark".to_owned(), JValue::Int(0));
+                }
+                self.static_fields.entry(class_name).or_default().insert(field_name, v.clone());
+                Ok(v)
+            }
             _ => Ok(default_value_for_descriptor(&descriptor)),
         }
     }
