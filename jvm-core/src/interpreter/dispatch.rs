@@ -474,9 +474,7 @@ impl Vm {
                                 JValue::Int(v) if is_bool => result.push_str(if *v != 0 { "true" } else { "false" }),
                                 JValue::Int(v) if arg_types.get(arg_idx) == Some(&'C') => {
                                     // char argument — convert int to character
-                                    if let Some(c) = char::from_u32(*v as u32) {
-                                        result.push(c);
-                                    }
+                                    result.push(char::from_u32(*v as u32).unwrap_or('\u{FFFD}'));
                                 }
                                 JValue::Int(v) => result.push_str(&v.to_string()),
                                 JValue::Long(v) => result.push_str(&v.to_string()),
