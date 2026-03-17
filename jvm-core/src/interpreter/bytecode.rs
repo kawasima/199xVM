@@ -892,6 +892,16 @@ impl Vm {
                 // ---- athrow ----
                 0xbf => {
                     let exc = frame.stack.pop().unwrap();
+                    // Debug: log all thrown exceptions when VM_DEBUG is set
+                    if std::env::var("VM_DEBUG").is_ok() {
+                        if let JValue::Ref(Some(ref r)) = exc {
+                            let cn = r.borrow().class_name.clone();
+                            let detail = r.borrow().fields.get("detailMessage")
+                                .and_then(|v| v.as_ref())
+                                .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()));
+                            eprintln!("[athrow] {} {}", cn, detail.unwrap_or_default());
+                        }
+                    }
                     let (msg, exc_ref) = match exc {
                         JValue::Ref(Some(r)) => {
                             let detail = r

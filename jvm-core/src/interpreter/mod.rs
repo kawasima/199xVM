@@ -1066,6 +1066,9 @@ impl Vm {
             return Err(format!("java/lang/NoClassDefFoundError: {class_name}"));
         }
         // Mark as initialized before running to prevent recursion.
+        if std::env::var("VM_DEBUG").is_ok() && class_name.contains("core__init") {
+            eprintln!("[debug-clinit] starting {class_name}");
+        }
         self.clinit_done.insert(class_name.to_owned());
 
         // Ensure the class is parsed first.

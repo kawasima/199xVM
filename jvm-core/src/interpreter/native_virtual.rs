@@ -1326,6 +1326,28 @@ impl super::Vm {
                 let bytes: Vec<JValue> = s.bytes().map(|b| JValue::Int(b as i32)).collect();
                 Some(JValue::Ref(Some(JObject::new_array("[B", bytes))))
             }
+            ("java/lang/String", "replace") => {
+                let s = this.borrow().as_java_string().unwrap_or("").to_owned();
+                if _args.len() >= 2 {
+                    // replace(char, char)
+                    if let (JValue::Int(old_c), JValue::Int(new_c)) = (&_args[0], &_args[1]) {
+                        let old_ch = char::from_u32(*old_c as u32).unwrap_or('\0');
+                        let new_ch = char::from_u32(*new_c as u32).unwrap_or('\0');
+                        let result = s.replace(old_ch, &new_ch.to_string());
+                        Some(JValue::Ref(Some(self.intern_string(result))))
+                    } else if let (JValue::Ref(Some(old_s)), JValue::Ref(Some(new_s))) = (&_args[0], &_args[1]) {
+                        // replace(CharSequence, CharSequence)
+                        let old_str = old_s.borrow().as_java_string().unwrap_or("").to_owned();
+                        let new_str = new_s.borrow().as_java_string().unwrap_or("").to_owned();
+                        let result = s.replace(&old_str, &new_str);
+                        Some(JValue::Ref(Some(self.intern_string(result))))
+                    } else {
+                        Some(JValue::Ref(Some(Rc::clone(this))))
+                    }
+                } else {
+                    Some(JValue::Ref(Some(Rc::clone(this))))
+                }
+            }
             (c, "clone") if c == "java/lang/Object" || c.starts_with('[') => {
                 let src = this.borrow();
                 let mut fields = HashMap::new();
