@@ -278,6 +278,32 @@ impl super::Vm {
                     Some(JValue::Void)
                 }
             }
+            "getResource" => {
+                let name = args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
+                    .unwrap_or_default();
+                let normalized = name.strip_prefix('/').unwrap_or(&name);
+                if self.resources.contains_key(normalized) {
+                    // Return a bundle: URL pointing to the resource
+                    // Construct URL object via bytecode: new URL("bundle", "", "/" + name)
+                    let url = JObject::new("java/net/URL");
+                    let url_str = self.intern_string(format!("bundle:///{normalized}"));
+                    url.borrow_mut().fields.insert("protocol".to_owned(),
+                        JValue::Ref(Some(self.intern_string("bundle"))));
+                    url.borrow_mut().fields.insert("host".to_owned(),
+                        JValue::Ref(Some(self.intern_string(""))));
+                    url.borrow_mut().fields.insert("file".to_owned(),
+                        JValue::Ref(Some(self.intern_string(format!("/{normalized}")))));
+                    url.borrow_mut().fields.insert("path".to_owned(),
+                        JValue::Ref(Some(self.intern_string(format!("/{normalized}")))));
+                    url.borrow_mut().fields.insert("ref".to_owned(), JValue::Ref(None));
+                    Some(JValue::Ref(Some(url)))
+                } else {
+                    Some(JValue::Ref(None))
+                }
+            }
             "getResourceAsStream" => {
                 let name = args
                     .first()
@@ -388,7 +414,7 @@ impl super::Vm {
         // ClassLoader methods must dispatch on the resolved owner (`_class_name`), not the
         // runtime class of `this`, so that subclasses of ClassLoader also hit these stubs.
         // Guard on method name first to avoid super-chain walks on unrelated calls.
-        if matches!(method_name, "loadClass" | "findClass" | "findLoadedClass" | "defineClass" | "getResourceAsStream" | "findResource" | "findResources")
+        if matches!(method_name, "loadClass" | "findClass" | "findLoadedClass" | "defineClass" | "getResource" | "getResourceAsStream" | "findResource" | "findResources")
             && self.is_classloader_subtype(_class_name)
         {
             if let Some(v) = self.native_classloader(method_name, _args) {

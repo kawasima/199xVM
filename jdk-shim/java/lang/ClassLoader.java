@@ -49,6 +49,18 @@ public abstract class ClassLoader {
 
     public static native ClassLoader getSystemClassLoader();
 
+    public static URL getSystemResource(String name) {
+        return getSystemClassLoader().getResource(name);
+    }
+
+    public static InputStream getSystemResourceAsStream(String name) {
+        return getSystemClassLoader().getResourceAsStream(name);
+    }
+
+    public static Enumeration<URL> getSystemResources(String name) throws IOException {
+        return getSystemClassLoader().getResources(name);
+    }
+
     public Class<?> loadClass(String name) throws ClassNotFoundException {
         return loadClass(name, false);
     }
@@ -94,13 +106,9 @@ public abstract class ClassLoader {
         return parent;
     }
 
-    public URL getResource(String name) {
-        return null;
-    }
+    public native URL getResource(String name);
 
-    public InputStream getResourceAsStream(String name) {
-        return null;
-    }
+    public native InputStream getResourceAsStream(String name);
 
     public Enumeration<URL> getResources(String name) throws IOException {
         return java.util.Collections.emptyEnumeration();
