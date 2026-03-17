@@ -472,6 +472,12 @@ impl Vm {
                             let is_bool = arg_types.get(arg_idx) == Some(&'Z');
                             match a {
                                 JValue::Int(v) if is_bool => result.push_str(if *v != 0 { "true" } else { "false" }),
+                                JValue::Int(v) if arg_types.get(arg_idx) == Some(&'C') => {
+                                    // char argument — convert int to character
+                                    if let Some(c) = char::from_u32(*v as u32) {
+                                        result.push(c);
+                                    }
+                                }
                                 JValue::Int(v) => result.push_str(&v.to_string()),
                                 JValue::Long(v) => result.push_str(&v.to_string()),
                                 JValue::Float(v) => result.push_str(&v.to_string()),
