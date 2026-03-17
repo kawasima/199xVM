@@ -384,6 +384,9 @@ impl Vm {
             }
             trace.push_str("\n  at ");
             trace.push_str(&fi.frame_owner);
+            if std::env::var("VM_TRACE").is_ok() && err_msg.contains("NumberFormatException") {
+                eprintln!("[unwind] {} pc={}", &fi.frame_owner, pc);
+            }
             let popped = call_stack.pop().unwrap();
             self.release_synchronized_monitor(&popped)?;
         }

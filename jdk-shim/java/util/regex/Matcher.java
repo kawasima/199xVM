@@ -54,17 +54,7 @@ public final class Matcher {
         return reset();
     }
 
-    public boolean matches() {
-        boolean result = nativeMatches(pattern.pattern(), input);
-        if (result) {
-            matchStart = 0;
-            matchEnd = input.length();
-        } else {
-            matchStart = -1;
-            matchEnd = -1;
-        }
-        return result;
-    }
+    public native boolean matches();
 
     private static native boolean nativeMatches(String regex, String input);
 
@@ -116,9 +106,7 @@ public final class Matcher {
         return input.substring(matchStart, matchEnd);
     }
 
-    public String group(int group) {
-        return group == 0 ? group() : null;
-    }
+    public native String group(int group);
 
     public String group(String name) {
         return group();

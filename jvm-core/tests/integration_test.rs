@@ -547,6 +547,12 @@ fn priority_queue_poll_order() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn regex_capture_groups() {
+    let result = run_jar_test("RegexGroupsTest", "run", "()Ljava/lang/String;");
+    assert_eq!(result, "3|1.12.0|1|12|0");
+}
+
+#[test]
 fn string_replace_char() {
     let result = run_jar_test("StringReplaceTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "clojure.core_proxy__init");
