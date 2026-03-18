@@ -38,6 +38,7 @@ It is **not** a full implementation of `javac` or HotSpot, and it should not cur
 │   ├── index.html               # playground UI
 │   ├── class-reader.ts          # class/JAR reader for method registry
 │   ├── javac.ts                 # compiler entrypoint
+│   ├── launcher.js              # process-style JVM launcher API
 │   ├── javac/                   # modularized compiler core
 │   │   ├── lexer.ts
 │   │   ├── parser.ts
@@ -101,6 +102,34 @@ Status labels:
 
 The frontend also exposes a `jar_to_bundle()` WASM export that converts JAR bytes to the flat bundle format, falling back to the JS-side `readJar()` when WASM is not available.
 
+## Launcher API
+
+199xVM now exposes a process-style launcher layer on top of the low-level VM primitives.
+
+- Public JS API: `launchClasspathMain({ classpath, mainClass, args, stdio })`
+- Return value: `ProcessHandle`
+- `ProcessHandle.stdin`: writable byte stream
+- `ProcessHandle.stdout`: readable byte stream
+- `ProcessHandle.stderr`: readable byte stream
+- `ProcessHandle.wait()`: resolves to `{ exitCode, uncaughtException? }`
+- `ProcessHandle.kill()`: terminates the in-VM process
+
+Design notes:
+
+- The VM is responsible only for Unix-like process I/O (`stdin`/`stdout`/`stderr`)
+- REPL/readline/autocomplete remain userland concerns
+- Low-level `run_static()` / `run_with_jars()` remain available
+- Browser `inherit` for stdout/stderr is implemented by forwarding process chunks to `console.log` / `console.error`
+- Stream granularity is chunk/byte-based, not line-based
+
+Current scope:
+
+- `launchClasspathMain()` is implemented
+- `classpath` currently accepts an array of JAR byte arrays
+- `stdio.stdin: "inherit"` is not implemented yet; use `"pipe"` or `"ignore"`
+- `launchJar()` is intentionally deferred
+- Manifest `Class-Path` and TTY-specific behavior are out of scope for now
+
 ## JVM language support
 
 199xVM supports running JVM languages beyond Java. **Clojure 1.12.0** has been validated via an AOT-compiled smoke test:
@@ -150,8 +179,11 @@ npx serve .
 # Compiler tests
 npm test                    # or: make test
 
-# VM integration tests (42 fast tests, ~0.1s)
+# VM integration tests
 cargo test --package jvm-core
+
+# Launcher API tests
+make launcher-test
 
 # Clojure smoke test (separate, ~44s)
 make clj-smoke-test
@@ -171,6 +203,7 @@ Use Docker or OrbStack with the project’s `docker-compose.yml`. Only the **web
 ```sh
 docker-compose run rust make wasm
 docker-compose run rust cargo test --package jvm-core --lib
+docker-compose run rust cargo fmt --all
 ```
 
 The `--lib` flag runs only unit tests. For full integration tests (which need `test-classes/bundle.bin`), build the test bundle first:  

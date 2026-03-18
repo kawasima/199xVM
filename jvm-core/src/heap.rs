@@ -4,9 +4,9 @@
 //! This avoids a full GC implementation while being sufficient for short-lived
 //! decoder invocations like Raoh.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::cell::RefCell;
 
 /// A Java value that can appear on the operand stack or in a local variable slot.
 #[derive(Debug, Clone)]
@@ -100,6 +100,8 @@ pub enum NativePayload {
     LongArray(Vec<i64>),
     /// `java.io.PrintStream` marker (`false` => stdout, `true` => stderr).
     PrintStream(bool),
+    /// `java.io.ProcessPipeInputStream` marker for launcher stdin.
+    ProcessPipeInputStream,
     /// A Rust closure captured as a lambda stand-in.
     Lambda(Rc<dyn Fn(Vec<JValue>) -> JValue>),
     /// A lambda backed by a bytecode method handle.
@@ -144,11 +146,20 @@ impl std::fmt::Debug for NativePayload {
             NativePayload::IntArray(v) => write!(f, "IntArray(len={})", v.len()),
             NativePayload::LongArray(v) => write!(f, "LongArray(len={})", v.len()),
             NativePayload::PrintStream(is_err) => write!(f, "PrintStream(err={is_err})"),
+            NativePayload::ProcessPipeInputStream => write!(f, "ProcessPipeInputStream"),
             NativePayload::Lambda(_) => write!(f, "Lambda(...)"),
-            NativePayload::BytecodeLambda { impl_class, impl_method, .. } => {
+            NativePayload::BytecodeLambda {
+                impl_class,
+                impl_method,
+                ..
+            } => {
                 write!(f, "BytecodeLambda({impl_class}::{impl_method})")
             }
-            NativePayload::RecordMethod { method, class_simple_name, .. } => {
+            NativePayload::RecordMethod {
+                method,
+                class_simple_name,
+                ..
+            } => {
                 write!(f, "RecordMethod({class_simple_name}::{method})")
             }
         }
@@ -198,6 +209,15 @@ impl JObject {
             class_name: "java/io/PrintStream".to_owned(),
             fields: HashMap::new(),
             native: NativePayload::PrintStream(is_err),
+        }))
+    }
+
+    /// Create a `java.io.ProcessPipeInputStream` marker object.
+    pub fn new_process_pipe_input_stream() -> JRef {
+        Rc::new(RefCell::new(JObject {
+            class_name: "java/io/ProcessPipeInputStream".to_owned(),
+            fields: HashMap::new(),
+            native: NativePayload::ProcessPipeInputStream,
         }))
     }
 

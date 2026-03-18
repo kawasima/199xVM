@@ -105,28 +105,6 @@ impl super::Vm {
         }
     }
 
-    pub(super) fn printstream_text_for(&mut self, value: &JValue) -> String {
-        match value {
-            JValue::Void => "void".to_owned(),
-            JValue::Int(i) => i.to_string(),
-            JValue::Long(l) => l.to_string(),
-            JValue::Float(f) => f.to_string(),
-            JValue::Double(d) => d.to_string(),
-            JValue::Ref(None) => "null".to_owned(),
-            JValue::Ref(Some(r)) => {
-                if let Some(s) = r.borrow().as_java_string() {
-                    return s.to_owned();
-                }
-                let class_name = r.borrow().class_name.clone();
-                match self.invoke_virtual(r.clone(), &class_name, "toString", "()Ljava/lang/String;", vec![]) {
-                    Ok(JValue::Ref(Some(sref))) => sref.borrow().as_java_string().unwrap_or("").to_owned(),
-                    _ => format!("{class_name}@obj"),
-                }
-            }
-            JValue::ReturnAddress(a) => format!("ret:{a}"),
-        }
-    }
-
     pub(super) fn emit_host_line(is_err: bool, line: &str) {
         #[cfg(target_arch = "wasm32")]
         {
@@ -146,21 +124,41 @@ impl super::Vm {
         }
     }
 
-    pub(super) fn write_printstream(&mut self, is_err: bool, text: &str, newline: bool) {
-        let buf = if is_err {
-            &mut self.stderr_buffer
+    pub(super) fn write_printstream_bytes(&mut self, is_err: bool, bytes: &[u8]) {
+        let mode = if is_err {
+            self.stderr_mode
         } else {
-            &mut self.stdout_buffer
+            self.stdout_mode
         };
-        buf.push_str(text);
-        while let Some(pos) = buf.find('\n') {
-            let line = buf[..pos].to_owned();
-            Self::emit_host_line(is_err, &line);
-            buf.drain(..=pos);
-        }
-        if newline {
-            Self::emit_host_line(is_err, buf);
-            buf.clear();
+        match mode {
+            super::StdioMode::Ignore => {}
+            super::StdioMode::Pipe => {
+                if !bytes.is_empty() {
+                    let chunks = if is_err {
+                        &mut self.stderr_chunks
+                    } else {
+                        &mut self.stdout_chunks
+                    };
+                    chunks.push_back(bytes.to_vec());
+                }
+            }
+            super::StdioMode::Inherit => {
+                if bytes.is_empty() {
+                    return;
+                }
+                let text = String::from_utf8_lossy(bytes);
+                let buf = if is_err {
+                    &mut self.stderr_buffer
+                } else {
+                    &mut self.stdout_buffer
+                };
+                buf.push_str(&text);
+                while let Some(pos) = buf.find('\n') {
+                    let line = buf[..pos].to_owned();
+                    Self::emit_host_line(is_err, &line);
+                    buf.drain(..=pos);
+                }
+            }
         }
     }
 
@@ -395,6 +393,72 @@ impl super::Vm {
                 }
                 return Some(JValue::Void);
             }
+        }
+        if matches!(this.borrow().native, NativePayload::PrintStream(_)) {
+            let is_err = matches!(this.borrow().native, NativePayload::PrintStream(true));
+            match (method_name, _descriptor) {
+                ("nativeBridgeEnabled", "()Z") => return Some(JValue::Int(1)),
+                ("nativeFlush", "()V") => {
+                    if matches!(
+                        if is_err { self.stderr_mode } else { self.stdout_mode },
+                        super::StdioMode::Inherit
+                    ) {
+                        self.flush_printstreams();
+                    }
+                    return Some(JValue::Void);
+                }
+                ("nativeWriteByte", "(I)V") => {
+                    let byte = _args.first().map(JValue::as_int).unwrap_or(0) as u8;
+                    self.write_printstream_bytes(is_err, &[byte]);
+                    return Some(JValue::Void);
+                }
+                ("nativeWriteBytes", "([BII)V") => {
+                    let array_ref = match _args.first().and_then(JValue::as_ref) {
+                        Some(array_ref) => array_ref,
+                        None => {
+                            self.throw_null_pointer("PrintStream.write: buf is null");
+                            return Some(JValue::Void);
+                        }
+                    };
+                    let bytes = {
+                        let array = array_ref.borrow();
+                        match &array.native {
+                            NativePayload::ByteArray(bytes) => bytes.clone(),
+                            NativePayload::Array(values) => {
+                                values.iter().map(|value| value.as_int() as u8).collect()
+                            }
+                            _ => {
+                                self.throw_null_pointer("PrintStream.write: buf is null");
+                                return Some(JValue::Void);
+                            }
+                        }
+                    };
+                    let off = _args.get(1).map(JValue::as_int).unwrap_or(0);
+                    let len = _args.get(2).map(JValue::as_int).unwrap_or(0);
+                    if off < 0 || len < 0 || (off as usize).saturating_add(len as usize) > bytes.len() {
+                        let exc = JObject::new("java/lang/IndexOutOfBoundsException");
+                        let msg = self.intern_string(format!(
+                            "PrintStream.write: off={off}, len={len}, array length={}",
+                            bytes.len()
+                        ));
+                        exc.borrow_mut().fields.insert(
+                            "detailMessage".to_owned(),
+                            JValue::Ref(Some(msg)),
+                        );
+                        *self.pending_exception_mut() = Some(exc);
+                        return Some(JValue::Void);
+                    }
+                    self.write_printstream_bytes(
+                        is_err,
+                        &bytes[off as usize..off as usize + len as usize],
+                    );
+                    return Some(JValue::Void);
+                }
+                _ => {}
+            }
+        }
+        if _class_name == "java/io/PrintStream" && method_name == "nativeBridgeEnabled" {
+            return Some(JValue::Int(0));
         }
         // ----- java.lang.Thread native methods -----
         if this.borrow().class_name == "java/lang/Thread"
@@ -1445,6 +1509,7 @@ impl super::Vm {
                     NativePayload::IntArray(v) => NativePayload::IntArray(v.clone()),
                     NativePayload::LongArray(v) => NativePayload::LongArray(v.clone()),
                     NativePayload::PrintStream(is_err) => NativePayload::PrintStream(*is_err),
+                    NativePayload::ProcessPipeInputStream => NativePayload::ProcessPipeInputStream,
                     NativePayload::Lambda(f) => NativePayload::Lambda(f.clone()),
                     NativePayload::BytecodeLambda {
                         sam_method,
@@ -1479,11 +1544,14 @@ impl super::Vm {
                 }));
                 Some(JValue::Ref(Some(cloned)))
             }
-            // PrintStream native bridge.
-            ("java/io/PrintStream", "println") | ("java/io/PrintStream", "print") => {
-                let is_err = matches!(this.borrow().native, NativePayload::PrintStream(true));
-                let text = _args.first().map(|v| self.printstream_text_for(v)).unwrap_or_default();
-                self.write_printstream(is_err, &text, method_name == "println");
+            ("java/io/ProcessPipeInputStream", "read0") if _descriptor == "()I" => {
+                Some(JValue::Int(self.stdin_read_byte()))
+            }
+            ("java/io/ProcessPipeInputStream", "available0") if _descriptor == "()I" => {
+                Some(JValue::Int(self.stdin_available()))
+            }
+            ("java/io/ProcessPipeInputStream", "close0") if _descriptor == "()V" => {
+                self.close_stdin();
                 Some(JValue::Void)
             }
             _ => None,

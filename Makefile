@@ -14,7 +14,7 @@ JAR_NAMES := $(RAOH_JAR) $(RAOH_JSON_JAR) $(JACKSON_ANN_JAR) \
 
 WEB_JARS := $(addprefix web/,$(JAR_NAMES))
 
-.PHONY: all dev-jars shim test-bundle clj-smoke-bundle clj-smoke-test javac wasm dist test clean deploy docker-playground dist-docker
+.PHONY: all dev-jars shim test-bundle clj-smoke-bundle clj-smoke-test javac wasm dist test launcher-test clean deploy docker-playground dist-docker
 
 # ============================================================
 # all — build everything needed for local development
@@ -103,6 +103,9 @@ wasm: jvm-core/pkg/jvm_core_bg.wasm
 test: web/javac.js
 	node --experimental-strip-types --test web/javac.test.ts
 
+launcher-test: jdk-shim/bundle.bin test-classes/bundle.bin jvm-core/pkg/jvm_core_bg.wasm
+	node --experimental-strip-types --test web/launcher.test.ts
+
 # ============================================================
 # dist — assemble deployable static files in dist/
 # ============================================================
@@ -115,6 +118,7 @@ dist: web/javac.js jdk-shim/bundle.bin jvm-core/pkg/jvm_core_bg.wasm $(WEB_JARS)
 	  -e 's|\.\./jdk-shim/bundle\.bin|./bundle/shim.bin|g' \
 	  web/index.html > dist/index.html
 	cp web/javac.js                       dist/javac.js
+	cp web/launcher.js                    dist/launcher.js
 	cp jvm-core/pkg/jvm_core.js          dist/pkg/jvm_core.js
 	cp jvm-core/pkg/jvm_core_bg.wasm     dist/pkg/jvm_core_bg.wasm
 	cp jdk-shim/bundle.bin               dist/bundle/shim.bin
