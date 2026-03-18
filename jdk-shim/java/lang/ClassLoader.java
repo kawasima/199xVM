@@ -111,7 +111,20 @@ public abstract class ClassLoader {
     public native InputStream getResourceAsStream(String name);
 
     public Enumeration<URL> getResources(String name) throws IOException {
-        return java.util.Collections.emptyEnumeration();
+        java.util.List<URL> result = new java.util.ArrayList<>();
+        // Delegate to parent first (JDK semantics: parent-first)
+        if (parent != null) {
+            Enumeration<URL> parentResources = parent.getResources(name);
+            while (parentResources.hasMoreElements()) {
+                result.add(parentResources.nextElement());
+            }
+        }
+        // Then add our own resources
+        Enumeration<URL> local = findResources(name);
+        while (local.hasMoreElements()) {
+            result.add(local.nextElement());
+        }
+        return java.util.Collections.enumeration(result);
     }
 
     protected URL findResource(String name) {
