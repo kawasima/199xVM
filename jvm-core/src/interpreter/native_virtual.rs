@@ -517,7 +517,8 @@ impl super::Vm {
                 if idx == 0 {
                     let start = mb.fields.get("matchStart").map(|v| v.as_int()).unwrap_or(-1);
                     let end = mb.fields.get("matchEnd").map(|v| v.as_int()).unwrap_or(-1);
-                    let input = mb.fields.get("__input")
+                    let input = mb.fields.get("input")
+                        .or_else(|| mb.fields.get("__input"))
                         .and_then(|v| v.as_ref())
                         .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
                         .unwrap_or_default();
@@ -1409,8 +1410,8 @@ impl super::Vm {
                 if _args.len() >= 2 {
                     // replace(char, char)
                     if let (JValue::Int(old_c), JValue::Int(new_c)) = (&_args[0], &_args[1]) {
-                        let old_ch = char::from_u32(*old_c as u32).unwrap_or('\0');
-                        let new_ch = char::from_u32(*new_c as u32).unwrap_or('\0');
+                        let old_ch = char::from_u32(*old_c as u32).unwrap_or('\u{FFFD}');
+                        let new_ch = char::from_u32(*new_c as u32).unwrap_or('\u{FFFD}');
                         let result = s.replace(old_ch, &new_ch.to_string());
                         Some(JValue::Ref(Some(self.intern_string(result))))
                     } else {
