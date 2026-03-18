@@ -1419,7 +1419,7 @@ impl super::Vm {
                         let new_ref = _args[1].as_ref();
                         if old_ref.is_none() || new_ref.is_none() {
                             self.throw_null_pointer("String.replace: null argument");
-                            return Some(JValue::Ref(Some(Rc::clone(this))));
+                            return Some(JValue::Void);
                         }
                         let old_str = old_ref.unwrap().borrow().as_java_string().unwrap_or("").to_owned();
                         let new_str = new_ref.unwrap().borrow().as_java_string().unwrap_or("").to_owned();

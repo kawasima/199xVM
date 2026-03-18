@@ -25,23 +25,26 @@
 
 package java.lang;
 
+import java.util.HashMap;
 import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
  * This class provides thread-local variables.
  *
- * <p>199xVM shim: backed by a simple per-instance value since the VM uses
- * cooperative green threads on a single OS thread. The public API matches JDK 25.
+ * <p>199xVM shim: each green thread gets its own value, keyed by the identity
+ * hash code of {@code Thread.currentThread()}. The public API matches JDK 25.
  *
  * @author  Josh Bloch and Doug Lea
  * @since   1.2
  */
 public class ThreadLocal<T> {
 
-    // 199xVM simplification: cooperative green threads on one OS thread — one value per ThreadLocal.
     private static final Object UNSET = new Object();
-    private Object value = UNSET;
+
+    // Per-thread storage: identity hash of Thread object → value.
+    // For single-thread scenarios this map has one entry.
+    private final HashMap<Integer, Object> values = new HashMap<>();
 
     public ThreadLocal() {}
 
@@ -53,20 +56,27 @@ public class ThreadLocal<T> {
         return null;
     }
 
+    private int threadKey() {
+        return System.identityHashCode(Thread.currentThread());
+    }
+
     @SuppressWarnings("unchecked")
     public T get() {
-        if (value == UNSET) {
-            value = initialValue();
+        int key = threadKey();
+        Object v = values.get(key);
+        if (v == null && !values.containsKey(key)) {
+            v = initialValue();
+            values.put(key, v);
         }
-        return (T) value;
+        return (T) v;
     }
 
     public void set(T value) {
-        this.value = value;
+        values.put(threadKey(), value);
     }
 
     public void remove() {
-        this.value = UNSET;
+        values.remove(threadKey());
     }
 
     static final class SuppliedThreadLocal<T> extends ThreadLocal<T> {

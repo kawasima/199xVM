@@ -200,11 +200,17 @@ impl super::Vm {
                 Some(JValue::Int(result))
             }
             ("java/lang/Class", "getPrimitiveClass", "(Ljava/lang/String;)Ljava/lang/Class;") => {
-                let name = _args
+                let name = match _args
                     .first()
                     .and_then(|v| v.as_ref())
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
-                    .unwrap_or_default();
+                {
+                    Some(n) => n,
+                    None => {
+                        self.throw_null_pointer("Class.getPrimitiveClass: name is null");
+                        return Some(JValue::Void);
+                    }
+                };
                 Some(JValue::Ref(Some(self.class_object(name))))
             }
             ("java/lang/Class", "forName0", "(Ljava/lang/String;)Ljava/lang/Class;") => {
@@ -315,11 +321,12 @@ impl super::Vm {
                 #[cfg(target_arch = "wasm32")]
                 let ns = (js_sys::Date::now() * 1_000_000.0) as i64;
                 #[cfg(not(target_arch = "wasm32"))]
-                let ns = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|d| d.as_nanos() as i64)
-                    .unwrap_or(0);
+                let ns = {
+                    use std::sync::OnceLock;
+                    static EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
+                    let epoch = EPOCH.get_or_init(std::time::Instant::now);
+                    epoch.elapsed().as_nanos() as i64
+                };
                 Some(JValue::Long(ns))
             }
             ("java/lang/System", "initProperties", "(Ljava/util/Properties;)V") => {
