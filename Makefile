@@ -171,7 +171,7 @@ dist: web/javac.js jdk-shim/bundle.bin jvm-core/pkg/jvm_core_bg.wasm $(WEB_JARS)
 	cp jvm-core/pkg/jvm_core.js          dist/pkg/jvm_core.js
 	cp jvm-core/pkg/jvm_core_bg.wasm     dist/pkg/jvm_core_bg.wasm
 	cp jdk-shim/bundle.bin               dist/bundle/shim.bin
-	$(foreach jar,$(ALL_JAR_NAMES),cp web/$(jar) dist/$(jar);)
+	set -e; for jar in $(ALL_JAR_NAMES); do cp web/$$jar dist/$$jar; done
 	@echo ""
 	@echo "==> dist/ contents:"
 	@find dist -type f | sort
@@ -213,7 +213,7 @@ endif
 	upload_if_changed dist/pkg/jvm_core.js             "$(GCS)/pkg/jvm_core.js"             --cache-control="public,max-age=31536000"; \
 	upload_if_changed dist/pkg/jvm_core_bg.wasm        "$(GCS)/pkg/jvm_core_bg.wasm"        --cache-control="public,max-age=31536000" --content-type="application/wasm"; \
 	upload_if_changed dist/bundle/shim.bin             "$(GCS)/bundle/shim.bin"             --cache-control="public,max-age=31536000" --content-type="application/octet-stream"; \
-	$(foreach jar,$(ALL_JAR_NAMES),upload_if_changed dist/$(jar) "$(GCS)/$(jar)" --cache-control="public,max-age=31536000" --content-type="application/java-archive"; ) \
+	for jar in $(ALL_JAR_NAMES); do upload_if_changed dist/$$jar "$(GCS)/$$jar" --cache-control="public,max-age=31536000" --content-type="application/java-archive"; done; \
 	echo "  upload: index.html (always)"; \
 	gcloud storage cp dist/index.html "$(GCS)/index.html" --cache-control="no-cache" --content-type="text/html; charset=utf-8"
 	@echo ""
