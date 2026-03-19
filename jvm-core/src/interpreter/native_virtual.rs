@@ -296,7 +296,7 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let normalized = name.strip_prefix('/').unwrap_or(&name);
-                if self.resources.contains_key(normalized) {
+                if self.has_resource(normalized) {
                     let url = JObject::new("java/net/URL");
                     url.borrow_mut().fields.insert("protocol".to_owned(),
                         JValue::Ref(Some(self.intern_string("bundle"))));
@@ -318,19 +318,26 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let normalized = name.strip_prefix('/').unwrap_or(&name);
-                if let Some(data) = self.resources.get(normalized).cloned() {
-                    // Create a [B array with the resource bytes
-                    let elems: Vec<JValue> = data.iter().map(|&b| JValue::Int(b as i8 as i32)).collect();
-                    let byte_array = JObject::new_array("[B", elems);
-                    // Create ByteArrayInputStream via its constructor logic
-                    let bais = JObject::new("java/io/ByteArrayInputStream");
-                    bais.borrow_mut().fields.insert("buf".to_owned(), JValue::Ref(Some(byte_array)));
-                    bais.borrow_mut().fields.insert("pos".to_owned(), JValue::Int(0));
-                    bais.borrow_mut().fields.insert("count".to_owned(), JValue::Int(data.len() as i32));
-                    bais.borrow_mut().fields.insert("mark".to_owned(), JValue::Int(0));
-                    Some(JValue::Ref(Some(bais)))
-                } else {
-                    Some(JValue::Ref(None))
+                match self.read_resource(normalized) {
+                    Ok(Some(data)) => {
+                        // Create a [B array with the resource bytes
+                        let elems: Vec<JValue> = data.iter().map(|&b| JValue::Int(b as i8 as i32)).collect();
+                        let byte_array = JObject::new_array("[B", elems);
+                        // Create ByteArrayInputStream via its constructor logic
+                        let bais = JObject::new("java/io/ByteArrayInputStream");
+                        bais.borrow_mut().fields.insert("buf".to_owned(), JValue::Ref(Some(byte_array)));
+                        bais.borrow_mut().fields.insert("pos".to_owned(), JValue::Int(0));
+                        bais.borrow_mut().fields.insert("count".to_owned(), JValue::Int(data.len() as i32));
+                        bais.borrow_mut().fields.insert("mark".to_owned(), JValue::Int(0));
+                        Some(JValue::Ref(Some(bais)))
+                    }
+                    Ok(None) => Some(JValue::Ref(None)),
+                    Err(err) => {
+                        self.throw_runtime_exception(&format!(
+                            "getResourceAsStream({normalized}): {err}"
+                        ));
+                        Some(JValue::Void)
+                    }
                 }
             }
             "findResource" => {
@@ -1567,5 +1574,33 @@ impl super::Vm {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{JarEntryRef, Vm};
+    use crate::heap::{JObject, JValue};
+
+    #[test]
+    fn get_resource_as_stream_raises_runtime_exception_on_lazy_read_error() {
+        let mut vm = Vm::new();
+        vm.load_jar(include_bytes!("../../tests/test.jar")).expect("load test jar");
+        vm.pending_resources.insert(
+            "broken.txt".to_owned(),
+            JarEntryRef {
+                jar_id: 0,
+                entry_index: 999,
+                entry_name: "broken.txt".to_owned(),
+            },
+        );
+
+        let arg = JValue::Ref(Some(JObject::new_string("broken.txt")));
+        let result = vm.native_classloader("getResourceAsStream", &[arg]);
+
+        assert!(matches!(result, Some(JValue::Void)));
+        let err = vm.pending_exception_err().expect("pending exception");
+        assert!(err.contains("java/lang/RuntimeException"), "unexpected error: {err}");
+        assert!(err.contains("broken.txt"), "unexpected error: {err}");
     }
 }
