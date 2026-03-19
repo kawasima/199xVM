@@ -1621,17 +1621,12 @@ public class JvmInterfaceDefault implements Describable {
 
     const ASSET_VERSION = "__BUILD_TIMESTAMP__";
     const IS_VERSIONED_BUILD = typeof ASSET_VERSION === "string" && !ASSET_VERSION.startsWith("__");
-    const CLOJURE_JAR_CANDIDATES = IS_VERSIONED_BUILD
-      ? [
-          ["./clojure-1.12.0.jar", "../clj-smoke/jars/clojure-1.12.0.jar"],
-          ["./spec.alpha-0.5.238.jar", "../clj-smoke/jars/spec.alpha-0.5.238.jar"],
-          ["./core.specs.alpha-0.4.74.jar", "../clj-smoke/jars/core.specs.alpha-0.4.74.jar"],
-        ]
-      : [
-          ["../clj-smoke/jars/clojure-1.12.0.jar", "./clojure-1.12.0.jar"],
-          ["../clj-smoke/jars/spec.alpha-0.5.238.jar", "./spec.alpha-0.5.238.jar"],
-          ["../clj-smoke/jars/core.specs.alpha-0.4.74.jar", "./core.specs.alpha-0.4.74.jar"],
-        ];
+    // Clojure JARs: in dist/ they sit next to index.html; in dev they are in web/.
+    const CLOJURE_JAR_CANDIDATES = [
+        ["./clojure-1.12.0.jar"],
+        ["./spec.alpha-0.5.238.jar"],
+        ["./core.specs.alpha-0.4.74.jar"],
+      ];
     const CLOJURE_EVAL_EXPR = "(let [result (load-string (slurp *in*))] (when (some? result) (prn result)))";
 
     function getSnippetEntry(key) {
