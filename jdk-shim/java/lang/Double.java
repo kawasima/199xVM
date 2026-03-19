@@ -45,6 +45,8 @@ public final class Double extends Number implements Comparable<Double> {
 
     public static Double valueOf(double d) { return new Double(d); }
 
+    public static Double valueOf(String s) { return new Double(parseDouble(s)); }
+
     @Override public int intValue() { return (int) value; }
     @Override public long longValue() { return (long) value; }
     @Override public float floatValue() { return (float) value; }
@@ -53,6 +55,20 @@ public final class Double extends Number implements Comparable<Double> {
     @Override public String toString() { return toString(value); }
 
     public static native String toString(double d);
+
+    public static double parseDouble(String s) {
+        if (s == null) throw new NullPointerException();
+        String text = s.trim();
+        if (text.isEmpty()) throw new NumberFormatException(s);
+        if ("NaN".equals(text)) return NaN;
+        if ("Infinity".equals(text) || "+Infinity".equals(text)) return POSITIVE_INFINITY;
+        if ("-Infinity".equals(text)) return NEGATIVE_INFINITY;
+        try {
+            return new java.math.BigDecimal(text).doubleValue();
+        } catch (RuntimeException ex) {
+            throw new NumberFormatException(s);
+        }
+    }
 
     @Override public int hashCode() { return (int) doubleToLongBits(value); }
 

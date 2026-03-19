@@ -373,6 +373,9 @@ impl super::Vm {
                 let ptr = Rc::as_ptr(this) as usize;
                 return Some(JValue::Int((ptr as u64 as u32) as i32));
             }
+            "intern" if _descriptor == "()Ljava/lang/String;" && this.borrow().as_java_string().is_some() => {
+                return Some(JValue::Ref(Some(this.clone())));
+            }
             "getClass" if _descriptor == "()Ljava/lang/Class;" => {
                 let runtime_class = this.borrow().class_name.clone();
                 return Some(JValue::Ref(Some(self.class_object(runtime_class))));

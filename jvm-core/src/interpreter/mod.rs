@@ -897,20 +897,48 @@ impl Vm {
         }
     }
 
-    fn pending_exception_err(&self) -> Option<String> {
-        self.scheduler.current_thread().pending_exception.as_ref().map(|r| {
-            let b = r.borrow();
-            let mut s = format!("Exception: {}", b.class_name);
-            if let Some(JValue::Ref(Some(msg_ref))) = b.fields.get("detailMessage") {
-                if let Some(msg) = msg_ref.borrow().as_java_string() {
-                    if !msg.is_empty() {
-                        s.push_str(": ");
-                        s.push_str(msg);
+    pub(in crate::interpreter) fn format_exception_ref(&self, r: &JRef) -> String {
+        fn format_exception_chain(r: &JRef, seen: &mut Vec<usize>, depth: usize) -> String {
+            let ptr = Rc::as_ptr(r) as usize;
+            if seen.contains(&ptr) {
+                return "<cycle>".to_owned();
+            }
+            seen.push(ptr);
+
+            let (mut s, next) = {
+                let b = r.borrow();
+                let mut s = format!("Exception: {}", b.class_name);
+                if let Some(JValue::Ref(Some(msg_ref))) = b.fields.get("detailMessage") {
+                    if let Some(msg) = msg_ref.borrow().as_java_string() {
+                        if !msg.is_empty() {
+                            s.push_str(": ");
+                            s.push_str(msg);
+                        }
                     }
                 }
+                let next = if depth < 8 {
+                    b.fields.get("cause")
+                        .and_then(|v| v.as_ref())
+                        .cloned()
+                        .or_else(|| b.fields.get("target").and_then(|v| v.as_ref()).cloned())
+                } else {
+                    None
+                };
+                (s, next)
+            };
+
+            if let Some(next_ref) = next {
+                s.push_str(" | cause: ");
+                s.push_str(&format_exception_chain(&next_ref, seen, depth + 1));
             }
             s
-        })
+        }
+
+        format_exception_chain(r, &mut Vec::new(), 0)
+    }
+
+    fn pending_exception_err(&self) -> Option<String> {
+        self.scheduler.current_thread().pending_exception.as_ref().map(|r| self.format_exception_ref(r))
     }
 
     /// Return (or lazily create) the singleton system ClassLoader instance.

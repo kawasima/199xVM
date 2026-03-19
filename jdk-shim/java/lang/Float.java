@@ -45,6 +45,8 @@ public final class Float extends Number implements Comparable<Float> {
 
     public static Float valueOf(float f) { return new Float(f); }
 
+    public static Float valueOf(String s) { return new Float(parseFloat(s)); }
+
     @Override public int intValue() { return (int) value; }
     @Override public long longValue() { return (long) value; }
     @Override public float floatValue() { return value; }
@@ -53,6 +55,20 @@ public final class Float extends Number implements Comparable<Float> {
     @Override public String toString() { return toString(value); }
 
     public static native String toString(float f);
+
+    public static float parseFloat(String s) {
+        if (s == null) throw new NullPointerException();
+        String text = s.trim();
+        if (text.isEmpty()) throw new NumberFormatException(s);
+        if ("NaN".equals(text)) return NaN;
+        if ("Infinity".equals(text) || "+Infinity".equals(text)) return POSITIVE_INFINITY;
+        if ("-Infinity".equals(text)) return NEGATIVE_INFINITY;
+        try {
+            return new java.math.BigDecimal(text).floatValue();
+        } catch (RuntimeException ex) {
+            throw new NumberFormatException(s);
+        }
+    }
 
     @Override public int hashCode() { return floatToIntBits(value); }
 

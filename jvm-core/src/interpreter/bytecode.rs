@@ -894,19 +894,9 @@ impl Vm {
                     let exc = frame.stack.pop().unwrap();
                     let (msg, exc_ref) = match exc {
                         JValue::Ref(Some(r)) => {
-                            let detail = r
-                                .borrow()
-                                .fields
-                                .get("detailMessage")
-                                .and_then(|v| v.as_ref())
-                                .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()));
                             let msg = format!(
-                                "Exception: {}{} at {}:pc{}",
-                                r.borrow().class_name,
-                                detail
-                                    .as_ref()
-                                    .map(|d| format!(": {d}"))
-                                    .unwrap_or_default(),
+                                "{} at {}:pc{}",
+                                self.format_exception_ref(&r),
                                 class_name,
                                 frame.pc.saturating_sub(1)
                             );
