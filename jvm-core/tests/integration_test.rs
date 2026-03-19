@@ -676,9 +676,15 @@ fn load_jar_resource() {
     let mut vm = jvm_core::interpreter::Vm::new();
     jvm_core::load_bundle(&mut vm, shim_bundle());
     vm.load_jar(jar_loader_test_jar()).expect("load_jar failed");
-    assert!(vm.resources.contains_key("resource.txt"), "resource.txt not found");
-    let data = vm.resources.get("resource.txt").unwrap();
-    let text = std::str::from_utf8(data).unwrap().trim();
+    assert!(vm.has_resource("resource.txt"), "resource.txt not found");
+    assert!(!vm.resources.contains_key("resource.txt"),
+        "resource.txt should remain compressed until first access");
+    let data = vm.read_resource("resource.txt")
+        .expect("read_resource failed")
+        .expect("resource.txt missing");
+    assert!(vm.resources.contains_key("resource.txt"),
+        "resource.txt should be cached after first access");
+    let text = std::str::from_utf8(&data).unwrap().trim();
     assert_eq!(text, "hello from jar resource");
 }
 

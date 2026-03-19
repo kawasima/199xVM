@@ -19,6 +19,8 @@ use crate::class_file::{
 };
 use crate::heap::{JObject, JRef, JValue};
 
+type OwnedJarArchive = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
+
 /// All execution-time data extracted from a resolved method in a single pass.
 /// Returned by [`Vm::resolve_method_exec_info`] to avoid repeated `find_method`
 /// calls and to give each field a self-documenting name.
@@ -43,13 +45,128 @@ pub(super) struct MethodExecInfo {
     pub access_flags: u16,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{LazyClass, Vm};
+    use std::io::{Cursor, Write};
+
+    fn build_misnamed_jar() -> Vec<u8> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(include_bytes!("../../tests/test.jar").as_slice()))
+            .expect("open test jar");
+        let mut class_file = archive.by_name("JarTestEntry.class").expect("JarTestEntry.class");
+        let mut class_bytes = Vec::new();
+        std::io::Read::read_to_end(&mut class_file, &mut class_bytes).expect("read class bytes");
+
+        let mut jar_bytes = Vec::new();
+        {
+            let cursor = Cursor::new(&mut jar_bytes);
+            let mut writer = zip::ZipWriter::new(cursor);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file("wrong/Path.class", options).expect("start class entry");
+            writer.write_all(&class_bytes).expect("write class entry");
+            writer.finish().expect("finish jar");
+        }
+        jar_bytes
+    }
+
+    fn class_entries_in_test_jar() -> Vec<(String, Vec<u8>)> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(include_bytes!("../../tests/test.jar").as_slice()))
+            .expect("open test jar");
+        let mut classes = Vec::new();
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i).expect("test jar entry");
+            let name = file.name().to_owned();
+            let Some(class_name) = name.strip_suffix(".class") else {
+                continue;
+            };
+            if class_name.is_empty() {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut bytes).expect("read class bytes");
+            classes.push((class_name.to_owned(), bytes));
+        }
+        classes
+    }
+
+    #[test]
+    fn jar_classes_stay_pending_until_first_access() {
+        let mut vm = Vm::new();
+        let count = vm.load_jar(include_bytes!("../../tests/test.jar")).expect("load_jar failed");
+        assert!(count > 0, "expected at least one class in test JAR");
+        assert!(matches!(vm.classes.get("JarTestEntry"), Some(LazyClass::PendingJarEntry(_))));
+
+        vm.ensure_class_ready("JarTestEntry");
+
+        assert!(matches!(vm.classes.get("JarTestEntry"), Some(LazyClass::Ready(_))));
+    }
+
+    #[test]
+    fn misnamed_jar_class_uses_entry_path_and_fails_on_parse() {
+        let mut vm = Vm::new();
+        let count = vm.load_jar(&build_misnamed_jar()).expect("load_jar failed");
+        assert_eq!(count, 1, "expected one class in misnamed jar");
+        assert!(matches!(vm.classes.get("wrong/Path"), Some(LazyClass::PendingJarEntry(_))));
+        assert!(vm.resolve_class("JarTestEntry").is_none(), "must not recover by internal name");
+
+        vm.ensure_class_ready("wrong/Path");
+
+        match vm.classes.get("wrong/Path") {
+            Some(LazyClass::ParseError(err)) => {
+                assert!(err.contains("Class name mismatch"), "unexpected error: {err}");
+                assert!(err.contains("wrong/Path"), "unexpected error: {err}");
+                assert!(err.contains("JarTestEntry"), "unexpected error: {err}");
+            }
+            _ => panic!("expected ParseError for misnamed JAR entry"),
+        }
+    }
+
+    #[test]
+    fn missing_packaged_lookup_leaves_pending_jar_entries_untouched() {
+        let class_names: Vec<String> = class_entries_in_test_jar()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        let mut vm = Vm::new();
+        vm.load_jar(include_bytes!("../../tests/test.jar")).expect("load test jar");
+
+        for class_name in &class_names {
+            assert!(
+                matches!(vm.classes.get(class_name), Some(LazyClass::PendingJarEntry(_))),
+                "expected pending jar entry before miss: {class_name}"
+            );
+        }
+
+        vm.ensure_class_ready("missing/Type");
+
+        for class_name in &class_names {
+            assert!(
+                matches!(vm.classes.get(class_name), Some(LazyClass::PendingJarEntry(_))),
+                "packaged miss must not parse or rewrite pending entry: {class_name}"
+            );
+        }
+        assert!(vm.resolve_class("missing/Type").is_none(), "missing class must remain unresolved");
+    }
+}
+
 /// A class entry in the VM's class registry.
 ///
-/// `Pending` holds the raw `.class` bytes and is promoted to `Ready` on first access,
-/// implementing standard ClassLoader lazy-loading semantics.
+/// `PendingBytes` and `PendingJarEntry` are promoted to `Ready` on first access,
+/// implementing standard ClassLoader lazy-loading semantics for both flat bundles
+/// and JAR-backed classes.
+#[derive(Debug, Clone)]
+pub(in crate::interpreter) struct JarEntryRef {
+    pub jar_id: usize,
+    pub entry_index: usize,
+    pub entry_name: String,
+}
+
 pub(in crate::interpreter) enum LazyClass {
     /// Raw bytes not yet parsed.
-    Pending(Vec<u8>),
+    PendingBytes(Vec<u8>),
+    /// JAR entry that should be decompressed only when first accessed.
+    PendingJarEntry(JarEntryRef),
     /// Fully parsed class file.
     Ready(ClassFile),
     /// Bytes were present but could not be parsed (malformed class).
@@ -318,7 +435,7 @@ impl Scheduler {
 /// The central virtual machine that holds loaded classes and drives execution.
 pub struct Vm {
     /// Class registry: keyed by internal name (`net/unit8/raoh/Result`).
-    /// Entries start as `LazyClass::Pending` (raw bytes) and are promoted to
+    /// Entries start as `LazyClass::PendingBytes`/`PendingJarEntry` and are promoted to
     /// `LazyClass::Ready` (parsed `ClassFile`) on first access.
     pub(in crate::interpreter) classes: HashMap<String, LazyClass>,
     /// Interned strings cache (not strictly required but saves allocations).
@@ -361,8 +478,12 @@ pub struct Vm {
     /// Method resolution cache: (class, method_name, descriptor) → owner class name.
     /// Avoids repeated super-chain walks for the same method lookup.
     method_owner_cache: HashMap<(String, String, String), Option<String>>,
-    /// Non-class resources from loaded JARs, keyed by path (e.g. "clojure/core.clj").
+    /// Materialized non-class resources from loaded JARs, keyed by path.
     pub resources: HashMap<String, Vec<u8>>,
+    /// Non-class resources that still point at compressed JAR entries.
+    pending_resources: HashMap<String, JarEntryRef>,
+    /// Parsed ZIP archives kept alive so lazy entry reads do not re-scan the central directory.
+    jar_archives: Vec<OwnedJarArchive>,
 }
 
 impl Vm {
@@ -390,7 +511,28 @@ impl Vm {
             monitors: HashMap::new(),
             method_owner_cache: HashMap::new(),
             resources: HashMap::new(),
+            pending_resources: HashMap::new(),
+            jar_archives: Vec::new(),
         }
+    }
+
+    fn read_jar_entry(&mut self, entry: &JarEntryRef) -> Result<Vec<u8>, String> {
+        let archive = self.jar_archives.get_mut(entry.jar_id)
+            .ok_or_else(|| format!("Missing JAR backing store for {}", entry.entry_name))?;
+        let mut file = archive.by_index(entry.entry_index)
+            .map_err(|e| format!("ZIP entry error for {}: {e}", entry.entry_name))?;
+        if file.name() != entry.entry_name {
+            return Err(format!(
+                "ZIP entry mismatch at index {}: expected {}, found {}",
+                entry.entry_index,
+                entry.entry_name,
+                file.name()
+            ));
+        }
+        let mut buf = Vec::with_capacity(file.size() as usize);
+        std::io::Read::read_to_end(&mut file, &mut buf)
+            .map_err(|e| format!("Read error for {}: {e}", entry.entry_name))?;
+        Ok(buf)
     }
 
     /// Get the object identity key for monitor operations.
@@ -758,57 +900,123 @@ impl Vm {
     /// The class is parsed only when first accessed via [`Self::ensure_class_ready`].
     /// If the class is already registered (e.g., as `Ready`), the existing entry is kept.
     pub fn load_lazy(&mut self, name: String, bytes: Vec<u8>) {
-        self.classes.entry(name).or_insert(LazyClass::Pending(bytes));
+        self.classes.entry(name).or_insert(LazyClass::PendingBytes(bytes));
+    }
+
+    fn load_lazy_jar_entry(&mut self, name: String, entry: JarEntryRef) {
+        self.classes.entry(name).or_insert(LazyClass::PendingJarEntry(entry));
     }
 
     /// Load classes and resources from a JAR (ZIP) byte array.
-    /// `.class` entries are registered via [`Self::load_lazy`]; all other
-    /// non-directory entries are stored in the resource map.
+    /// `.class` entries are registered lazily from their ZIP entry metadata; all other
+    /// non-directory entries are recorded and decompressed only on first access.
+    ///
+    /// The ZIP entry path is treated as the canonical class name (`pkg/Foo.class` -> `pkg/Foo`).
+    /// We intentionally do not scan class bodies to recover mismatched internal names:
+    /// such JARs are nonstandard, and keeping that fallback would add decompression and
+    /// parsing work to ordinary lazy-loading paths.
     /// Returns the number of classes loaded.
     pub fn load_jar(&mut self, jar_bytes: &[u8]) -> Result<usize, String> {
         use std::io::Cursor;
-        let reader = Cursor::new(jar_bytes);
+        let reader = Cursor::new(jar_bytes.to_vec());
         let mut archive = zip::ZipArchive::new(reader)
             .map_err(|e| format!("Invalid JAR/ZIP: {e}"))?;
+        let jar_id = self.jar_archives.len();
+        let mut class_entries = Vec::new();
+        let mut resource_entries = Vec::new();
         let mut count = 0;
         for i in 0..archive.len() {
-            let mut file = archive.by_index(i)
+            let file = archive.by_index(i)
                 .map_err(|e| format!("ZIP entry error: {e}"))?;
             let name = file.name().to_owned();
-            let mut buf = Vec::with_capacity(file.size() as usize);
-            std::io::Read::read_to_end(&mut file, &mut buf)
-                .map_err(|e| format!("Read error for {name}: {e}"))?;
-            if name.ends_with(".class") {
-                if let Some(class_name) = crate::class_file::parse_class_name(&buf) {
-                    self.load_lazy(class_name, buf);
+            let entry = JarEntryRef { jar_id, entry_index: i, entry_name: name.clone() };
+            if let Some(class_name) = name.strip_suffix(".class") {
+                if !class_name.is_empty() {
+                    class_entries.push((class_name.to_owned(), entry));
                     count += 1;
                 }
             } else if !name.ends_with('/') {
-                self.resources.insert(name, buf);
+                resource_entries.push((name, entry));
             }
+        }
+        self.jar_archives.push(archive);
+        for (class_name, entry) in class_entries {
+            self.load_lazy_jar_entry(class_name, entry);
+        }
+        for (name, entry) in resource_entries {
+            self.resources.remove(&name);
+            self.pending_resources.insert(name, entry);
         }
         Ok(count)
     }
 
     /// Ensure the named class is fully parsed (`Ready`).
-    /// If the entry is `Pending`, parses it in place and promotes it to `Ready`.
+    /// If the entry is pending, parses it in place and promotes it to `Ready`.
     /// On parse failure the entry is set to `ParseError` so the failure is
     /// diagnosable and repeated parse attempts are avoided.
     /// Does nothing if the class is already `Ready`, `ParseError`, or not registered.
     pub(in crate::interpreter) fn ensure_class_ready(&mut self, name: &str) {
-        // Only act when the entry is Pending; skip Ready / ParseError / missing.
-        if !matches!(self.classes.get(name), Some(LazyClass::Pending(_))) {
+        if !matches!(
+            self.classes.get(name),
+            Some(LazyClass::PendingBytes(_) | LazyClass::PendingJarEntry(_))
+        ) {
             return;
         }
-        if let Some(LazyClass::Pending(bytes)) = self.classes.remove(name) {
-            match class_file::parse(&bytes) {
-                Ok(cf) => { self.classes.insert(name.to_owned(), LazyClass::Ready(cf)); }
-                Err(e) => {
-                    eprintln!("Warning: failed to parse class '{name}': {e}");
-                    self.classes.insert(name.to_owned(), LazyClass::ParseError(e.to_string()));
-                }
+        let pending = self.classes.remove(name);
+        let result = match pending {
+            Some(LazyClass::PendingBytes(bytes)) => class_file::parse(&bytes).map_err(|e| e.to_string()),
+            Some(LazyClass::PendingJarEntry(entry)) => match self.read_jar_entry(&entry) {
+                Ok(bytes) => match class_file::parse(&bytes) {
+                    Ok(cf) => {
+                        let actual_name = cf.constant_pool.class_name(cf.this_class);
+                        if actual_name == name {
+                            Ok(cf)
+                        } else {
+                            // We deliberately reject classes whose internal name disagrees with
+                            // the ZIP entry path. Recovering them would require a fallback scan
+                            // that penalizes the normal lazy-loading hot path for a nonstandard JAR.
+                            Err(format!(
+                                "Class name mismatch for {}: expected {}, found {}",
+                                entry.entry_name, name, actual_name
+                            ))
+                        }
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
+                Err(e) => Err(e),
+            },
+            Some(other) => {
+                self.classes.insert(name.to_owned(), other);
+                return;
+            }
+            None => return,
+        };
+        match result {
+            Ok(cf) => { self.classes.insert(name.to_owned(), LazyClass::Ready(cf)); }
+            Err(e) => {
+                eprintln!("Warning: failed to parse class '{name}': {e}");
+                self.classes.insert(name.to_owned(), LazyClass::ParseError(e));
             }
         }
+    }
+
+    pub fn has_resource(&self, name: &str) -> bool {
+        let normalized = name.strip_prefix('/').unwrap_or(name);
+        self.resources.contains_key(normalized) || self.pending_resources.contains_key(normalized)
+    }
+
+    pub fn read_resource(&mut self, name: &str) -> Result<Option<Vec<u8>>, String> {
+        let normalized = name.strip_prefix('/').unwrap_or(name);
+        if let Some(data) = self.resources.get(normalized) {
+            return Ok(Some(data.clone()));
+        }
+        let Some(entry) = self.pending_resources.get(normalized).cloned() else {
+            return Ok(None);
+        };
+        let data = self.read_jar_entry(&entry)?;
+        self.pending_resources.remove(normalized);
+        self.resources.insert(normalized.to_owned(), data.clone());
+        Ok(Some(data))
     }
 
     /// Return a reference to a parsed class.
@@ -816,7 +1024,7 @@ impl Vm {
     pub(in crate::interpreter) fn get_class(&self, name: &str) -> Option<&ClassFile> {
         match self.classes.get(name)? {
             LazyClass::Ready(cf) => Some(cf),
-            LazyClass::Pending(_) | LazyClass::ParseError(_) => None,
+            LazyClass::PendingBytes(_) | LazyClass::PendingJarEntry(_) | LazyClass::ParseError(_) => None,
         }
     }
 
@@ -1007,6 +1215,14 @@ impl Vm {
     /// Set `pending_exception` to a `BootstrapMethodError` with a detail message.
     pub(in crate::interpreter) fn throw_bootstrap_method_error(&mut self, detail: &str) {
         let exc = self.new_vm_exception_message("java/lang/BootstrapMethodError", detail);
+        *self.pending_exception_mut() = Some(exc);
+    }
+
+    /// Set `pending_exception` to a `RuntimeException` with a detail message.
+    pub(in crate::interpreter) fn throw_runtime_exception(&mut self, detail: &str) {
+        let exc = JObject::new("java/lang/RuntimeException");
+        let msg = self.intern_string(detail.to_owned());
+        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
         *self.pending_exception_mut() = Some(exc);
     }
 

@@ -98,7 +98,7 @@ Status labels:
 
 ## JAR loader
 
-199xVM can load classes directly from JAR files at runtime via `Vm::load_jar()`. The Rust `zip` crate (WASM-compatible) handles ZIP decompression. Non-class resources in JARs are stored in a resource map and accessible via `ClassLoader.getResourceAsStream()`.
+199xVM can load classes directly from JAR files at runtime via `Vm::load_jar()`. The Rust `zip` crate (WASM-compatible) parses the ZIP central directory up front, but individual class/resource entries are decompressed only on first access. Non-class resources remain addressable through `ClassLoader.getResourceAsStream()`.
 
 The frontend also exposes a `jar_to_bundle()` WASM export that converts JAR bytes to the flat bundle format, falling back to the JS-side `readJar()` when WASM is not available.
 
