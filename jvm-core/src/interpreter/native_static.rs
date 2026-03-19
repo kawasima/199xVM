@@ -591,9 +591,7 @@ impl super::Vm {
                     _ => 0,
                 }).unwrap_or(0);
                 if millis < 0 {
-                    let msg = self.intern_string("sleep duration must be >= 0");
-                    let exc = crate::heap::JObject::new("java/lang/IllegalArgumentException");
-                    exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+                    let exc = self.new_vm_exception_message("java/lang/IllegalArgumentException", "sleep duration must be >= 0");
                     *self.pending_exception_mut() = Some(exc);
                     return Some(JValue::Void);
                 }

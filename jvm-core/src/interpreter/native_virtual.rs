@@ -263,9 +263,7 @@ impl super::Vm {
                 if let Some(bytes) = byte_array {
                     if off_raw < 0 || len_raw < 0 || (off_raw as usize) + (len_raw as usize) > bytes.len() {
                         let detail = format!("defineClass: off={off_raw}, len={len_raw}, array length={}", bytes.len());
-                        let exc = JObject::new("java/lang/IndexOutOfBoundsException");
-                        let msg = self.intern_string(detail);
-                        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+                        let exc = self.new_vm_exception_message("java/lang/IndexOutOfBoundsException", detail);
                         *self.pending_exception_mut() = Some(exc);
                         return Some(JValue::Void);
                     }
@@ -439,15 +437,10 @@ impl super::Vm {
                     let off = _args.get(1).map(JValue::as_int).unwrap_or(0);
                     let len = _args.get(2).map(JValue::as_int).unwrap_or(0);
                     if off < 0 || len < 0 || (off as usize).saturating_add(len as usize) > bytes.len() {
-                        let exc = JObject::new("java/lang/IndexOutOfBoundsException");
-                        let msg = self.intern_string(format!(
+                        let exc = self.new_vm_exception_message("java/lang/IndexOutOfBoundsException", format!(
                             "PrintStream.write: off={off}, len={len}, array length={}",
                             bytes.len()
                         ));
-                        exc.borrow_mut().fields.insert(
-                            "detailMessage".to_owned(),
-                            JValue::Ref(Some(msg)),
-                        );
                         *self.pending_exception_mut() = Some(exc);
                         return Some(JValue::Void);
                     }
@@ -474,9 +467,7 @@ impl super::Vm {
                         Err(e) => {
                             // Propagate the error as a pending Java exception
                             // so that Java code can observe the failure.
-                            let msg_ref = self.intern_string(&e);
-                            let exc = crate::heap::JObject::new("java/lang/RuntimeException");
-                            exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg_ref)));
+                            let exc = self.new_vm_exception_message("java/lang/RuntimeException", e);
                             *self.pending_exception_mut() = Some(exc);
                         }
                     }
@@ -1033,7 +1024,7 @@ impl super::Vm {
                 if ret_token == "V" {
                     Some(JValue::Ref(None))
                 } else if !matches!(ret_token.as_bytes().first(), Some(b'L' | b'[')) {
-                    Some(self.wrap_primitive_value(out))
+                    Some(self.wrap_primitive_value_for_descriptor(&ret_token, out))
                 } else {
                     Some(out)
                 }
@@ -1163,7 +1154,7 @@ impl super::Vm {
                 if matches!(desc.as_bytes().first(), Some(b'L' | b'[')) {
                     Some(raw)
                 } else {
-                    Some(self.wrap_primitive_value(raw))
+                    Some(self.wrap_primitive_value_for_descriptor(&desc, raw))
                 }
             }
             ("java/lang/reflect/Field", "set") => {

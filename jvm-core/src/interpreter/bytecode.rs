@@ -69,8 +69,6 @@ impl Vm {
         if let Some(r) = self.pending_exception_mut().take() {
             JValue::Ref(Some(r))
         } else {
-            // Create exception object with the message stored as a field.
-            let exc = JObject::new(exc_class);
             // Store the error message in a "detailMessage" field (matches JDK Throwable).
             // Strip the "Exception: classname" prefix to get just the meaningful message.
             let msg_str = err_msg.strip_prefix("Exception: ")
@@ -80,10 +78,7 @@ impl Vm {
                     s.find(": ").map(|i| &s[i + 2..])
                 })
                 .unwrap_or(err_msg);
-            exc.borrow_mut().fields.insert(
-                "detailMessage".to_owned(),
-                JValue::Ref(Some(JObject::new_string(msg_str))),
-            );
+            let exc = self.new_vm_exception(exc_class, Some(JObject::new_string(msg_str)));
             JValue::Ref(Some(exc))
         }
     }
@@ -903,7 +898,7 @@ impl Vm {
                             (msg, Some(r))
                         }
                         JValue::Ref(None) => {
-                            let npe = JObject::new("java/lang/NullPointerException");
+                            let npe = self.new_vm_exception("java/lang/NullPointerException", None);
                             (
                                 format!(
                                     "Exception: java/lang/NullPointerException at {}:pc{}",

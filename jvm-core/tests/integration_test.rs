@@ -630,6 +630,12 @@ fn clojure_bootstrap_shims() {
 }
 
 #[test]
+fn method_handle_shims() {
+    let result = run_jar_test("MethodHandleShimTest", "run", "()Ljava/lang/String;");
+    assert_eq!(result, "canAccess|()V|(I[Ljava/lang/Object;)Ljava/lang/String;|(Ljava/lang/Object;J)I");
+}
+
+#[test]
 fn regex_capture_groups() {
     let result = run_jar_test("RegexGroupsTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "3|1.12.0|1|12|0");
