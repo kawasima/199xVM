@@ -342,7 +342,9 @@ impl super::Vm {
                         ("line.separator", "\n"),
                         ("file.encoding", "UTF-8"),
                         ("java.version", "25"),
+                        ("java.specification.version", "25"),
                         ("java.vm.name", "199xVM"),
+                        ("java.vm.specification.version", "25"),
                         ("java.class.path", ""),
                         ("user.dir", "/"),
                         ("user.home", "/"),
@@ -601,7 +603,6 @@ impl super::Vm {
                 self.scheduler.current_thread_mut().state = ThreadState::Sleeping;
                 Some(JValue::Void)
             }
-            // ── java.lang.Double / Float ─────────────────────────────
             ("java/lang/Double", "toString", "(D)Ljava/lang/String;") => {
                 let d = _args[0].as_double();
                 let s = if d == d.floor() && d.is_finite() && d.abs() < 1e15 {

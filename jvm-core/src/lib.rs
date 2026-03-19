@@ -368,7 +368,10 @@ pub fn load_bundle(vm: &mut Vm, class_bundle: &[u8]) {
         pos += len;
         match parse_class_name(class_bytes) {
             Some(name) => vm.load_lazy(name, class_bytes.to_vec()),
-            None => eprintln!("Warning: skipping class with unreadable name"),
+            None => match parse(class_bytes) {
+                Ok(class_file) => vm.load_class(class_file),
+                Err(err) => eprintln!("Warning: skipping class with unreadable name: {err}"),
+            },
         }
     }
 }
