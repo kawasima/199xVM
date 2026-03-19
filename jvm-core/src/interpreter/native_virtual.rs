@@ -507,6 +507,23 @@ impl super::Vm {
         }
         let cn = this.borrow().class_name.clone();
         match (cn.as_str(), method_name) {
+            ("java/security/SecureRandom", "nextBytes") => {
+                // Fill byte[] argument with cryptographically random bytes via getrandom.
+                if let Some(arr_ref) = _args.first().and_then(|v| v.as_ref()) {
+                    let mut obj = arr_ref.borrow_mut();
+                    if let NativePayload::Array(ref mut elems) = obj.native {
+                        let len = elems.len();
+                        let mut buf = vec![0u8; len];
+                        getrandom::fill(&mut buf).ok();
+                        for (i, &b) in buf.iter().enumerate() {
+                            elems[i] = JValue::Int(b as i8 as i32);
+                        }
+                    } else if let NativePayload::ByteArray(ref mut bytes) = obj.native {
+                        getrandom::fill(bytes.as_mut_slice()).ok();
+                    }
+                }
+                Some(JValue::Void)
+            }
             ("java/util/regex/Pattern", "matcher") => {
                 let input = _args
                     .first()

@@ -25,39 +25,63 @@
 
 package java.security;
 
+/**
+ * 199xVM shim: SecureRandom backed by the VM's native CSPRNG
+ * (getrandom crate → crypto.getRandomValues() on WASM).
+ *
+ * nextBytes() is native; all other randomness methods delegate through
+ * the parent Random.next(int) which is overridden to pull from the
+ * native source.
+ */
 public class SecureRandom extends java.util.Random {
     private static final long serialVersionUID = 4940670005562187L;
 
-    private static long defaultSeed() {
-        return System.currentTimeMillis() ^ 0x9e3779b97f4a7c15L;
-    }
-
     public SecureRandom() {
-        super(defaultSeed());
+        super(0L);
     }
 
     public SecureRandom(byte[] seed) {
         super(0L);
-        setSeed(seed);
-    }
-
-    public void setSeed(byte[] seed) {
-        if (seed == null) throw new NullPointerException();
-        long mixed = 0L;
-        for (byte b : seed) {
-            mixed = (mixed * 0x5DEECE66DL) ^ (b & 0xffL);
-        }
-        super.setSeed(mixed);
+        // Seed is accepted but ignored — we always use CSPRNG.
     }
 
     @Override
-    public void nextBytes(byte[] bytes) {
-        super.nextBytes(bytes);
+    public void setSeed(long seed) {
+        // Ignored — CSPRNG is self-seeding.
+    }
+
+    public void setSeed(byte[] seed) {
+        // Ignored — CSPRNG is self-seeding.
+    }
+
+    /**
+     * Fills the given byte array with cryptographically strong random bytes.
+     * Delegated to the VM's native CSPRNG (getrandom / crypto.getRandomValues).
+     */
+    @Override
+    public native void nextBytes(byte[] bytes);
+
+    /**
+     * Override next(int) to use CSPRNG instead of LCG.
+     * This ensures nextInt(), nextLong(), nextDouble() etc. are all
+     * cryptographically random.
+     */
+    @Override
+    protected int next(int bits) {
+        byte[] buf = new byte[4];
+        nextBytes(buf);
+        int val = ((buf[0] & 0xff) << 24) | ((buf[1] & 0xff) << 16)
+                | ((buf[2] & 0xff) << 8)  | (buf[3] & 0xff);
+        return val >>> (32 - bits);
     }
 
     public byte[] generateSeed(int numBytes) {
         byte[] seed = new byte[numBytes];
         nextBytes(seed);
         return seed;
+    }
+
+    public static SecureRandom getInstanceStrong() {
+        return new SecureRandom();
     }
 }
