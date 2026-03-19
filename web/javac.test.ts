@@ -1596,6 +1596,25 @@ describe("Code generator", () => {
       "no java/lang/ prefix on DateTimeFormatter");
   });
 
+  test("implicit java.lang simple names resolve during code generation", async () => {
+    const src = `
+      public class ThrowableSimpleName {
+        public static String run() {
+          Throwable t = new Throwable();
+          return t.getClass().getName();
+        }
+      }
+    `;
+    const bytes = compile(src);
+    const output = disassemble(bytes);
+    assert.ok(
+      output.includes("java.lang.Throwable.<init>:()V"),
+      "must resolve Throwable constructor to java/lang/Throwable",
+    );
+    const result = await runSnippet(src, "ThrowableSimpleName");
+    assert.equal(result, "java.lang.Throwable");
+  });
+
   test("named import resolves class reference", () => {
     const bytes = compile(`
       import net.unit8.raoh.Ok;
