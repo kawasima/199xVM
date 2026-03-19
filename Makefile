@@ -8,11 +8,16 @@ RAOH_JSON_JAR        := raoh-json-0.4.0.jar
 JACKSON_ANN_JAR      := jackson-annotations-3.0-rc5.jar
 JACKSON_CORE_JAR     := jackson-core-3.1.0.jar
 JACKSON_DATABIND_JAR := jackson-databind-3.1.0.jar
+CLOJURE_JAR          := clojure-1.12.0.jar
+CLOJURE_SPEC_JAR     := spec.alpha-0.5.238.jar
+CLOJURE_CORE_SPEC_JAR := core.specs.alpha-0.4.74.jar
 
 JAR_NAMES := $(RAOH_JAR) $(RAOH_JSON_JAR) $(JACKSON_ANN_JAR) \
              $(JACKSON_CORE_JAR) $(JACKSON_DATABIND_JAR)
+CLOJURE_JAR_NAMES := $(CLOJURE_JAR) $(CLOJURE_SPEC_JAR) $(CLOJURE_CORE_SPEC_JAR)
 
 WEB_JARS := $(addprefix web/,$(JAR_NAMES))
+CLOJURE_DIST_JARS := $(addprefix clj-smoke/jars/,$(CLOJURE_JAR_NAMES))
 
 .PHONY: all dev-jars shim test-bundle clj-smoke-bundle clj-smoke-test clj-upstream-test clj-upstream-coverage clj-smoke-bundle-docker clj-smoke-test-docker clj-upstream-test-docker clj-upstream-coverage-docker javac wasm dist test launcher-test clean deploy docker-playground dist-docker
 
@@ -132,7 +137,7 @@ launcher-test: jdk-shim/bundle.bin test-classes/bundle.bin jvm-core/pkg/jvm_core
 # ============================================================
 # dist — assemble deployable static files in dist/
 # ============================================================
-dist: web/javac.js jdk-shim/bundle.bin jvm-core/pkg/jvm_core_bg.wasm $(WEB_JARS)
+dist: web/javac.js jdk-shim/bundle.bin jvm-core/pkg/jvm_core_bg.wasm $(WEB_JARS) $(CLOJURE_DIST_JARS)
 	rm -rf dist
 	mkdir -p dist/pkg dist/bundle
 	sed \
@@ -150,6 +155,9 @@ dist: web/javac.js jdk-shim/bundle.bin jvm-core/pkg/jvm_core_bg.wasm $(WEB_JARS)
 	cp web/$(JACKSON_ANN_JAR)            dist/$(JACKSON_ANN_JAR)
 	cp web/$(JACKSON_CORE_JAR)           dist/$(JACKSON_CORE_JAR)
 	cp web/$(JACKSON_DATABIND_JAR)       dist/$(JACKSON_DATABIND_JAR)
+	cp clj-smoke/jars/$(CLOJURE_JAR)     dist/$(CLOJURE_JAR)
+	cp clj-smoke/jars/$(CLOJURE_SPEC_JAR) dist/$(CLOJURE_SPEC_JAR)
+	cp clj-smoke/jars/$(CLOJURE_CORE_SPEC_JAR) dist/$(CLOJURE_CORE_SPEC_JAR)
 	@echo ""
 	@echo "==> dist/ contents:"
 	@find dist -type f | sort
@@ -195,6 +203,9 @@ endif
 	upload_if_changed dist/$(JACKSON_ANN_JAR)          "$(GCS)/$(JACKSON_ANN_JAR)"          --cache-control="public,max-age=31536000" --content-type="application/java-archive"; \
 	upload_if_changed dist/$(JACKSON_CORE_JAR)         "$(GCS)/$(JACKSON_CORE_JAR)"         --cache-control="public,max-age=31536000" --content-type="application/java-archive"; \
 	upload_if_changed dist/$(JACKSON_DATABIND_JAR)     "$(GCS)/$(JACKSON_DATABIND_JAR)"     --cache-control="public,max-age=31536000" --content-type="application/java-archive"; \
+	upload_if_changed dist/$(CLOJURE_JAR)              "$(GCS)/$(CLOJURE_JAR)"              --cache-control="public,max-age=31536000" --content-type="application/java-archive"; \
+	upload_if_changed dist/$(CLOJURE_SPEC_JAR)         "$(GCS)/$(CLOJURE_SPEC_JAR)"         --cache-control="public,max-age=31536000" --content-type="application/java-archive"; \
+	upload_if_changed dist/$(CLOJURE_CORE_SPEC_JAR)    "$(GCS)/$(CLOJURE_CORE_SPEC_JAR)"    --cache-control="public,max-age=31536000" --content-type="application/java-archive"; \
 	echo "  upload: index.html (always)"; \
 	gcloud storage cp dist/index.html "$(GCS)/index.html" --cache-control="no-cache" --content-type="text/html; charset=utf-8"
 	@echo ""
