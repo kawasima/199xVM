@@ -368,6 +368,62 @@ impl Vm {
         }
     }
 
+    pub(super) fn wrap_primitive_value_for_descriptor(&self, desc: &str, value: JValue) -> JValue {
+        match desc.as_bytes().first().copied() {
+            Some(b'Z') => {
+                let i = self.adapt_value_for_descriptor("Z", value).as_int();
+                let obj = JObject::new("java/lang/Boolean");
+                obj.borrow_mut()
+                    .fields
+                    .insert("value".to_owned(), JValue::Int(if i == 0 { 0 } else { 1 }));
+                JValue::Ref(Some(obj))
+            }
+            Some(b'B') => {
+                let i = self.adapt_value_for_descriptor("B", value).as_int();
+                let obj = JObject::new("java/lang/Byte");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Int(i));
+                JValue::Ref(Some(obj))
+            }
+            Some(b'C') => {
+                let i = self.adapt_value_for_descriptor("C", value).as_int();
+                let obj = JObject::new("java/lang/Character");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Int(i));
+                JValue::Ref(Some(obj))
+            }
+            Some(b'S') => {
+                let i = self.adapt_value_for_descriptor("S", value).as_int();
+                let obj = JObject::new("java/lang/Short");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Int(i));
+                JValue::Ref(Some(obj))
+            }
+            Some(b'I') => {
+                let i = self.adapt_value_for_descriptor("I", value).as_int();
+                let obj = JObject::new("java/lang/Integer");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Int(i));
+                JValue::Ref(Some(obj))
+            }
+            Some(b'J') => {
+                let l = self.adapt_value_for_descriptor("J", value).as_long();
+                let obj = JObject::new("java/lang/Long");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Long(l));
+                JValue::Ref(Some(obj))
+            }
+            Some(b'F') => {
+                let f = self.adapt_value_for_descriptor("F", value).as_float();
+                let obj = JObject::new("java/lang/Float");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Float(f));
+                JValue::Ref(Some(obj))
+            }
+            Some(b'D') => {
+                let d = self.adapt_value_for_descriptor("D", value).as_double();
+                let obj = JObject::new("java/lang/Double");
+                obj.borrow_mut().fields.insert("value".to_owned(), JValue::Double(d));
+                JValue::Ref(Some(obj))
+            }
+            _ => value,
+        }
+    }
+
     pub(super) fn unwrap_boxed_primitive(&self, value: &JValue) -> Option<JValue> {
         let r = value.as_ref()?;
         let obj = r.borrow();

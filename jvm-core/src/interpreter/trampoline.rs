@@ -653,10 +653,8 @@ impl Vm {
             if is_bytecode_lambda {
                 return Ok(None);
             }
-            let exc = JObject::new("java/lang/AbstractMethodError");
             let ms = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-            let msg = self.intern_string(ms.clone());
-            exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+            let exc = self.new_vm_exception_message("java/lang/AbstractMethodError", ms.clone());
             *self.pending_exception_mut() = Some(exc);
             return Err(format!("java/lang/AbstractMethodError: {ms}"));
         }
@@ -711,10 +709,8 @@ impl Vm {
         let info = self.resolve_method_exec_info(class_name, method_name, desc).unwrap();
 
         if info.access_flags & 0x0400 != 0 {
-            let exc = JObject::new("java/lang/AbstractMethodError");
             let ms = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-            let msg = self.intern_string(ms.clone());
-            exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+            let exc = self.new_vm_exception_message("java/lang/AbstractMethodError", ms.clone());
             *self.pending_exception_mut() = Some(exc);
             return Err(format!("java/lang/AbstractMethodError: {ms}"));
         }

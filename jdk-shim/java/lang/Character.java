@@ -230,7 +230,8 @@ class Character implements java.io.Serializable, Comparable<Character>, Constabl
      *
      * @since   1.1
      */
-    public static final Class<Character> TYPE = char.class;
+    @SuppressWarnings("unchecked")
+    public static final Class<Character> TYPE = (Class<Character>) Class.getPrimitiveClass("char");
 
     /*
      * Normative general types

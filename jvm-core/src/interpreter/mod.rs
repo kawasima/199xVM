@@ -625,11 +625,38 @@ impl Vm {
         }
     }
 
+    /// Initialize the inherited Throwable state for VM-created exceptions.
+    ///
+    /// These exceptions are allocated directly by the VM without running Java
+    /// constructors, so we must populate the fields that Throwable methods
+    /// assume are always initialized.
+    pub(in crate::interpreter) fn init_vm_throwable(&mut self, exc: &JRef, detail_message: Option<JRef>) {
+        let stack_trace = JObject::new_array("[Ljava/lang/StackTraceElement;", vec![]);
+        let mut obj = exc.borrow_mut();
+        obj.fields.insert("detailMessage".to_owned(), JValue::Ref(detail_message));
+        obj.fields.insert("cause".to_owned(), JValue::Ref(Some(Rc::clone(exc))));
+        obj.fields.insert("stackTrace".to_owned(), JValue::Ref(Some(stack_trace)));
+        obj.fields.insert("suppressedExceptions".to_owned(), JValue::Ref(None));
+    }
+
+    pub(in crate::interpreter) fn new_vm_exception(&mut self, class_name: &str, detail_message: Option<JRef>) -> JRef {
+        let exc = JObject::new(class_name);
+        self.init_vm_throwable(&exc, detail_message);
+        exc
+    }
+
+    pub(in crate::interpreter) fn new_vm_exception_message(
+        &mut self,
+        class_name: &str,
+        detail_message: impl Into<String>,
+    ) -> JRef {
+        let msg = self.intern_string(detail_message);
+        self.new_vm_exception(class_name, Some(msg))
+    }
+
     /// Set a pending IllegalMonitorStateException from an error message.
     pub(in crate::interpreter) fn throw_illegal_monitor_state(&mut self, err_msg: &str) {
-        let msg = self.intern_string(err_msg);
-        let exc = crate::heap::JObject::new("java/lang/IllegalMonitorStateException");
-        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        let exc = self.new_vm_exception_message("java/lang/IllegalMonitorStateException", err_msg);
         *self.pending_exception_mut() = Some(exc);
     }
 
@@ -919,8 +946,14 @@ impl Vm {
                 let next = if depth < 8 {
                     b.fields.get("cause")
                         .and_then(|v| v.as_ref())
+                        .filter(|cause| !Rc::ptr_eq(cause, r))
                         .cloned()
-                        .or_else(|| b.fields.get("target").and_then(|v| v.as_ref()).cloned())
+                        .or_else(|| {
+                            b.fields.get("target")
+                                .and_then(|v| v.as_ref())
+                                .filter(|target| !Rc::ptr_eq(target, r))
+                                .cloned()
+                        })
                 } else {
                     None
                 };
@@ -954,43 +987,33 @@ impl Vm {
     /// Set `pending_exception` to a `NoClassDefFoundError` for `name`.
     /// `name` should be the internal (slash-separated) class name.
     pub(in crate::interpreter) fn throw_no_class_def_found(&mut self, name: &str) {
-        let exc = JObject::new("java/lang/NoClassDefFoundError");
-        let msg = self.intern_string(name.replace('/', "."));
-        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        let exc = self.new_vm_exception_message("java/lang/NoClassDefFoundError", name.replace('/', "."));
         *self.pending_exception_mut() = Some(exc);
     }
 
     /// Set `pending_exception` to a new `ClassNotFoundException` for `name`.
     /// `name` should be the runtime (dot-separated) class name.
     pub(in crate::interpreter) fn throw_class_not_found(&mut self, name: &str) {
-        let exc = JObject::new("java/lang/ClassNotFoundException");
-        let msg = self.intern_string(name.to_owned());
-        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        let exc = self.new_vm_exception_message("java/lang/ClassNotFoundException", name);
         *self.pending_exception_mut() = Some(exc);
     }
 
     /// Set `pending_exception` to a `NullPointerException` with an optional detail message.
     pub(in crate::interpreter) fn throw_null_pointer(&mut self, detail: &str) {
-        let exc = JObject::new("java/lang/NullPointerException");
-        let msg = self.intern_string(detail.to_owned());
-        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        let exc = self.new_vm_exception_message("java/lang/NullPointerException", detail);
         *self.pending_exception_mut() = Some(exc);
     }
 
     /// Set `pending_exception` to a `BootstrapMethodError` with a detail message.
     pub(in crate::interpreter) fn throw_bootstrap_method_error(&mut self, detail: &str) {
-        let exc = JObject::new("java/lang/BootstrapMethodError");
-        let msg = self.intern_string(detail.to_owned());
-        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        let exc = self.new_vm_exception_message("java/lang/BootstrapMethodError", detail);
         *self.pending_exception_mut() = Some(exc);
     }
 
     /// Set `pending_exception` to a `ClassFormatError` carrying the parse error message.
     /// Used when a class entry exists as `LazyClass::ParseError` (malformed bytecode).
     pub(in crate::interpreter) fn throw_class_format_error(&mut self, parse_msg: &str) {
-        let exc = JObject::new("java/lang/ClassFormatError");
-        let msg = self.intern_string(parse_msg.to_owned());
-        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        let exc = self.new_vm_exception_message("java/lang/ClassFormatError", parse_msg);
         *self.pending_exception_mut() = Some(exc);
     }
 
@@ -1289,9 +1312,7 @@ impl Vm {
             if let Err(e) = self.invoke_static(class_name, "<clinit>", "()V", vec![]) {
                 // Preserve the original exception object as the "cause" field.
                 let cause = self.pending_exception_mut().take();
-                let eiie = JObject::new("java/lang/ExceptionInInitializerError");
-                let msg = self.intern_string(e.clone());
-                eiie.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+                let eiie = self.new_vm_exception_message("java/lang/ExceptionInInitializerError", e.clone());
                 if let Some(c) = cause {
                     eiie.borrow_mut().fields.insert("cause".to_owned(), JValue::Ref(Some(c)));
                 }

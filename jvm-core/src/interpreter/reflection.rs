@@ -14,14 +14,10 @@ impl Vm {
 
     pub(super) fn raise_invocation_target_exception(&mut self, message: &str) {
         let cause = self.pending_exception_mut().take().unwrap_or_else(|| {
-            let exc = JObject::new("java/lang/RuntimeException");
-            exc.borrow_mut().fields.insert(
-                "detailMessage".to_owned(),
-                JValue::Ref(Some(JObject::new_string(message.to_owned()))),
-            );
-            exc
+            self.new_vm_exception("java/lang/RuntimeException", Some(JObject::new_string(message)))
         });
-        let ite = JObject::new("java/lang/reflect/InvocationTargetException");
+        let ite = self.new_vm_exception("java/lang/reflect/InvocationTargetException", None);
+        ite.borrow_mut().fields.insert("cause".to_owned(), JValue::Ref(None));
         ite.borrow_mut().fields.insert("target".to_owned(), JValue::Ref(Some(cause)));
         *self.pending_exception_mut() = Some(ite);
     }
