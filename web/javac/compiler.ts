@@ -555,26 +555,6 @@ function resolveWildcardImport(name: string, packageImports: string[]): string |
   return matches.size === 1 ? matches.values().next().value! : undefined;
 }
 
-const JAVA_LANG_SIMPLE_NAMES = new Set([
-  "Object",
-  "Class",
-  "System",
-  "Throwable",
-  "Exception",
-  "RuntimeException",
-  "Integer",
-  "Long",
-  "Short",
-  "Byte",
-  "Character",
-  "Boolean",
-  "Float",
-  "Double",
-  "StringBuilder",
-  "Math",
-  "IO",
-]);
-
 function resolveClassName(ctx: CompileContext, name: string): string {
   // Already internal (contains '/') or fully qualified (contains '.')
   if (name.includes("/")) return name;
@@ -582,8 +562,9 @@ function resolveClassName(ctx: CompileContext, name: string): string {
   const explicit = ctx.importMap.get(name);
   if (explicit) return explicit;
   if (ctx.classDecls.has(name)) return name;
-  if (ctx.packageImports.includes("java/lang") && JAVA_LANG_SIMPLE_NAMES.has(name)) {
-    return `java/lang/${name}`;
+  const javaLangCandidate = `java/lang/${name}`;
+  if (ctx.packageImports.includes("java/lang") && hasKnownMethodOwnerPrefix(javaLangCandidate)) {
+    return javaLangCandidate;
   }
   return resolveWildcardImport(name, ctx.packageImports) ?? name;
 }

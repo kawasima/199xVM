@@ -1,25 +1,6 @@
 import { TokenKind, type Token } from "./lexer.js";
 import type { ClassDecl, Expr, FieldDecl, MethodDecl, Stmt, Type } from "./ast.js";
-
-const JAVA_LANG_SIMPLE_NAMES = new Set([
-  "Object",
-  "Class",
-  "System",
-  "Throwable",
-  "Exception",
-  "RuntimeException",
-  "Integer",
-  "Long",
-  "Short",
-  "Byte",
-  "Character",
-  "Boolean",
-  "Float",
-  "Double",
-  "StringBuilder",
-  "Math",
-  "IO",
-]);
+import { hasKnownMethodOwnerPrefix } from "./method-registry.js";
 
 export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl[] {
   let pos = 0;
@@ -94,8 +75,9 @@ export function parseAll(tokens: Token[], implicitClassName?: string): ClassDecl
     if (name.includes(".")) return name.replace(/\./g, "/");
     const explicit = importMap.get(name);
     if (explicit) return explicit;
-    if (packageImports.includes("java/lang") && JAVA_LANG_SIMPLE_NAMES.has(name)) {
-      return `java/lang/${name}`;
+    const javaLangCandidate = `java/lang/${name}`;
+    if (packageImports.includes("java/lang") && hasKnownMethodOwnerPrefix(javaLangCandidate)) {
+      return javaLangCandidate;
     }
     return name;
   }

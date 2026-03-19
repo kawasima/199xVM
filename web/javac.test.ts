@@ -11,7 +11,7 @@ import { test, describe } from "node:test";
 import * as assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import initJvm, { run_static } from "../jvm-core/pkg/jvm_core.js";
-import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, disassemble, setMethodRegistry, setClassInterfaces, resetMethodRegistry } from "./javac.js";
+import { lex, parseAll, compile, generateClassFile, TokenKind, parseClassMeta, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, disassemble, setMethodRegistry, setKnownClassOwners, setClassInterfaces, resetMethodRegistry } from "./javac.js";
 import type { MethodSig } from "./javac/method-registry.js";
 
 // Pre-load shim method registry so compiler tests work without bundle.bin being
@@ -20,12 +20,13 @@ import type { MethodSig } from "./javac/method-registry.js";
 // Note: bundle.bin must exist before running tests — run `make shim` first.
 // If it is missing, all suites fail immediately with a clear message rather than
 // failing silently on individual "unknown method" errors later.
-let _shimRegistryCache: { reg: Record<string, MethodSig>; ifaces: Record<string, string[]> } | null = null;
+let _shimRegistryCache: { reg: Record<string, MethodSig>; ifaces: Record<string, string[]>; owners: string[] } | null = null;
 // Keep the raw bytes so ensureRuntimeReady() can reuse them for shimBundle without re-reading.
 let _shimBundleBytes: Uint8Array | null = null;
 
 function reloadShimRegistry(): void {
   if (_shimRegistryCache) {
+    setKnownClassOwners(_shimRegistryCache.owners);
     setMethodRegistry(_shimRegistryCache.reg);
     setClassInterfaces(_shimRegistryCache.ifaces);
   }
@@ -36,7 +37,11 @@ function reloadShimRegistry(): void {
   try {
     _shimBundleBytes = new Uint8Array(await readFile(shimPath));
     const metas = parseBundleMeta(_shimBundleBytes);
-    _shimRegistryCache = { reg: buildMethodRegistry(metas), ifaces: buildClassInterfaces(metas) };
+    _shimRegistryCache = {
+      reg: buildMethodRegistry(metas),
+      ifaces: buildClassInterfaces(metas),
+      owners: metas.map((meta) => meta.name),
+    };
     reloadShimRegistry();
   } catch (e: unknown) {
     throw new Error(
@@ -1596,11 +1601,11 @@ describe("Code generator", () => {
       "no java/lang/ prefix on DateTimeFormatter");
   });
 
-  test("implicit java.lang simple names resolve during code generation", async () => {
+  test("implicit java.lang simple names resolve from loaded shim owners", async () => {
     const src = `
-      public class ThrowableSimpleName {
+      public class ThreadSimpleName {
         public static String run() {
-          Throwable t = new Throwable();
+          Thread t = Thread.currentThread();
           return t.getClass().getName();
         }
       }
@@ -1608,11 +1613,11 @@ describe("Code generator", () => {
     const bytes = compile(src);
     const output = disassemble(bytes);
     assert.ok(
-      output.includes("java.lang.Throwable.<init>:()V"),
-      "must resolve Throwable constructor to java/lang/Throwable",
+      output.includes("java.lang.Thread.currentThread:()Ljava/lang/Thread;"),
+      "must resolve Thread through loaded shim owners",
     );
-    const result = await runSnippet(src, "ThrowableSimpleName");
-    assert.equal(result, "java.lang.Throwable");
+    const result = await runSnippet(src, "ThreadSimpleName");
+    assert.equal(result, "java.lang.Thread");
   });
 
   test("named import resolves class reference", () => {
