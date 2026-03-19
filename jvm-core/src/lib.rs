@@ -8,10 +8,14 @@ mod class_file;
 pub mod heap;
 pub mod interpreter;
 
+#[cfg(target_arch = "wasm32")]
+use js_sys::Array;
 use wasm_bindgen::prelude::*;
 
 use class_file::{parse, parse_class_name};
 use heap::JValue;
+pub use interpreter::launcher::{JvmProcess, ProcessExit, ProcessState};
+pub use interpreter::StdioMode;
 use interpreter::Vm;
 
 /// Load one or more `.class` files and invoke a static method.
@@ -107,8 +111,30 @@ pub fn run_with_jars_native(
 ) -> String {
     let mut vm = Vm::new();
     load_bundle(&mut vm, shim_bundle);
-    load_jars(&mut vm, jar_data);
+    if let Err(e) = load_jars(&mut vm, jar_data) {
+        return format!("ERROR: {e}");
+    }
     invoke_and_collect(&mut vm, main_class, method_name, descriptor)
+}
+
+pub fn launch_classpath_main_native(
+    shim_bundle: &[u8],
+    jar_data: &[u8],
+    main_class: &str,
+    args: &[String],
+    stdin: StdioMode,
+    stdout: StdioMode,
+    stderr: StdioMode,
+) -> Result<JvmProcess, String> {
+    interpreter::launcher::JvmProcess::launch_classpath_main(
+        shim_bundle,
+        jar_data,
+        &normalize_main_class(main_class),
+        args,
+        stdin,
+        stdout,
+        stderr,
+    )
 }
 
 /// Convert a single JAR to flat bundle format.
@@ -142,9 +168,13 @@ pub fn jar_to_bundle_native(jar_bytes: &[u8]) -> Vec<u8> {
 /// Load JARs from a framed byte array into a VM.
 ///
 /// Each JAR is preceded by a 4-byte big-endian length: `[u32 len][jar bytes] × N`.
-pub fn load_jars(vm: &mut Vm, jar_data: &[u8]) {
+pub fn load_jars(vm: &mut Vm, jar_data: &[u8]) -> Result<(), String> {
     let mut pos = 0usize;
-    while pos + 4 <= jar_data.len() {
+    let mut jar_index = 0usize;
+    while pos < jar_data.len() {
+        if pos + 4 > jar_data.len() {
+            return Err(format!("Truncated JAR frame header at byte offset {pos}"));
+        }
         let len = u32::from_be_bytes([
             jar_data[pos],
             jar_data[pos + 1],
@@ -152,24 +182,153 @@ pub fn load_jars(vm: &mut Vm, jar_data: &[u8]) {
             jar_data[pos + 3],
         ]) as usize;
         pos += 4;
-        if pos + len > jar_data.len() { break; }
+        if pos + len > jar_data.len() {
+            return Err(format!(
+                "Truncated JAR frame payload for entry #{jar_index} at byte offset {}",
+                pos - 4
+            ));
+        }
         let jar_bytes = &jar_data[pos..pos + len];
         pos += len;
-        if let Err(e) = vm.load_jar(jar_bytes) {
-            eprintln!("Warning: failed to load JAR: {e}");
-        }
+        vm.load_jar(jar_bytes)
+            .map_err(|e| format!("Failed to load classpath JAR #{jar_index}: {e}"))?;
+        jar_index += 1;
+    }
+    Ok(())
+}
+
+fn normalize_main_class(main_class: &str) -> String {
+    if main_class.contains('/') {
+        main_class.to_owned()
+    } else {
+        main_class.replace('.', "/")
     }
 }
 
-fn invoke_and_collect(vm: &mut Vm, main_class: &str, method_name: &str, descriptor: &str) -> String {
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub struct JvmProcessHandle {
+    inner: JvmProcess,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_low_level_stdio(spec: &str, name: &str) -> Result<StdioMode, JsValue> {
+    match spec {
+        "pipe" => Ok(StdioMode::Pipe),
+        "ignore" => Ok(StdioMode::Ignore),
+        "inherit" => Err(JsValue::from_str(&format!(
+            "launchClasspathMainLowLevel does not accept stdio.{name}=\"inherit\"; normalize it in the caller"
+        ))),
+        _ => Err(JsValue::from_str(&format!(
+            "launchClasspathMainLowLevel stdio.{name} must be \"pipe\" or \"ignore\""
+        ))),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = launchClasspathMainLowLevel)]
+pub fn launch_classpath_main_low_level(
+    shim_bundle: &[u8],
+    jar_data: &[u8],
+    main_class: &str,
+    args: Array,
+    stdin: &str,
+    stdout: &str,
+    stderr: &str,
+) -> Result<JvmProcessHandle, JsValue> {
+    // This low-level export operates on concrete VM stdio modes only.
+    // Higher-level launcher policy such as public `"inherit"` handling lives in web/launcher.js.
+    let args = args
+        .iter()
+        .map(|value| {
+            value.as_string().ok_or_else(|| {
+                JsValue::from_str("launchClasspathMainLowLevel args must be strings")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let stdin = parse_low_level_stdio(stdin, "stdin")?;
+    let stdout = parse_low_level_stdio(stdout, "stdout")?;
+    let stderr = parse_low_level_stdio(stderr, "stderr")?;
+    let inner = launch_classpath_main_native(
+        shim_bundle,
+        jar_data,
+        main_class,
+        &args,
+        stdin,
+        stdout,
+        stderr,
+    )
+    .map_err(|e| JsValue::from_str(&e))?;
+    Ok(JvmProcessHandle { inner })
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl JvmProcessHandle {
+    pub fn pump(&mut self, max_rounds: usize) -> String {
+        match self.inner.pump(max_rounds) {
+            ProcessState::Running => "running".to_owned(),
+            ProcessState::WaitingForInput => "waiting".to_owned(),
+            ProcessState::Exited => "exited".to_owned(),
+        }
+    }
+
+    pub fn write_stdin(&mut self, bytes: &[u8]) {
+        self.inner.write_stdin(bytes);
+    }
+
+    pub fn close_stdin(&mut self) {
+        self.inner.close_stdin();
+    }
+
+    pub fn take_stdout(&mut self) -> Vec<u8> {
+        self.inner.take_stdout()
+    }
+
+    pub fn take_stderr(&mut self) -> Vec<u8> {
+        self.inner.take_stderr()
+    }
+
+    pub fn is_exited(&self) -> bool {
+        self.inner.is_exited()
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        self.inner.exit().map(|exit| exit.exit_code).unwrap_or(-1)
+    }
+
+    pub fn uncaught_exception(&self) -> Option<String> {
+        self.inner
+            .exit()
+            .and_then(|exit| exit.uncaught_exception.clone())
+    }
+
+    pub fn kill(&mut self) {
+        self.inner.kill();
+    }
+}
+
+fn invoke_and_collect(
+    vm: &mut Vm,
+    main_class: &str,
+    method_name: &str,
+    descriptor: &str,
+) -> String {
     let out = match vm.invoke_static_threaded(main_class, method_name, descriptor, vec![]) {
         Ok(result) => {
             // If the result is a non-String object, call toString() on it.
             if let JValue::Ref(Some(ref r)) = result {
-                let is_java_string = matches!(r.borrow().native, heap::NativePayload::JavaString(_));
+                let is_java_string =
+                    matches!(r.borrow().native, heap::NativePayload::JavaString(_));
                 if !is_java_string {
                     let class_name = r.borrow().class_name.clone();
-                    if let Ok(s) = vm.invoke_virtual(r.clone(), &class_name, "toString", "()Ljava/lang/String;", vec![]) {
+                    if let Ok(s) = vm.invoke_virtual(
+                        r.clone(),
+                        &class_name,
+                        "toString",
+                        "()Ljava/lang/String;",
+                        vec![],
+                    ) {
                         jvalue_to_string(&s)
                     } else {
                         jvalue_to_string(&result)
@@ -202,7 +361,9 @@ pub fn load_bundle(vm: &mut Vm, class_bundle: &[u8]) {
             class_bundle[pos + 3],
         ]) as usize;
         pos += 4;
-        if pos + len > class_bundle.len() { break; }
+        if pos + len > class_bundle.len() {
+            break;
+        }
         let class_bytes = &class_bundle[pos..pos + len];
         pos += len;
         match parse_class_name(class_bytes) {
@@ -228,7 +389,13 @@ fn jvalue_to_string(v: &JValue) -> String {
             let obj = r.borrow();
             match &obj.native {
                 heap::NativePayload::JavaString(s) => s.clone(),
-                heap::NativePayload::Array(v) => format!("[{}]", v.iter().map(jvalue_to_string).collect::<Vec<_>>().join(", ")),
+                heap::NativePayload::Array(v) => format!(
+                    "[{}]",
+                    v.iter()
+                        .map(jvalue_to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 _ => format!("{}@obj", obj.class_name),
             }
         }

@@ -99,6 +99,7 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/io/ObjectOutput.java"
   "$SHIM_SRC/java/io/Externalizable.java"
   "$SHIM_SRC/java/io/InputStream.java"
+  "$SHIM_SRC/java/io/ProcessPipeInputStream.java"
   "$SHIM_SRC/java/io/ByteArrayInputStream.java"
   "$SHIM_SRC/java/io/ByteArrayOutputStream.java"
   "$SHIM_SRC/java/io/OutputStream.java"

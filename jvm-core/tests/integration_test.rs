@@ -19,6 +19,16 @@ fn jar_loader_test_jar() -> &'static [u8] {
     include_bytes!("test.jar")
 }
 
+fn framed_jars(jars: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for jar in jars {
+        let len = jar.len() as u32;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(jar);
+    }
+    out
+}
+
 /// Run a test class from the test JAR via the JAR loader.
 fn run_jar_test(class: &str, method: &str, descriptor: &str) -> String {
     let mut vm = jvm_core::interpreter::Vm::new();
@@ -612,6 +622,215 @@ fn jar_to_bundle_roundtrip() {
     assert_eq!(result, "jar-ok");
 }
 
+#[test]
+fn launcher_process_pipe_roundtrip() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "ProcessLauncherEchoMain",
+        &["pipe".to_owned()],
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+    )
+    .expect("launch classpath main");
+
+    let mut state = "running";
+    for _ in 0..128 {
+        match process.pump(64) {
+            jvm_core::ProcessState::Running => {}
+            jvm_core::ProcessState::WaitingForInput => {
+                state = "waiting";
+                break;
+            }
+            jvm_core::ProcessState::Exited => {
+                state = "exited";
+                break;
+            }
+        }
+    }
+    assert_eq!(state, "waiting", "process did not block on stdin");
+    assert_eq!(String::from_utf8(process.take_stdout()).unwrap(), "pipe>");
+    assert!(process.take_stderr().is_empty());
+
+    process.write_stdin(b"abc!");
+
+    state = "running";
+    for _ in 0..128 {
+        match process.pump(64) {
+            jvm_core::ProcessState::Running | jvm_core::ProcessState::WaitingForInput => {}
+            jvm_core::ProcessState::Exited => {
+                state = "exited";
+                break;
+            }
+        }
+    }
+    assert_eq!(state, "exited", "process did not exit after stdin payload");
+    assert_eq!(String::from_utf8(process.take_stdout()).unwrap(), "abc");
+    assert_eq!(String::from_utf8(process.take_stderr()).unwrap(), "bang");
+
+    let exit = process.exit().expect("process exit");
+    assert_eq!(exit.exit_code, 0);
+    assert_eq!(exit.uncaught_exception, None);
+}
+
+#[test]
+fn launcher_process_pipe_eof() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "ProcessLauncherEchoMain",
+        &["eof".to_owned()],
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+    )
+    .expect("launch classpath main");
+
+    for _ in 0..128 {
+        if matches!(process.pump(64), jvm_core::ProcessState::WaitingForInput) {
+            break;
+        }
+    }
+    assert_eq!(String::from_utf8(process.take_stdout()).unwrap(), "eof>");
+
+    process.close_stdin();
+
+    let mut exited = false;
+    for _ in 0..128 {
+        if matches!(process.pump(64), jvm_core::ProcessState::Exited) {
+            exited = true;
+            break;
+        }
+    }
+    assert!(exited, "process did not exit after stdin EOF");
+    assert_eq!(String::from_utf8(process.take_stdout()).unwrap(), "<eof>");
+    assert!(process.take_stderr().is_empty());
+
+    let exit = process.exit().expect("process exit");
+    assert_eq!(exit.exit_code, 0);
+    assert_eq!(exit.uncaught_exception, None);
+}
+
+#[test]
+fn launcher_process_pipe_byte_writes() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "ProcessLauncherEchoMain",
+        &["bytes".to_owned()],
+        jvm_core::StdioMode::Ignore,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+    )
+    .expect("launch classpath main");
+
+    let mut exited = false;
+    for _ in 0..128 {
+        if matches!(process.pump(64), jvm_core::ProcessState::Exited) {
+            exited = true;
+            break;
+        }
+    }
+    assert!(exited, "process did not exit after raw byte writes");
+    assert_eq!(String::from_utf8(process.take_stdout()).unwrap(), "ABC");
+    assert_eq!(String::from_utf8(process.take_stderr()).unwrap(), "DEF");
+
+    let exit = process.exit().expect("process exit");
+    assert_eq!(exit.exit_code, 0);
+    assert_eq!(exit.uncaught_exception, None);
+}
+
+#[test]
+fn launcher_process_pipe_close_system_streams() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "ProcessLauncherEchoMain",
+        &["close".to_owned()],
+        jvm_core::StdioMode::Ignore,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+    )
+    .expect("launch classpath main");
+
+    let mut exited = false;
+    for _ in 0..128 {
+        if matches!(process.pump(64), jvm_core::ProcessState::Exited) {
+            exited = true;
+            break;
+        }
+    }
+    assert!(exited, "process did not exit after closing system streams");
+    assert_eq!(String::from_utf8(process.take_stdout()).unwrap(), "A");
+    assert_eq!(String::from_utf8(process.take_stderr()).unwrap(), "B");
+
+    let exit = process.exit().expect("process exit");
+    assert_eq!(exit.exit_code, 0);
+    assert_eq!(exit.uncaught_exception, None);
+}
+
+#[test]
+fn launcher_process_pipe_write_after_close_is_ignored() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "ProcessLauncherEchoMain",
+        &["write-after-close".to_owned()],
+        jvm_core::StdioMode::Ignore,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+    )
+    .expect("launch classpath main");
+
+    let mut exited = false;
+    for _ in 0..128 {
+        if matches!(process.pump(64), jvm_core::ProcessState::Exited) {
+            exited = true;
+            break;
+        }
+    }
+    assert!(exited, "process did not exit after writing to closed system streams");
+    assert_eq!(String::from_utf8(process.take_stdout()).unwrap(), "A");
+    assert_eq!(String::from_utf8(process.take_stderr()).unwrap(), "B");
+
+    let exit = process.exit().expect("process exit");
+    assert_eq!(exit.exit_code, 0);
+    assert_eq!(exit.uncaught_exception, None);
+}
+
+#[test]
+fn launcher_process_rejects_invalid_classpath_jar() {
+    let jar_data = framed_jars(&[b"not-a-jar"]);
+    let err = match jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "ProcessLauncherEchoMain",
+        &[],
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+    ) {
+        Ok(_) => panic!("launch should fail for invalid classpath jar"),
+        Err(err) => err,
+    };
+    assert!(
+        err.contains("launchClasspathMain failed during classpath load: Failed to load classpath JAR #0"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn printstream_non_marker_still_uses_underlying_stream() {
+    let result = run_jar_test("PrintStreamNonMarkerTest", "run", "()Ljava/lang/String;");
+    assert_eq!(result, "AB\\n|true");
+}
+
 // ---------------------------------------------------------------------------
 // Clojure smoke: AOT-compiled ClojureSmokeEntry.run() → "ok"
 // Requires: ./build-clj-smoke.sh (builds clj-smoke/smoke.jar)
@@ -624,7 +843,6 @@ fn clojure_smoke() {
     let jars_list = std::path::Path::new("../clj-smoke/clojure-jars.txt");
     if !smoke_jar.exists() || !jars_list.exists() {
         panic!("Run ./build-clj-smoke.sh first");
-        return;
     }
 
     let mut vm = jvm_core::interpreter::Vm::new();

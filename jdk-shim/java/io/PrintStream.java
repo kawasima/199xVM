@@ -400,6 +400,10 @@ public class PrintStream extends FilterOutputStream
      */
     @Override
     public void flush() {
+        if (usesNativeBridge()) {
+            nativeFlush();
+            return;
+        }
         synchronized (this) {
             try {
                 ensureOpen();
@@ -423,6 +427,11 @@ public class PrintStream extends FilterOutputStream
     public void close() {
         synchronized (this) {
             if (!closing) {
+                if (usesNativeBridge()) {
+                    closing = true;
+                    nativeFlush();
+                    return;
+                }
                 closing = true;
                 try {
                     textOut.close();
@@ -446,7 +455,7 @@ public class PrintStream extends FilterOutputStream
      *         invoked
      */
     public boolean checkError() {
-        if (out != null)
+        if (out != null || usesNativeBridge())
             flush();
         if (out instanceof PrintStream ps) {
             return ps.checkError();
@@ -480,6 +489,56 @@ public class PrintStream extends FilterOutputStream
         trouble = false;
     }
 
+    private boolean usesNativeBridge() {
+        return !closing && nativeBridgeEnabled();
+    }
+
+    private native boolean nativeBridgeEnabled();
+
+    private native void nativeWriteByte(int b);
+
+    private native void nativeWriteBytes(byte[] buf, int off, int len);
+
+    private native void nativeFlush();
+
+    private void writeString(String s, boolean newline) {
+        try {
+            synchronized (this) {
+                if (usesNativeBridge()) {
+                    byte[] bytes = s.getBytes(charset);
+                    nativeWriteBytes(bytes, 0, bytes.length);
+                    if (newline) {
+                        byte[] lineSeparator = System.lineSeparator().getBytes(charset);
+                        nativeWriteBytes(lineSeparator, 0, lineSeparator.length);
+                        if (autoFlush) {
+                            nativeFlush();
+                        }
+                    } else if (autoFlush && s.indexOf('\n') >= 0) {
+                        nativeFlush();
+                    }
+                    return;
+                }
+
+                ensureOpen();
+                textOut.write(s);
+                if (newline) {
+                    textOut.newLine();
+                }
+                textOut.flushBuffer();
+                charOut.flushBuffer();
+                if (autoFlush && (newline || s.indexOf('\n') >= 0)) {
+                    out.flush();
+                }
+            }
+        }
+        catch (InterruptedIOException x) {
+            Thread.currentThread().interrupt();
+        }
+        catch (IOException x) {
+            trouble = true;
+        }
+    }
+
     /*
      * Exception-catching, synchronized output operations,
      * which also implement the write() methods of OutputStream
@@ -500,6 +559,12 @@ public class PrintStream extends FilterOutputStream
      */
     @Override
     public void write(int b) {
+        if (usesNativeBridge()) {
+            nativeWriteByte(b);
+            if ((b == '\n') && autoFlush)
+                nativeFlush();
+            return;
+        }
         try {
             synchronized (this) {
                 ensureOpen();
@@ -533,6 +598,12 @@ public class PrintStream extends FilterOutputStream
      */
     @Override
     public void write(byte[] buf, int off, int len) {
+        if (usesNativeBridge()) {
+            nativeWriteBytes(buf, off, len);
+            if (autoFlush)
+                nativeFlush();
+            return;
+        }
         try {
             synchronized (this) {
                 ensureOpen();
@@ -617,9 +688,9 @@ public class PrintStream extends FilterOutputStream
      * @param      b   The {@code boolean} to be printed
      * @see Charset#defaultCharset()
      */
-    // 199xVM: print/println are handled by the VM's native PrintStream bridge.
-    // Declaring them native prevents bytecode dispatch from bypassing the bridge.
-    public native void print(boolean b);
+    public void print(boolean b) {
+        writeString(String.valueOf(b), false);
+    }
 
     /**
      * Prints a character.  The character is translated into one or more bytes
@@ -630,7 +701,9 @@ public class PrintStream extends FilterOutputStream
      * @param      c   The {@code char} to be printed
      * @see Charset#defaultCharset()
      */
-    public native void print(char c);
+    public void print(char c) {
+        writeString(String.valueOf(c), false);
+    }
 
     /**
      * Prints an integer.  The string produced by {@link
@@ -643,7 +716,9 @@ public class PrintStream extends FilterOutputStream
      * @see        java.lang.Integer#toString(int)
      * @see Charset#defaultCharset()
      */
-    public native void print(int i);
+    public void print(int i) {
+        writeString(String.valueOf(i), false);
+    }
 
     /**
      * Prints a long integer.  The string produced by {@link
@@ -656,7 +731,9 @@ public class PrintStream extends FilterOutputStream
      * @see        java.lang.Long#toString(long)
      * @see Charset#defaultCharset()
      */
-    public native void print(long l);
+    public void print(long l) {
+        writeString(String.valueOf(l), false);
+    }
 
     /**
      * Prints a floating-point number.  The string produced by {@link
@@ -669,7 +746,9 @@ public class PrintStream extends FilterOutputStream
      * @see        java.lang.Float#toString(float)
      * @see Charset#defaultCharset()
      */
-    public native void print(float f);
+    public void print(float f) {
+        writeString(String.valueOf(f), false);
+    }
 
     /**
      * Prints a double-precision floating-point number.  The string produced by
@@ -682,7 +761,9 @@ public class PrintStream extends FilterOutputStream
      * @see        java.lang.Double#toString(double)
      * @see Charset#defaultCharset()
      */
-    public native void print(double d);
+    public void print(double d) {
+        writeString(String.valueOf(d), false);
+    }
 
     /**
      * Prints an array of characters.  The characters are converted into bytes
@@ -695,7 +776,9 @@ public class PrintStream extends FilterOutputStream
      *
      * @throws  NullPointerException  If {@code s} is {@code null}
      */
-    public native void print(char[] s);
+    public void print(char[] s) {
+        writeString(new String(s), false);
+    }
 
     /**
      * Prints a string.  If the argument is {@code null} then the string
@@ -708,7 +791,9 @@ public class PrintStream extends FilterOutputStream
      * @param      s   The {@code String} to be printed
      * @see Charset#defaultCharset()
      */
-    public native void print(String s);
+    public void print(String s) {
+        writeString(String.valueOf(s), false);
+    }
 
     /**
      * Prints an object.  The string produced by the {@link
@@ -721,7 +806,9 @@ public class PrintStream extends FilterOutputStream
      * @see        java.lang.Object#toString()
      * @see Charset#defaultCharset()
      */
-    public native void print(Object obj);
+    public void print(Object obj) {
+        writeString(String.valueOf(obj), false);
+    }
 
 
     /* Methods that do terminate lines */
@@ -732,7 +819,9 @@ public class PrintStream extends FilterOutputStream
      * {@code line.separator}, and is not necessarily a single newline
      * character ({@code '\n'}).
      */
-    public native void println();
+    public void println() {
+        writeString("", true);
+    }
 
     /**
      * Prints a boolean and then terminates the line.  This method behaves as
@@ -741,7 +830,9 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code boolean} to be printed
      */
-    public native void println(boolean x);
+    public void println(boolean x) {
+        writeString(String.valueOf(x), true);
+    }
 
     /**
      * Prints a character and then terminates the line.  This method behaves as
@@ -750,7 +841,9 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code char} to be printed.
      */
-    public native void println(char x);
+    public void println(char x) {
+        writeString(String.valueOf(x), true);
+    }
 
     /**
      * Prints an integer and then terminates the line.  This method behaves as
@@ -759,7 +852,9 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code int} to be printed.
      */
-    public native void println(int x);
+    public void println(int x) {
+        writeString(String.valueOf(x), true);
+    }
 
     /**
      * Prints a long and then terminates the line.  This method behaves as
@@ -768,7 +863,9 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  a The {@code long} to be printed.
      */
-    public native void println(long x);
+    public void println(long x) {
+        writeString(String.valueOf(x), true);
+    }
 
     /**
      * Prints a float and then terminates the line.  This method behaves as
@@ -777,7 +874,9 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code float} to be printed.
      */
-    public native void println(float x);
+    public void println(float x) {
+        writeString(String.valueOf(x), true);
+    }
 
     /**
      * Prints a double and then terminates the line.  This method behaves as
@@ -786,7 +885,9 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code double} to be printed.
      */
-    public native void println(double x);
+    public void println(double x) {
+        writeString(String.valueOf(x), true);
+    }
 
     /**
      * Prints an array of characters and then terminates the line.  This method
@@ -795,7 +896,9 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  an array of chars to print.
      */
-    public native void println(char[] x);
+    public void println(char[] x) {
+        writeString(new String(x), true);
+    }
 
     /**
      * Prints a String and then terminates the line.  This method behaves as
@@ -804,7 +907,9 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code String} to be printed.
      */
-    public native void println(String x);
+    public void println(String x) {
+        writeString(String.valueOf(x), true);
+    }
 
     /**
      * Prints an Object and then terminates the line.  This method calls
@@ -815,7 +920,9 @@ public class PrintStream extends FilterOutputStream
      *
      * @param x  The {@code Object} to be printed.
      */
-    public native void println(Object x);
+    public void println(Object x) {
+        writeString(String.valueOf(x), true);
+    }
 
 
     /**

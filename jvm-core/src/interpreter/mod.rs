@@ -65,6 +65,7 @@ mod descriptors;
 mod dispatch;
 mod frame;
 mod invoke;
+pub(crate) mod launcher;
 mod native_static;
 mod native_virtual;
 mod reflection;
@@ -86,6 +87,25 @@ extern "C" {
 // ---------------------------------------------------------------------------
 
 pub type ThreadId = u64;
+
+/// Process-style stdio handling exposed by the launcher layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdioMode {
+    Pipe,
+    Ignore,
+    Inherit,
+}
+
+impl StdioMode {
+    pub fn from_spec(spec: &str) -> Result<Self, String> {
+        match spec {
+            "pipe" => Ok(Self::Pipe),
+            "ignore" => Ok(Self::Ignore),
+            "inherit" => Ok(Self::Inherit),
+            _ => Err(format!("Unsupported stdio mode: {spec}")),
+        }
+    }
+}
 
 /// The execution state of a green thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +336,22 @@ pub struct Vm {
     pub(in crate::interpreter) stdout_buffer: String,
     /// Buffered `System.err.print` content until newline/println.
     pub(in crate::interpreter) stderr_buffer: String,
+    /// Process stdin mode.
+    pub(in crate::interpreter) stdin_mode: StdioMode,
+    /// Process stdout mode.
+    pub(in crate::interpreter) stdout_mode: StdioMode,
+    /// Process stderr mode.
+    pub(in crate::interpreter) stderr_mode: StdioMode,
+    /// Pending bytes for `System.out` when stdout is piped.
+    pub(in crate::interpreter) stdout_chunks: VecDeque<Vec<u8>>,
+    /// Pending bytes for `System.err` when stderr is piped.
+    pub(in crate::interpreter) stderr_chunks: VecDeque<Vec<u8>>,
+    /// Buffered bytes supplied to the process stdin pipe.
+    pub(in crate::interpreter) stdin_bytes: VecDeque<u8>,
+    /// Whether the process stdin pipe has reached EOF.
+    pub(in crate::interpreter) stdin_closed: bool,
+    /// Cached `System.in` object for host-side wakeups.
+    pub(in crate::interpreter) system_stdin: Option<JRef>,
     /// Singleton system ClassLoader instance (created on first access).
     pub(in crate::interpreter) system_classloader: Option<JRef>,
     /// Green thread scheduler.
@@ -341,6 +377,14 @@ impl Vm {
             class_pool: HashMap::new(),
             stdout_buffer: String::new(),
             stderr_buffer: String::new(),
+            stdin_mode: StdioMode::Pipe,
+            stdout_mode: StdioMode::Inherit,
+            stderr_mode: StdioMode::Inherit,
+            stdout_chunks: VecDeque::new(),
+            stderr_chunks: VecDeque::new(),
+            stdin_bytes: VecDeque::new(),
+            stdin_closed: false,
+            system_stdin: None,
             system_classloader: None,
             scheduler: Scheduler::new(),
             monitors: HashMap::new(),
@@ -545,6 +589,42 @@ impl Vm {
         Ok(())
     }
 
+    /// Host-side notifyAll for process pipes.
+    ///
+    /// Unlike `Object.notifyAll()`, this has no Java monitor ownership check.
+    /// It exists so the host can wake `System.in` readers after appending bytes
+    /// or closing stdin.
+    pub(in crate::interpreter) fn host_notify_all(&mut self, obj: &JRef) {
+        let id = Self::object_id(obj);
+        let mut wake_thread: Option<ThreadId> = None;
+        if let Some(monitor) = self.monitors.get_mut(&id) {
+            while let Some(waiter_id) = monitor.wait_queue.pop_front() {
+                monitor.entry_queue.push_back(waiter_id);
+            }
+            if monitor.owner.is_none() {
+                if let Some(waiting_id) = monitor.entry_queue.pop_front() {
+                    monitor.owner = Some(waiting_id);
+                    let restore_count = self.scheduler.thread(waiting_id).and_then(|t| match t.state {
+                        ThreadState::WaitingOnCondition(wait_obj_id)
+                            if wait_obj_id == id && t.saved_monitor_count > 0 =>
+                        {
+                            Some(t.saved_monitor_count)
+                        }
+                        _ => None,
+                    });
+                    monitor.count = restore_count.unwrap_or(1);
+                    wake_thread = Some(waiting_id);
+                }
+            }
+        }
+        if let Some(wid) = wake_thread {
+            if let Some(t) = self.scheduler.thread_mut(wid) {
+                t.saved_monitor_count = 0;
+                t.state = ThreadState::Runnable;
+            }
+        }
+    }
+
     /// Set a pending IllegalMonitorStateException from an error message.
     pub(in crate::interpreter) fn throw_illegal_monitor_state(&mut self, err_msg: &str) {
         let msg = self.intern_string(err_msg);
@@ -721,14 +801,87 @@ impl Vm {
 
     /// Flush buffered PrintStream output (`print` without trailing `println`).
     pub fn flush_printstreams(&mut self) {
-        if !self.stdout_buffer.is_empty() {
+        if self.stdout_mode == StdioMode::Inherit && !self.stdout_buffer.is_empty() {
             Self::emit_host_line(false, &self.stdout_buffer);
             self.stdout_buffer.clear();
         }
-        if !self.stderr_buffer.is_empty() {
+        if self.stderr_mode == StdioMode::Inherit && !self.stderr_buffer.is_empty() {
             Self::emit_host_line(true, &self.stderr_buffer);
             self.stderr_buffer.clear();
         }
+    }
+
+    pub fn set_stdio_modes(&mut self, stdin: StdioMode, stdout: StdioMode, stderr: StdioMode) {
+        self.stdin_mode = stdin;
+        self.stdout_mode = stdout;
+        self.stderr_mode = stderr;
+        self.stdin_closed = matches!(stdin, StdioMode::Ignore);
+        self.stdin_bytes.clear();
+        self.stdout_chunks.clear();
+        self.stderr_chunks.clear();
+        self.stdout_buffer.clear();
+        self.stderr_buffer.clear();
+    }
+
+    pub fn write_stdin(&mut self, bytes: &[u8]) {
+        if matches!(self.stdin_mode, StdioMode::Ignore) || self.stdin_closed {
+            return;
+        }
+        self.stdin_bytes.extend(bytes.iter().copied());
+        if let Some(stdin) = self.system_stdin.clone() {
+            self.host_notify_all(&stdin);
+        }
+    }
+
+    pub fn close_stdin(&mut self) {
+        self.stdin_closed = true;
+        if let Some(stdin) = self.system_stdin.clone() {
+            self.host_notify_all(&stdin);
+        }
+    }
+
+    pub fn take_stdout(&mut self) -> Vec<u8> {
+        let total: usize = self.stdout_chunks.iter().map(|chunk| chunk.len()).sum();
+        let mut out = Vec::with_capacity(total);
+        while let Some(chunk) = self.stdout_chunks.pop_front() {
+            out.extend_from_slice(&chunk);
+        }
+        out
+    }
+
+    pub fn take_stderr(&mut self) -> Vec<u8> {
+        let total: usize = self.stderr_chunks.iter().map(|chunk| chunk.len()).sum();
+        let mut out = Vec::with_capacity(total);
+        while let Some(chunk) = self.stderr_chunks.pop_front() {
+            out.extend_from_slice(&chunk);
+        }
+        out
+    }
+
+    pub(in crate::interpreter) fn stdin_read_byte(&mut self) -> i32 {
+        if let Some(byte) = self.stdin_bytes.pop_front() {
+            return i32::from(byte);
+        }
+        if self.stdin_closed {
+            -1
+        } else {
+            -2
+        }
+    }
+
+    pub(in crate::interpreter) fn stdin_available(&self) -> i32 {
+        self.stdin_bytes.len().min(i32::MAX as usize) as i32
+    }
+
+    pub(in crate::interpreter) fn is_waiting_on_stdin(&self) -> bool {
+        let Some(stdin) = &self.system_stdin else {
+            return false;
+        };
+        let stdin_id = Self::object_id(stdin);
+        self.scheduler
+            .threads
+            .iter()
+            .any(|t| matches!(t.state, ThreadState::WaitingOnCondition(id) if id == stdin_id))
     }
 
     /// Intern a Java string (returns same `JRef` for equal content).

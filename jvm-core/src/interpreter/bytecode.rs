@@ -1038,18 +1038,14 @@ impl Vm {
             }
             ("java/lang/System", "in") => {
                 if let Some(v) = self.static_fields.get("java/lang/System").and_then(|m| m.get("in")) {
+                    if let Some(r) = v.as_ref() {
+                        self.system_stdin = Some(r.clone());
+                    }
                     return Ok(v.clone());
                 }
-                // System.in is an empty InputStream (no stdin in 199xVM)
-                let v = JValue::Ref(Some(JObject::new("java/io/ByteArrayInputStream")));
-                {
-                    let empty_arr = JObject::new_array("[B", vec![]);
-                    let obj = v.as_ref().unwrap();
-                    obj.borrow_mut().fields.insert("buf".to_owned(), JValue::Ref(Some(empty_arr)));
-                    obj.borrow_mut().fields.insert("pos".to_owned(), JValue::Int(0));
-                    obj.borrow_mut().fields.insert("count".to_owned(), JValue::Int(0));
-                    obj.borrow_mut().fields.insert("mark".to_owned(), JValue::Int(0));
-                }
+                let stdin = JObject::new_process_pipe_input_stream();
+                let v = JValue::Ref(Some(stdin.clone()));
+                self.system_stdin = Some(stdin);
                 self.static_fields.entry(class_name).or_default().insert(field_name, v.clone());
                 Ok(v)
             }
