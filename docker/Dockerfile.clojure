@@ -1,0 +1,13 @@
+# 199xVM — official Clojure tools.deps image + repo-local utilities for validation lanes.
+FROM clojure:temurin-21-tools-deps
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    make \
+    git \
+    ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Default: keep container alive for docker-compose run; override with make clj-smoke-bundle / make clj-upstream-coverage
+CMD ["sleep", "infinity"]

@@ -14,7 +14,7 @@ JAR_NAMES := $(RAOH_JAR) $(RAOH_JSON_JAR) $(JACKSON_ANN_JAR) \
 
 WEB_JARS := $(addprefix web/,$(JAR_NAMES))
 
-.PHONY: all dev-jars shim test-bundle clj-smoke-bundle clj-smoke-test javac wasm dist test launcher-test clean deploy docker-playground dist-docker
+.PHONY: all dev-jars shim test-bundle clj-smoke-bundle clj-smoke-test clj-upstream-test clj-upstream-coverage clj-smoke-bundle-docker clj-smoke-test-docker clj-upstream-test-docker clj-upstream-coverage-docker javac wasm dist test launcher-test clean deploy docker-playground dist-docker
 
 # ============================================================
 # all — build everything needed for local development
@@ -73,13 +73,36 @@ test-classes/bundle.bin: build-test-bundle.sh web/javac.js $(shell find test-sou
 test-bundle: test-classes/bundle.bin
 
 # ============================================================
-# clj-smoke — Clojure smoke test (not part of default test/deploy)
+# clj-smoke — Clojure validation bundle + tests (not part of default test/deploy)
 # ============================================================
 clj-smoke-bundle:
 	./build-clj-smoke.sh
 
-clj-smoke-test: clj-smoke-bundle shim test-bundle
-	cargo test --package jvm-core clojure_smoke -- --ignored
+clj-smoke-test: clj-smoke-bundle shim
+	cargo test --package jvm-core --test clojure_integration_test clojure_smoke -- --ignored --exact
+
+clj-upstream-test: clj-smoke-bundle shim
+	cargo test --package jvm-core --test clojure_integration_test clojure_smoke_upstream_subset -- --ignored --exact
+
+clj-upstream-coverage:
+	bash scripts/clj-upstream-coverage.sh
+
+clj-smoke-bundle-docker:
+	docker-compose run --rm clojure make clj-smoke-bundle
+
+clj-smoke-test-docker:
+	docker-compose run --rm clojure make clj-smoke-bundle
+	docker-compose run --rm java make shim
+	docker-compose run --rm rust cargo test --package jvm-core --test clojure_integration_test clojure_smoke -- --ignored --exact
+
+clj-upstream-test-docker:
+	docker-compose run --rm clojure make clj-smoke-bundle
+	docker-compose run --rm java make shim
+	docker-compose run --rm rust cargo test --package jvm-core --test clojure_integration_test clojure_smoke_upstream_subset -- --ignored --exact
+
+clj-upstream-coverage-docker:
+	docker-compose run --rm clojure make clj-smoke-bundle
+	docker-compose run --rm clojure make clj-upstream-coverage
 
 # ============================================================
 # javac — build web/javac.js from web/javac.ts

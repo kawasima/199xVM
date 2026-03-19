@@ -1,4 +1,4 @@
-# 199xVM — JDK 25 + Maven + Node (shim, dev-jars, test-bundle). Node is required for build-test-bundle.sh (compile-compact.mjs).
+# 199xVM — JDK 25 + Maven + Node (shim, dev-jars, test-bundle).
 FROM eclipse-temurin:25-jdk
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
