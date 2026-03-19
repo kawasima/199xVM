@@ -321,7 +321,7 @@
 <body>
   <header>
     <h1>199xVM</h1>
-    <span class="subtitle">Java Playground — compile &amp; run in the browser via WebAssembly</span>
+    <span class="subtitle">JVM Playground — Java &amp; Clojure in the browser via WebAssembly</span>
     <a href="https://github.com/kawasima/199xVM" target="_blank" rel="noopener noreferrer" style="margin-left:auto"><img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/kawasima/199xVM" style="vertical-align:middle"></a>
   </header>
 
@@ -387,6 +387,13 @@
           </div>
         </div>
         <div class="cat-item">
+          Clojure <span class="arrow">&#9654;</span>
+          <div class="cat-submenu">
+            <div class="snippet-item" data-key="clojure_hello">Hello World</div>
+            <div class="snippet-item" data-key="clojure_seq">Seq pipeline</div>
+          </div>
+        </div>
+        <div class="cat-item">
           Raoh <span class="arrow">&#9654;</span>
           <div class="cat-submenu">
             <div class="snippet-item" data-key="raoh_primitives">Primitives &amp; constraints</div>
@@ -442,7 +449,7 @@
   <div class="workspace">
     <div class="pane">
       <div class="pane-header">
-        <span>Java Source</span>
+        <span id="source-label">Java Source</span>
         <span style="color:var(--text-dim);font-size:10px;">Ctrl+Enter to run</span>
       </div>
       <div id="editor-area">
@@ -479,9 +486,10 @@
   <script type="module">
     const _javacVer = (typeof "__BUILD_TIMESTAMP__" === "string" && "__BUILD_TIMESTAMP__".startsWith("__")) ? Date.now() : "__BUILD_TIMESTAMP__";
     const { compile, disassemble, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, setMethodRegistry, setClassInterfaces, readJar, classFilesToBundle, getKnownClassNames, getKnownClassesByPackage, getMethodsForClass, hasKnownMethodOwnerPrefix } = await import(`./javac.js?v=${_javacVer}`);
+    const { launchClasspathMain } = await import(`./launcher.js?v=${_javacVer}`);
 
     // CodeMirror 6
-    import { EditorState } from "https://esm.sh/@codemirror/state@6";
+    import { EditorState, Compartment } from "https://esm.sh/@codemirror/state@6";
     import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from "https://esm.sh/@codemirror/view@6";
     import { defaultKeymap, indentWithTab } from "https://esm.sh/@codemirror/commands@6";
     import { java } from "https://esm.sh/@codemirror/lang-java@6";
@@ -1594,21 +1602,77 @@ public class JvmInterfaceDefault implements Describable {
     }
 }
 `,
+      clojure_hello: {
+        mode: "clojure",
+        code: `(println "Hello, Clojure!")
+(+ 1 2 3)
+`,
+      },
+      clojure_seq: {
+        mode: "clojure",
+        code: `(def data [1 2 3 4 5])
+(println "odd numbers:" (filter odd? data))
+(->> data
+     (map #(* % %))
+     (reduce +))
+`,
+      },
     };
 
-    const DEFAULT_CODE = SNIPPETS.hello;
+    const ASSET_VERSION = "__BUILD_TIMESTAMP__";
+    const IS_VERSIONED_BUILD = typeof ASSET_VERSION === "string" && !ASSET_VERSION.startsWith("__");
+    const CLOJURE_JAR_CANDIDATES = IS_VERSIONED_BUILD
+      ? [
+          ["./clojure-1.12.0.jar", "../clj-smoke/jars/clojure-1.12.0.jar"],
+          ["./spec.alpha-0.5.238.jar", "../clj-smoke/jars/spec.alpha-0.5.238.jar"],
+          ["./core.specs.alpha-0.4.74.jar", "../clj-smoke/jars/core.specs.alpha-0.4.74.jar"],
+        ]
+      : [
+          ["../clj-smoke/jars/clojure-1.12.0.jar", "./clojure-1.12.0.jar"],
+          ["../clj-smoke/jars/spec.alpha-0.5.238.jar", "./spec.alpha-0.5.238.jar"],
+          ["../clj-smoke/jars/core.specs.alpha-0.4.74.jar", "./core.specs.alpha-0.4.74.jar"],
+        ];
+    const CLOJURE_EVAL_EXPR = "(let [result (load-string (slurp *in*))] (when (some? result) (prn result)))";
+
+    function getSnippetEntry(key) {
+      const entry = SNIPPETS[key];
+      if (!entry) return null;
+      return typeof entry === "string" ? { mode: "java", code: entry } : entry;
+    }
+
+    const DEFAULT_SNIPPET_KEY = "hello";
+    const DEFAULT_SNIPPET = getSnippetEntry(DEFAULT_SNIPPET_KEY);
+    const DEFAULT_CODE = DEFAULT_SNIPPET.code;
+    let currentMode = DEFAULT_SNIPPET.mode;
 
     // -------------------------------------------------------------------------
     // WASM bootstrap
     // -------------------------------------------------------------------------
     let wasmReady = false;
+    let shimBundleReady = false;
+    let shimBundleLoadError = null;
     let jvmModule = null;
     let classBundle = null;
-    const ASSET_VERSION = "__BUILD_TIMESTAMP__";
+    let shimBundleBytes = null;
+    let clojureRuntimeJarsPromise = null;
 
     function withVersion(url) {
       const sep = url.includes("?") ? "&" : "?";
       return `${url}${sep}v=${ASSET_VERSION}`;
+    }
+
+    function refreshRunReadiness() {
+      const runBtn = document.getElementById("run-btn");
+      if (runBtn) {
+        runBtn.disabled = !(wasmReady && shimBundleReady);
+      }
+      const statusEl = document.getElementById("status");
+      if (!statusEl || !wasmReady) {
+        return;
+      }
+      statusEl.textContent = shimBundleLoadError
+        ? "Runtime assets unavailable"
+        : (shimBundleReady ? "Runtime ready" : "Loading runtime assets…");
     }
 
     async function initWasm() {
@@ -1618,8 +1682,7 @@ public class JvmInterfaceDefault implements Describable {
         await mod.default({ module_or_path: `../jvm-core/pkg/jvm_core_bg.wasm?v=__BUILD_TIMESTAMP__` });
         jvmModule = mod;
         wasmReady = true;
-        statusEl.textContent = "WASM ready";
-        document.getElementById("run-btn").disabled = false;
+        refreshRunReadiness();
       } catch (e) {
         statusEl.textContent = "WASM not built — run: wasm-pack build jvm-core --target web";
         document.getElementById("run-btn").disabled = true;
@@ -1631,16 +1694,55 @@ public class JvmInterfaceDefault implements Describable {
       try {
         const shimResp = await fetch(withVersion("../jdk-shim/bundle.bin"));
         if (!shimResp.ok) throw new Error(`shim bundle: HTTP ${shimResp.status}`);
-        classBundle = new Uint8Array(await shimResp.arrayBuffer());
+        shimBundleBytes = new Uint8Array(await shimResp.arrayBuffer());
+        shimBundleReady = true;
+        shimBundleLoadError = null;
+        classBundle = shimBundleBytes;
         const classMetas = parseBundleMeta(classBundle);
         const registry = buildMethodRegistry(classMetas);
         setMethodRegistry(registry);
         setClassInterfaces(buildClassInterfaces(classMetas));
         const methodCount = Object.keys(registry).length;
+        refreshRunReadiness();
         log("info", `Shim bundle loaded: ${classBundle.byteLength}B — ${methodCount} methods from ${classMetas.length} classes`);
       } catch (e) {
+        shimBundleReady = false;
+        shimBundleLoadError = e;
+        refreshRunReadiness();
         log("info", `Bundle load failed: ${e.message}\nRun ./build-shim.sh first.`);
       }
+    }
+
+    async function fetchFirstAvailableBytes(candidates) {
+      let lastError = null;
+      for (const url of candidates) {
+        try {
+          const resp = await fetch(withVersion(url));
+          if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
+          return new Uint8Array(await resp.arrayBuffer());
+        } catch (e) {
+          lastError = e;
+        }
+      }
+      throw lastError ?? new Error("No candidate asset could be loaded");
+    }
+
+    async function collectStreamText(stream) {
+      const reader = stream.getReader();
+      const chunks = [];
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }
+      const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const out = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return new TextDecoder().decode(out);
     }
 
     /** Parse JAR bytes, register methods/interfaces, and append to classBundle. */
@@ -1699,6 +1801,22 @@ public class JvmInterfaceDefault implements Describable {
       }
     };
 
+    async function loadClojureRuntimeJars() {
+      if (clojureRuntimeJarsPromise) return clojureRuntimeJarsPromise;
+      clojureRuntimeJarsPromise = Promise.all(
+        CLOJURE_JAR_CANDIDATES.map(fetchFirstAvailableBytes)
+      )
+        .then((jars) => {
+          log("info", `Clojure runtime loaded: ${jars.length} JARs`);
+          return jars;
+        })
+        .catch((e) => {
+          clojureRuntimeJarsPromise = null;
+          throw e;
+        });
+      return clojureRuntimeJarsPromise;
+    }
+
     // Build a combined bundle: shim + user class
     function buildBundle(userClassBundle) {
       if (classBundle) {
@@ -1747,8 +1865,8 @@ public class JvmInterfaceDefault implements Describable {
 
       clearOutput();
       const source = editorView.state.doc.toString();
-      const className = extractRunClassName(source);
-      if (!className) {
+      const className = currentMode === "java" ? extractRunClassName(source) : null;
+      if (currentMode === "java" && !className) {
         log("err", "Cannot find 'public class <Name>' or 'void main()' in source.");
         btn.disabled = false;
         btn.innerHTML = "&#9654; Run";
@@ -1757,16 +1875,66 @@ public class JvmInterfaceDefault implements Describable {
 
       // Defer heavy work so the browser can repaint (show spinner)
       setTimeout(() => {
-        try {
-          _runCodeInner(source, className);
-        } finally {
-          btn.disabled = false;
-          btn.innerHTML = "&#9654; Run";
-        }
+        _runCodeInner(source, className)
+          .catch((e) => {
+            log("err", `Runtime error: ${e.message ?? String(e)}`);
+          })
+          .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = "&#9654; Run";
+          });
       }, 20);
     };
 
-    function _runCodeInner(source, className) {
+    function stripTrailingLineBreak(text) {
+      return text.replace(/\r?\n$/, "");
+    }
+
+    async function runClojureSource(source) {
+      if (!shimBundleBytes) {
+        throw new Error("Shim bundle is not loaded yet.");
+      }
+      log("info", "Loading Clojure runtime…");
+      const classpath = await loadClojureRuntimeJars();
+      log("info", "Running via clojure.main -e …");
+      const process = await launchClasspathMain({
+        classpath,
+        mainClass: "clojure.main",
+        args: ["-e", CLOJURE_EVAL_EXPR],
+        stdio: {
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+        jvmModule,
+        shimBundle: shimBundleBytes,
+      });
+      const stdoutPromise = collectStreamText(process.stdout);
+      const stderrPromise = collectStreamText(process.stderr);
+      const writer = process.stdin.getWriter();
+      await writer.write(new TextEncoder().encode(source));
+      await writer.close();
+      const [result, stdout, stderr] = await Promise.all([
+        process.wait(),
+        stdoutPromise,
+        stderrPromise,
+      ]);
+      if (stdout) log("result", stripTrailingLineBreak(stdout));
+      if (stderr) log("err", stripTrailingLineBreak(stderr));
+      if (result.uncaughtException) {
+        log("err", result.uncaughtException);
+      }
+      if (result.exitCode !== 0) {
+        log("err", `Process exited with code ${result.exitCode}.`);
+      }
+    }
+
+    async function _runCodeInner(source, className) {
+      if (currentMode === "clojure") {
+        await runClojureSource(source);
+        return;
+      }
+
       // Compile
       let userBundle;
       let classBytes;
@@ -1860,9 +2028,16 @@ public class JvmInterfaceDefault implements Describable {
       const item = e.target.closest(".snippet-item");
       if (!item) return;
       const key = item.dataset.key;
-      if (key && SNIPPETS[key]) {
+      const entry = key ? getSnippetEntry(key) : null;
+      if (entry) {
+        setEditorMode(entry.mode);
+        if (entry.mode === "clojure") {
+          loadClojureRuntimeJars().catch((err) => {
+            log("info", `Clojure runtime preload failed: ${err.message}`);
+          });
+        }
         editorView.dispatch({
-          changes: { from: 0, to: editorView.state.doc.length, insert: SNIPPETS[key] },
+          changes: { from: 0, to: editorView.state.doc.length, insert: entry.code },
         });
       }
       document.getElementById("snippet-menu").classList.remove("open");
@@ -2129,6 +2304,32 @@ public class JvmInterfaceDefault implements Describable {
       ...defaultKeymap,
     ]);
 
+    const languageCompartment = new Compartment();
+    const completionCompartment = new Compartment();
+
+    function languageExtensionForMode(mode) {
+      return mode === "java" ? java() : [];
+    }
+
+    function completionExtensionForMode(mode) {
+      return mode === "java" ? autocompletion({ override: [javaCompletionSource] }) : [];
+    }
+
+    function updateModeUi() {
+      document.getElementById("source-label").textContent = currentMode === "clojure" ? "Clojure Source" : "Java Source";
+    }
+
+    function setEditorMode(mode) {
+      currentMode = mode;
+      editorView.dispatch({
+        effects: [
+          languageCompartment.reconfigure(languageExtensionForMode(mode)),
+          completionCompartment.reconfigure(completionExtensionForMode(mode)),
+        ],
+      });
+      updateModeUi();
+    }
+
     const editorView = new EditorView({
       state: EditorState.create({
         doc: DEFAULT_CODE,
@@ -2137,8 +2338,8 @@ public class JvmInterfaceDefault implements Describable {
           highlightActiveLine(),
           highlightActiveLineGutter(),
           closeBrackets(),
-          autocompletion({ override: [javaCompletionSource] }),
-          java(),
+          completionCompartment.of(completionExtensionForMode(currentMode)),
+          languageCompartment.of(languageExtensionForMode(currentMode)),
           syntaxHighlighting(classHighlighter),
           runKeymap,
           EditorView.theme({
@@ -2152,6 +2353,7 @@ public class JvmInterfaceDefault implements Describable {
 
     // Init
     document.getElementById("run-btn").disabled = true;
+    updateModeUi();
     initWasm();
     loadClassBundle()
       .then(() => loadBootstrapJars())

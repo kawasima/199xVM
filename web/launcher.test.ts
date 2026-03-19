@@ -248,3 +248,48 @@ test("launchClasspathMain flushes inherited marker streams on checkError", async
     console.error = originalError;
   }
 });
+
+test("launchClasspathMain executes live Clojure source through clojure.main -e", async () => {
+  const [shimBundle, clojureJar, specJar, coreSpecsJar] = await Promise.all([
+    readFile(new URL("../jdk-shim/bundle.bin", import.meta.url)),
+    readFile(new URL("../clj-smoke/jars/clojure-1.12.0.jar", import.meta.url)),
+    readFile(new URL("../clj-smoke/jars/spec.alpha-0.5.238.jar", import.meta.url)),
+    readFile(new URL("../clj-smoke/jars/core.specs.alpha-0.4.74.jar", import.meta.url)),
+  ]);
+
+  const process = await launchClasspathMain({
+    classpath: [
+      new Uint8Array(clojureJar),
+      new Uint8Array(specJar),
+      new Uint8Array(coreSpecsJar),
+    ],
+    mainClass: "clojure.main",
+    args: [
+      "-e",
+      "(let [result (load-string (slurp *in*))] (when (some? result) (prn result)))",
+    ],
+    stdio: {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+    shimBundle: new Uint8Array(shimBundle),
+  });
+
+  const stdoutPromise = collect(process.stdout);
+  const stderrPromise = collect(process.stderr);
+  const writer = process.stdin.getWriter();
+  await writer.write(encoder.encode("(println \"Hello, Clojure!\")\n(+ 1 2 3)\n"));
+  await writer.close();
+
+  const [result, stdout, stderr] = await Promise.all([
+    process.wait(),
+    stdoutPromise,
+    stderrPromise,
+  ]);
+
+  assert.equal(stdout, "Hello, Clojure!\n6\n");
+  assert.equal(stderr, "");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.uncaughtException, undefined);
+});

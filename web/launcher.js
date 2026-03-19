@@ -306,6 +306,7 @@ export async function launchClasspathMain({
   mainClass,
   args = [],
   stdio,
+  jvmModule: explicitJvmModule,
   shimBundle,
 } = {}) {
   if (!Array.isArray(classpath) || classpath.length === 0) {
@@ -316,7 +317,7 @@ export async function launchClasspathMain({
   }
 
   const [jvmModule, resolvedShimBundle] = await Promise.all([
-    loadJvmModule(),
+    explicitJvmModule ? Promise.resolve(explicitJvmModule) : loadJvmModule(),
     loadShimBundle(shimBundle),
   ]);
 
