@@ -47,7 +47,7 @@ It is **not** a full implementation of `javac` or HotSpot, and it should not cur
 │   │   └── method-registry.ts
 │   └── javac.test.ts            # compiler tests
 ├── jdk-shim/                    # Java standard library shims (pure Java, JDK 25 based)
-│   └── bundle.bin               # compiled shim class bundle (~793 classes)
+│   └── bundle.bin               # compiled shim class bundle (~815 classes)
 ├── build-shim.sh
 ├── build-test-bundle.sh
 ├── build-clj-smoke.sh           # Clojure validation bundle builder
