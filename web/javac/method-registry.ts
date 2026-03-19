@@ -10,8 +10,10 @@ export interface MethodSig {
 }
 
 // VM-specific methods that are not in jdk-shim/bundle.bin.
-// All standard JDK methods (String, Integer, StringBuilder, etc.) must be registered
-// dynamically via setMethodRegistry() before calling compile().
+// Standard JDK classes are registered dynamically before calling compile():
+// method signatures via setMethodRegistry(), and owner class names via
+// setKnownClassOwners(). The latter lets wildcard import resolution recognize
+// shim classes even when a class contributes no callable methods.
 // In the browser this happens in loadClassBundle() (index.html).
 // In tests this happens at module init (javac.test.ts top-level block).
 // Without a loaded shim registry, compile() will fail to resolve JDK method calls.
@@ -57,6 +59,12 @@ function addToIndexes(entries: Record<string, MethodSig>): void {
   }
 }
 
+function addKnownOwners(owners: Iterable<string>): void {
+  for (const owner of owners) {
+    ownerSet.add(owner);
+  }
+}
+
 // Build initial indexes
 rebuildIndexes();
 
@@ -67,6 +75,11 @@ let knownClassInterfaces: Record<string, string[]> = {};
 export function setMethodRegistry(reg: Record<string, MethodSig>): void {
   knownMethods = { ...knownMethods, ...reg };
   addToIndexes(reg);
+}
+
+/** Merge known owner class names into the lookup set. */
+export function setKnownClassOwners(owners: Iterable<string>): void {
+  addKnownOwners(owners);
 }
 
 /** Merge class→interfaces mappings built from loaded JARs. */

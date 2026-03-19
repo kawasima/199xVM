@@ -485,7 +485,7 @@
 
   <script type="module">
     const _javacVer = (typeof "__BUILD_TIMESTAMP__" === "string" && "__BUILD_TIMESTAMP__".startsWith("__")) ? Date.now() : "__BUILD_TIMESTAMP__";
-    const { compile, disassemble, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, setMethodRegistry, setClassInterfaces, readJar, classFilesToBundle, getKnownClassNames, getKnownClassesByPackage, getMethodsForClass, hasKnownMethodOwnerPrefix } = await import(`./javac.js?v=${_javacVer}`);
+    const { compile, disassemble, parseBundleMeta, buildMethodRegistry, buildClassInterfaces, setMethodRegistry, setKnownClassOwners, setClassInterfaces, readJar, classFilesToBundle, getKnownClassNames, getKnownClassesByPackage, getMethodsForClass, hasKnownMethodOwnerPrefix } = await import(`./javac.js?v=${_javacVer}`);
     const { launchClasspathMain } = await import(`./launcher.js?v=${_javacVer}`);
 
     // CodeMirror 6
@@ -1699,6 +1699,7 @@ public class JvmInterfaceDefault implements Describable {
         shimBundleLoadError = null;
         classBundle = shimBundleBytes;
         const classMetas = parseBundleMeta(classBundle);
+        setKnownClassOwners(classMetas.map((meta) => meta.name));
         const registry = buildMethodRegistry(classMetas);
         setMethodRegistry(registry);
         setClassInterfaces(buildClassInterfaces(classMetas));
@@ -1752,6 +1753,7 @@ public class JvmInterfaceDefault implements Describable {
         ? jvmModule.jar_to_bundle(jarBytes)
         : classFilesToBundle(await readJar(jarBytes));
       const metas = parseBundleMeta(jarBundle);
+      setKnownClassOwners(metas.map((meta) => meta.name));
       const reg = buildMethodRegistry(metas);
       setMethodRegistry(reg);
       setClassInterfaces(buildClassInterfaces(metas));

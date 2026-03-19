@@ -18,5 +18,5 @@ export type {
 
 export { parseAll } from "./javac/parser.js";
 export { compile, generateClassFile, setMethodRegistry } from "./javac/compiler.js";
-export { resetMethodRegistry, setClassInterfaces, getKnownClassNames, getKnownClassesByPackage, getMethodsForClass, hasKnownMethodOwnerPrefix } from "./javac/method-registry.js";
+export { resetMethodRegistry, setKnownClassOwners, setClassInterfaces, getKnownClassNames, getKnownClassesByPackage, getMethodsForClass, hasKnownMethodOwnerPrefix } from "./javac/method-registry.js";
 export { disassemble } from "./javac/disasm.js";
