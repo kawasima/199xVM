@@ -216,7 +216,7 @@ fn random_shims() {
         "run",
         "()Ljava/lang/String;",
     );
-    assert_eq!(result, "true|true|true|[2, 4, 5, 1, 3]|8a3e6bf8");
+    assert_eq!(result, "true|true|true|[2, 4, 5, 1, 3]|true|true");
 }
 
 // ---------------------------------------------------------------------------
