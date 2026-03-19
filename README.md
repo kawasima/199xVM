@@ -50,7 +50,7 @@ It is **not** a full implementation of `javac` or HotSpot, and it should not cur
 │   └── bundle.bin               # compiled shim class bundle (~793 classes)
 ├── build-shim.sh
 ├── build-test-bundle.sh
-├── build-clj-smoke.sh           # Clojure smoke test builder
+├── build-clj-smoke.sh           # Clojure validation bundle builder
 └── build-dist.sh
 ```
 
@@ -132,19 +132,47 @@ Current scope:
 
 ## JVM language support
 
-199xVM supports running JVM languages beyond Java. **Clojure 1.12.0** has been validated via an AOT-compiled smoke test:
+199xVM also has a dedicated **Clojure 1.12.0** validation lane:
+
+<details>
+<summary>Clojure validation details</summary>
 
 ```sh
-# Build the Clojure smoke test (requires clojure CLI)
-./build-clj-smoke.sh
+# Preferred: Docker / OrbStack
+make clj-smoke-test-docker
+make clj-upstream-test-docker
+make clj-upstream-coverage-docker
 
-# Run it
+# Local fallback: build artifacts with Clojure CLI + git
+./build-clj-smoke.sh
 make clj-smoke-test
+make clj-upstream-test
+make clj-upstream-coverage
 ```
 
-The smoke test AOT-compiles a minimal Clojure program, loads it via the JAR loader alongside the Clojure runtime JARs, and verifies that `ClojureSmokeEntry.run()` returns `"ok"`.
+Artifacts produced by `build-clj-smoke.sh`:
 
-This is an isolated diagnostic path — it is **not** part of `make test` or `cargo test`.
+- `clj-smoke/smoke.jar`: AOT-compiled minimal smoke entry point (`ClojureSmokeEntry.run()`)
+- `clj-smoke/upstream-tests.jar`: selected upstream `clojure/clojure` test namespaces, support helpers, and runner (`ClojureUpstreamTestEntry`)
+- `clj-smoke/clojure-jars.txt`: local copied runtime JARs for Clojure 1.12.0
+
+The upstream runner currently executes a selected subset of `clojure.test-clojure` namespaces:
+`atoms`, `evaluation`, `fn`, `keywords`, `logic`, `macros`, `other-functions`, `special`, and `string`.
+
+`make clj-upstream-coverage` reports a simple milestone metric for that subset:
+
+- selected namespaces / total `clojure.test-clojure` namespaces
+- selected `deftest` vars / total `deftest` vars in `clojure.test-clojure`
+
+This is a suite-selection metric, not JVM line or branch coverage.
+
+The upstream harness currently applies a local `java.specification.version=1.8` / `java.vm.specification.version=1.8` compatibility override before requiring those namespaces so Clojure 1.12.0 takes its older reflection path. This override is scoped to the harness and does not change the VM's advertised Java 25 identity.
+
+This remains an isolated diagnostic path — it is **not** part of `make test` or the default `cargo test`. The slow-path tests live in a dedicated integration target, `clojure_integration_test.rs`.
+
+This is additional validation signal for JVM capability work; the JLS/JVMS conformance matrix above remains the source of truth for project claims.
+
+</details>
 
 ## JDK shim policy
 
@@ -185,8 +213,8 @@ cargo test --package jvm-core
 # Launcher API tests
 make launcher-test
 
-# Clojure smoke test (separate, ~44s)
-make clj-smoke-test
+# Clojure validation lane
+# See the folded "Clojure validation details" section above.
 
 # Rebuild core artifacts
 ./build-shim.sh
@@ -196,7 +224,7 @@ wasm-pack build jvm-core --target web
 
 ### Docker (three ways: VM only / Compiler only / Web Playground)
 
-Use Docker or OrbStack with the project’s `docker-compose.yml`. Only the **web** service is started by `docker-compose up`; the **rust**, **java**, and **node** services are for one-off builds/tests via `docker-compose run <service> ...`.
+Use Docker or OrbStack with the project’s `docker-compose.yml`. Only the **web** service is started by `docker-compose up`; the **rust**, **java**, **clojure**, and **node** services are for one-off builds/tests via `docker-compose run <service> ...`.
 
 **1. VM (wasm) only**
 
@@ -208,6 +236,9 @@ docker-compose run rust cargo fmt --all
 
 The `--lib` flag runs only unit tests. For full integration tests (which need `test-classes/bundle.bin`), build the test bundle first:  
 `docker-compose run node npm ci && docker-compose run node make javac`, then `docker-compose run java make test-bundle`. After that, `docker-compose run rust cargo test --package jvm-core` runs all tests.
+
+The separate Clojure validation lane is documented in the folded section above.
+It uses the dedicated `clojure` service, which is based on the official Clojure tools.deps image, while the main `java` service stays focused on JVM build lanes.
 
 **2. Compiler only**
 

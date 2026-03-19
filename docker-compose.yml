@@ -1,5 +1,5 @@
 # 199xVM — Docker Compose (JTBD: VM only / Compiler only / Web Playground)
-# - "build" profile: rust, java, node — used only for `docker-compose run <svc> make <target>`
+# - "build" profile: rust, java, clojure, node — used only for `docker-compose run <svc> make <target>`
 # - no profile: web — started by `docker-compose up` (serves dist/)
 
 services:
@@ -37,6 +37,19 @@ services:
     working_dir: /app
     command: sleep infinity
 
+  clojure:
+    profiles:
+      - build
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.clojure
+    volumes:
+      - .:/app
+      - clojure_m2:/root/.m2
+      - clojure_gitlibs:/root/.gitlibs
+    working_dir: /app
+    command: sleep infinity
+
   node:
     profiles:
       - build
@@ -51,3 +64,5 @@ services:
 
 volumes:
   node_modules:
+  clojure_m2:
+  clojure_gitlibs:
