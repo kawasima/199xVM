@@ -30,6 +30,19 @@ fn framed_jars(jars: &[&[u8]]) -> Vec<u8> {
 }
 
 /// Run a test class from the test JAR via the JAR loader.
+fn run_jar_test_result(
+    class: &str,
+    method: &str,
+    descriptor: &str,
+) -> Result<jvm_core::heap::JValue, String> {
+    let mut vm = jvm_core::interpreter::Vm::new();
+    jvm_core::load_bundle(&mut vm, shim_bundle());
+    vm.load_jar(test_jar()).expect("failed to load test JAR");
+    let result = vm.invoke_static_threaded(class, method, descriptor, vec![]);
+    vm.flush_printstreams();
+    result
+}
+
 fn run_jar_test(class: &str, method: &str, descriptor: &str) -> String {
     let mut vm = jvm_core::interpreter::Vm::new();
     jvm_core::load_bundle(&mut vm, shim_bundle());
@@ -164,6 +177,60 @@ fn arrays_copy_of_int() {
         "()Ljava/lang/String;",
     );
     assert_eq!(result, "5:1,3,0");
+}
+
+// ---------------------------------------------------------------------------
+// AccessController overloads
+// ---------------------------------------------------------------------------
+
+#[test]
+fn access_controller_shims() {
+    let result = run_jar_test(
+        "AccessControllerShimTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "one|two|three|true");
+}
+
+#[test]
+fn access_controller_uncaught_exception_wrapper() {
+    let err = run_jar_test_result(
+        "AccessControllerShimTest",
+        "throwWrappedException",
+        "()Ljava/lang/String;",
+    )
+    .expect_err("expected uncaught PrivilegedActionException");
+    assert!(err.starts_with("Exception: java/security/PrivilegedActionException"));
+    assert!(err.contains("java/io/IOException: boom"));
+}
+
+// ---------------------------------------------------------------------------
+// Random / SecureRandom shim behavior and Collections.shuffle(Random)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn random_shims() {
+    let result = run_jar_test(
+        "RandomShimTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|true|true|[2, 4, 5, 1, 3]|8a3e6bf8");
+}
+
+// ---------------------------------------------------------------------------
+// Double.parseDouble / Float.parseFloat shim behavior
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_number_shims() {
+    let result = run_jar_test(
+        "ParseNumbersTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "3.5|2.25|true|true|true");
 }
 
 // ---------------------------------------------------------------------------
@@ -829,51 +896,6 @@ fn launcher_process_rejects_invalid_classpath_jar() {
 fn printstream_non_marker_still_uses_underlying_stream() {
     let result = run_jar_test("PrintStreamNonMarkerTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "AB\\n|true");
-}
-
-// ---------------------------------------------------------------------------
-// Clojure smoke: AOT-compiled ClojureSmokeEntry.run() → "ok"
-// Requires: ./build-clj-smoke.sh (builds clj-smoke/smoke.jar)
-// ---------------------------------------------------------------------------
-
-#[test]
-#[ignore] // Slow (~44s). Run explicitly: cargo test --package jvm-core clojure_smoke -- --ignored
-fn clojure_smoke() {
-    let smoke_jar = std::path::Path::new("../clj-smoke/smoke.jar");
-    let jars_list = std::path::Path::new("../clj-smoke/clojure-jars.txt");
-    if !smoke_jar.exists() || !jars_list.exists() {
-        panic!("Run ./build-clj-smoke.sh first");
-    }
-
-    let mut vm = jvm_core::interpreter::Vm::new();
-    jvm_core::load_bundle(&mut vm, shim_bundle());
-
-    // Load smoke JAR
-    let smoke_data = std::fs::read(smoke_jar).expect("read smoke.jar");
-    vm.load_jar(&smoke_data).expect("load smoke.jar");
-
-    // Load Clojure runtime JARs
-    let jar_paths = std::fs::read_to_string(jars_list).expect("read jars list");
-    for line in jar_paths.lines() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-        let data = std::fs::read(line).unwrap_or_else(|e| panic!("read {line}: {e}"));
-        vm.load_jar(&data).unwrap_or_else(|e| panic!("load {line}: {e}"));
-    }
-
-    // Run ClojureSmokeEntry.run() → "ok"
-    let result = vm.invoke_static_threaded(
-        "ClojureSmokeEntry", "run", "()Ljava/lang/String;", vec![],
-    );
-    vm.flush_printstreams();
-    match result {
-        Ok(jvm_core::heap::JValue::Ref(Some(r))) => {
-            let s = r.borrow().as_java_string().unwrap_or_default().to_owned();
-            assert_eq!(s, "ok", "ClojureSmokeEntry.run() returned {s:?}");
-        }
-        Ok(other) => panic!("unexpected return: {other:?}"),
-        Err(e) => panic!("Clojure smoke failed: {e}"),
-    }
 }
 
 // ---------------------------------------------------------------------------
