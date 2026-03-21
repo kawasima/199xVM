@@ -318,16 +318,20 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let normalized = name.strip_prefix('/').unwrap_or(&name);
-                match self.read_resource(normalized) {
-                    Ok(Some(data)) => {
-                        // Create a [B array with the resource bytes
-                        let elems: Vec<JValue> = data.iter().map(|&b| JValue::Int(b as i8 as i32)).collect();
-                        let byte_array = JObject::new_array("[B", elems);
-                        // Create ByteArrayInputStream via its constructor logic
+                match self.resource_byte_array(normalized) {
+                    Ok(Some(byte_array)) => {
+                        let count = {
+                            let array = byte_array.borrow();
+                            match &array.native {
+                                NativePayload::ByteArray(bytes) => bytes.len() as i32,
+                                NativePayload::Array(values) => values.len() as i32,
+                                _ => 0,
+                            }
+                        };
                         let bais = JObject::new("java/io/ByteArrayInputStream");
                         bais.borrow_mut().fields.insert("buf".to_owned(), JValue::Ref(Some(byte_array)));
                         bais.borrow_mut().fields.insert("pos".to_owned(), JValue::Int(0));
-                        bais.borrow_mut().fields.insert("count".to_owned(), JValue::Int(data.len() as i32));
+                        bais.borrow_mut().fields.insert("count".to_owned(), JValue::Int(count));
                         bais.borrow_mut().fields.insert("mark".to_owned(), JValue::Int(0));
                         Some(JValue::Ref(Some(bais)))
                     }
@@ -810,21 +814,13 @@ impl super::Vm {
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let infos = self.declared_field_infos(&target);
                 let mut out = Vec::new();
-                let mut members: Vec<(String, String, u16)> = Vec::new();
-                self.ensure_class_ready(&target);
-                if let Some(cf) = self.get_class(&target) {
-                    for f in &cf.fields {
-                        if public_only && (f.access_flags & 0x0001) == 0 {
-                            continue;
-                        }
-                        let name = cf.constant_pool.utf8(f.name_index).to_owned();
-                        let desc = cf.constant_pool.utf8(f.descriptor_index).to_owned();
-                        members.push((name, desc, f.access_flags));
+                for info in infos.iter() {
+                    if public_only && (info.access_flags & 0x0001) == 0 {
+                        continue;
                     }
-                }
-                for (name, desc, flags) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_field(&target, &name, &desc, flags))));
+                    out.push(JValue::Ref(Some(self.build_reflect_field_from_info(&target, info))));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
                     "[Ljava/lang/reflect/Field;",
@@ -836,35 +832,13 @@ impl super::Vm {
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let infos = self.declared_method_infos(&target);
                 let mut out = Vec::new();
-                let mut members: Vec<(String, String, u16, Vec<String>)> = Vec::new();
-                self.ensure_class_ready(&target);
-                if let Some(cf) = self.get_class(&target) {
-                    for m in &cf.methods {
-                        if public_only && (m.access_flags & 0x0001) == 0 {
-                            continue;
-                        }
-                        let name = cf.constant_pool.utf8(m.name_index).to_owned();
-                        if name == "<init>" || name == "<clinit>" {
-                            continue;
-                        }
-                        let desc = cf.constant_pool.utf8(m.descriptor_index).to_owned();
-                        let mut ex = Vec::new();
-                        for attr in &m.attributes {
-                            if let Attribute::Exceptions { exception_index_table } = attr {
-                                ex = exception_index_table
-                                    .iter()
-                                    .map(|idx| cf.constant_pool.class_name(*idx).to_owned())
-                                    .collect();
-                            }
-                        }
-                        members.push((name, desc, m.access_flags, ex));
+                for info in infos.iter() {
+                    if public_only && (info.access_flags & 0x0001) == 0 {
+                        continue;
                     }
-                }
-                for (name, desc, flags, ex) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_method(
-                        &target, &name, &desc, flags, ex,
-                    ))));
+                    out.push(JValue::Ref(Some(self.build_reflect_method_from_info(&target, info))));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
                     "[Ljava/lang/reflect/Method;",
@@ -877,34 +851,15 @@ impl super::Vm {
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let infos = self.declared_constructor_infos(&target);
                 let mut out = Vec::new();
-                let mut members: Vec<(String, u16, Vec<String>)> = Vec::new();
-                self.ensure_class_ready(&target);
-                if let Some(cf) = self.get_class(&target) {
-                    for m in &cf.methods {
-                        if public_only && (m.access_flags & 0x0001) == 0 {
-                            continue;
-                        }
-                        let name = cf.constant_pool.utf8(m.name_index).to_owned();
-                        if name != "<init>" {
-                            continue;
-                        }
-                        let desc = cf.constant_pool.utf8(m.descriptor_index).to_owned();
-                        let mut ex = Vec::new();
-                        for attr in &m.attributes {
-                            if let Attribute::Exceptions { exception_index_table } = attr {
-                                ex = exception_index_table
-                                    .iter()
-                                    .map(|idx| cf.constant_pool.class_name(*idx).to_owned())
-                                    .collect();
-                            }
-                        }
-                        members.push((desc, m.access_flags, ex));
+                for info in infos.iter() {
+                    if public_only && (info.access_flags & 0x0001) == 0 {
+                        continue;
                     }
-                }
-                for (desc, flags, ex) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_constructor(
-                        &target, &desc, flags, ex,
+                    out.push(JValue::Ref(Some(self.build_reflect_constructor_from_info(
+                        &target,
+                        info,
                     ))));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
