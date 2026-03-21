@@ -79,7 +79,16 @@ impl Vm {
         match this_val {
             JValue::Ref(Some(r)) => {
                 let push_return = !member.returns_void;
-                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame)
+                self.dispatch_virtual_on_ref(
+                    r,
+                    class_name,
+                    method_name,
+                    descriptor,
+                    args,
+                    push_return,
+                    frame,
+                    Some((cp.as_ptr() as usize, idx)),
+                )
             }
             JValue::Ref(None) => Err(format!("NullPointerException: invokevirtual {class_name}.{method_name}{descriptor}")),
             other => Err(format!(
@@ -98,6 +107,7 @@ impl Vm {
         args: Vec<JValue>,
         push_return: bool,
         frame: &mut Frame,
+        callsite_key: Option<(usize, u16)>,
     ) -> Result<Option<JValue>, String> {
         // Fast-path: intercept Object.wait/notify/notifyAll directly to avoid
         // re-entering invoke_virtual's recursive path, which doesn't check
@@ -127,6 +137,37 @@ impl Vm {
                 return Ok(None);
             }
             _ => {}
+        }
+
+        if let Some(cache_key) = callsite_key {
+            if let Some(site) = self.resolve_virtual_callsite_monomorphic(
+                cache_key,
+                &r,
+                class_name,
+                method_name,
+                descriptor,
+            ) {
+                if site.method_info.has_code {
+                    let fi = self.build_virtual_frame_from_info(
+                        r.clone(),
+                        site.method_info.as_ref(),
+                        args,
+                        push_return,
+                    );
+                    *self.pending_frame_mut() = Some(fi);
+                } else {
+                    let result = self.invoke_virtual_native_from_info(
+                        &r,
+                        &site.method_name,
+                        site.method_info.as_ref(),
+                        &args,
+                    )?;
+                    if !matches!(result, JValue::Void) {
+                        frame.stack.push(result);
+                    }
+                }
+                return Ok(None);
+            }
         }
 
         match self.build_virtual_frame_inner(r.clone(), class_name, method_name, descriptor, args.clone(), push_return)? {
@@ -256,7 +297,16 @@ impl Vm {
         match this_val {
             JValue::Ref(Some(r)) => {
                 let push_return = !member.returns_void;
-                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame)
+                self.dispatch_virtual_on_ref(
+                    r,
+                    class_name,
+                    method_name,
+                    descriptor,
+                    args,
+                    push_return,
+                    frame,
+                    Some((cp.as_ptr() as usize, idx)),
+                )
             }
             JValue::Ref(None) => Err(format!("NullPointerException: invokeinterface {class_name}.{method_name}{descriptor}")),
             other => Err(format!(

@@ -573,6 +573,26 @@ fn interface_default_method_dispatch() {
 }
 
 #[test]
+fn interface_monomorphic_cache_updates_when_receiver_changes() {
+    let result = run_jar_test(
+        "InterfaceMonomorphicDispatchTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "A|B|A");
+}
+
+#[test]
+fn virtual_monomorphic_cache_updates_when_receiver_changes() {
+    let result = run_jar_test(
+        "VirtualMonomorphicDispatchTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "A|B|A");
+}
+
+#[test]
 fn reflection_includes_interface_default_methods() {
     let result = run_jar_test(
         "ReflectionInterfaceDefaultMethodTest",
