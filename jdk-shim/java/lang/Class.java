@@ -37,6 +37,12 @@ public final class Class<T> implements Type {
     // Managed natively by the VM.
     // The VM creates Class objects and sets the name field.
     private String name;
+    private Field[] declaredFieldsCache;
+    private Field[] publicFieldsCache;
+    private Method[] declaredMethodsCache;
+    private Method[] publicMethodsCache;
+    private Constructor<T>[] declaredConstructorsCache;
+    private Constructor<?>[] publicConstructorsCache;
 
     // Private constructor — only the VM creates Class instances.
     private Class() {}
@@ -169,13 +175,23 @@ public final class Class<T> implements Type {
     private native Field[] getDeclaredFields0(boolean publicOnly);
 
     public Field[] getDeclaredFields() {
-        return getDeclaredFields0(false);
+        Field[] cached = declaredFieldsCache;
+        if (cached == null) {
+            cached = getDeclaredFields0(false);
+            declaredFieldsCache = cached;
+        }
+        return copyFields(cached);
     }
 
     private native Method[] getDeclaredMethods0(boolean publicOnly);
 
     public Method[] getDeclaredMethods() {
-        return getDeclaredMethods0(false);
+        Method[] cached = declaredMethodsCache;
+        if (cached == null) {
+            cached = getDeclaredMethods0(false);
+            declaredMethodsCache = cached;
+        }
+        return copyMethods(cached);
     }
 
     @SuppressWarnings("unchecked")
@@ -183,7 +199,12 @@ public final class Class<T> implements Type {
 
     @SuppressWarnings("unchecked")
     public Constructor<T>[] getDeclaredConstructors() {
-        return getDeclaredConstructors0(false);
+        Constructor<T>[] cached = declaredConstructorsCache;
+        if (cached == null) {
+            cached = getDeclaredConstructors0(false);
+            declaredConstructorsCache = cached;
+        }
+        return copyConstructors(cached);
     }
 
     public Field getDeclaredField(String name) throws NoSuchFieldException {
@@ -245,46 +266,59 @@ public final class Class<T> implements Type {
     }
 
     public Field[] getFields() {
-        ArrayList<Field> out = new ArrayList<>();
-        Class<?> c = this;
-        while (c != null) {
-            Field[] fields = c.getDeclaredFields0(true);
-            for (int i = 0; i < fields.length; i++) {
-                out.add(fields[i]);
+        Field[] cached = publicFieldsCache;
+        if (cached == null) {
+            ArrayList<Field> out = new ArrayList<>();
+            Class<?> c = this;
+            while (c != null) {
+                Field[] fields = c.getDeclaredFields0(true);
+                for (int i = 0; i < fields.length; i++) {
+                    out.add(fields[i]);
+                }
+                c = c.getSuperclass();
             }
-            c = c.getSuperclass();
+            cached = new Field[out.size()];
+            for (int i = 0; i < out.size(); i++) {
+                cached[i] = out.get(i);
+            }
+            publicFieldsCache = cached;
         }
-        Field[] arr = new Field[out.size()];
-        for (int i = 0; i < out.size(); i++) {
-            arr[i] = out.get(i);
-        }
-        return arr;
+        return copyFields(cached);
     }
 
     public Method[] getMethods() {
-        ArrayList<Method> out = new ArrayList<>();
-        ArrayList<Class<?>> seenInterfaces = new ArrayList<>();
-        Class<?> c = this;
-        while (c != null) {
-            Method[] methods = c.getDeclaredMethods0(true);
-            for (int i = 0; i < methods.length; i++) {
-                out.add(methods[i]);
+        Method[] cached = publicMethodsCache;
+        if (cached == null) {
+            ArrayList<Method> out = new ArrayList<>();
+            ArrayList<Class<?>> seenInterfaces = new ArrayList<>();
+            Class<?> c = this;
+            while (c != null) {
+                Method[] methods = c.getDeclaredMethods0(true);
+                for (int i = 0; i < methods.length; i++) {
+                    out.add(methods[i]);
+                }
+                Class<?>[] interfaces = c.getInterfaces();
+                for (int i = 0; i < interfaces.length; i++) {
+                    collectInterfaceMethods(interfaces[i], out, seenInterfaces);
+                }
+                c = c.getSuperclass();
             }
-            Class<?>[] interfaces = c.getInterfaces();
-            for (int i = 0; i < interfaces.length; i++) {
-                collectInterfaceMethods(interfaces[i], out, seenInterfaces);
+            cached = new Method[out.size()];
+            for (int i = 0; i < out.size(); i++) {
+                cached[i] = out.get(i);
             }
-            c = c.getSuperclass();
+            publicMethodsCache = cached;
         }
-        Method[] arr = new Method[out.size()];
-        for (int i = 0; i < out.size(); i++) {
-            arr[i] = out.get(i);
-        }
-        return arr;
+        return copyMethods(cached);
     }
 
     public Constructor<?>[] getConstructors() {
-        return getDeclaredConstructors0(true);
+        Constructor<?>[] cached = publicConstructorsCache;
+        if (cached == null) {
+            cached = getDeclaredConstructors0(true);
+            publicConstructorsCache = cached;
+        }
+        return copyConstructors(cached);
     }
 
     public Field getField(String name) throws NoSuchFieldException {
@@ -339,6 +373,31 @@ public final class Class<T> implements Type {
         for (int i = 0; i < superInterfaces.length; i++) {
             collectInterfaceMethods(superInterfaces[i], out, seenInterfaces);
         }
+    }
+
+    private static Field[] copyFields(Field[] source) {
+        Field[] copy = new Field[source.length];
+        for (int i = 0; i < source.length; i++) {
+            copy[i] = source[i];
+        }
+        return copy;
+    }
+
+    private static Method[] copyMethods(Method[] source) {
+        Method[] copy = new Method[source.length];
+        for (int i = 0; i < source.length; i++) {
+            copy[i] = source[i];
+        }
+        return copy;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <X> Constructor<X>[] copyConstructors(Constructor<?>[] source) {
+        Constructor<?>[] copy = new Constructor<?>[source.length];
+        for (int i = 0; i < source.length; i++) {
+            copy[i] = source[i];
+        }
+        return (Constructor<X>[]) copy;
     }
 
     @SuppressWarnings("unchecked")

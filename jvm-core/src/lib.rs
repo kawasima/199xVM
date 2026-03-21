@@ -342,6 +342,7 @@ fn invoke_and_collect(
         }
         Err(e) => format!("ERROR: {e}"),
     };
+    vm.write_profile_report_if_enabled();
     vm.flush_printstreams();
     out
 }

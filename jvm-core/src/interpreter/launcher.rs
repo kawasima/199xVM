@@ -88,6 +88,7 @@ impl JvmProcess {
         };
 
         if exit.is_some() {
+            vm.write_profile_report_if_enabled();
             vm.flush_printstreams();
         }
 
@@ -215,6 +216,14 @@ impl JvmProcess {
         self.vm.take_stderr()
     }
 
+    pub fn profile_report(&self) -> Option<String> {
+        self.vm.profile_report()
+    }
+
+    pub fn take_profile_report(&mut self) -> Option<String> {
+        self.vm.take_profile_report()
+    }
+
     pub fn kill(&mut self) {
         if self.exit.is_none() {
             self.finish(ProcessExit {
@@ -233,6 +242,7 @@ impl JvmProcess {
     }
 
     fn finish(&mut self, exit: ProcessExit) {
+        self.vm.write_profile_report_if_enabled();
         self.vm.flush_printstreams();
         self.vm.scheduler.reset_to_main();
         self.exit = Some(exit);

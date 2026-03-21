@@ -691,8 +691,9 @@ impl Vm {
                 0xb2 => { // getstatic
                     let opcode_pc = frame.pc - 1;
                     let idx = read_u16(code, &mut frame.pc);
-                    let (class_name, _, _) = resolve_fieldref(cp, idx);
-                    if self.ensure_class_init_or_schedule(&class_name)? {
+                    let field = self.resolve_fieldref_cached(cp, idx);
+                    let class_name = field.class_name.as_str();
+                    if self.ensure_class_init_or_schedule(class_name)? {
                         frame.pc = opcode_pc;
                         return Ok(None);
                     }
@@ -702,20 +703,24 @@ impl Vm {
                 0xb3 => { // putstatic
                     let opcode_pc = frame.pc - 1;
                     let idx = read_u16(code, &mut frame.pc);
-                    let (cls, fld, desc) = resolve_fieldref(cp, idx);
-                    if self.ensure_class_init_or_schedule(&cls)? {
+                    let field = self.resolve_fieldref_cached(cp, idx);
+                    let cls = field.class_name.as_str();
+                    let fld = field.member_name.clone();
+                    let desc = field.descriptor.as_str();
+                    if self.ensure_class_init_or_schedule(cls)? {
                         frame.pc = opcode_pc;
                         return Ok(None);
                     }
                     let val = frame.stack.pop().unwrap_or(JValue::Void);
                     let owner = self
-                        .find_static_field_owner(&cls, &fld, &desc)
-                        .unwrap_or(cls);
+                        .find_static_field_owner(cls, &fld, desc)
+                        .unwrap_or_else(|| cls.to_owned());
                     self.static_fields.entry(owner).or_default().insert(fld, val);
                 }
                 0xb4 => { // getfield
                     let idx = read_u16(code, &mut frame.pc);
-                    let (_, gf_field_name, _) = resolve_fieldref(cp, idx);
+                    let field = self.resolve_fieldref_cached(cp, idx);
+                    let gf_field_name = field.member_name.as_str();
                     let obj_ref = frame.stack.pop()
                         .ok_or_else(|| format!("getfield {gf_field_name}: empty stack in {class_name}"))?;
                     if matches!(obj_ref, JValue::Void) {
@@ -731,7 +736,8 @@ impl Vm {
                     let val = frame.stack.pop().unwrap_or(JValue::Void);
                     let obj_ref = frame.stack.pop().unwrap_or(JValue::Void);
                     if matches!(obj_ref, JValue::Void) {
-                        let (_, pf_field_name, _) = resolve_fieldref(cp, idx);
+                        let field = self.resolve_fieldref_cached(cp, idx);
+                        let pf_field_name = field.member_name.as_str();
                         return Err(format!(
                             "putfield {pf_field_name}: expected Ref on stack, got Void in {class_name}"
                         ));
@@ -758,8 +764,9 @@ impl Vm {
                 0xb8 => { // invokestatic
                     let opcode_pc = frame.pc - 1;
                     let idx = read_u16(code, &mut frame.pc);
-                    let (class_name, _, _) = resolve_methodref(cp, idx);
-                    if self.ensure_class_init_or_schedule(&class_name)? {
+                    let method = self.resolve_methodref_cached(cp, idx);
+                    let class_name = method.class_name.as_str();
+                    if self.ensure_class_init_or_schedule(class_name)? {
                         frame.pc = opcode_pc;
                         return Ok(None);
                     }
@@ -1031,23 +1038,26 @@ impl Vm {
         cp: &[ConstantPoolEntry],
         idx: u16,
     ) -> Result<JValue, String> {
-        let (class_name, field_name, descriptor) = resolve_fieldref(cp, idx);
+        let field = self.resolve_fieldref_cached(cp, idx);
+        let class_name = field.class_name.as_str();
+        let field_name = field.member_name.as_str();
+        let descriptor = field.descriptor.as_str();
         // Caller is responsible for any required class initialization. Re-entering
         // ensure_class_init here can expose default static values while the threaded
         // path is between "ownership claimed" and "clinit frame actually run".
-        let owner = self.find_static_field_owner(&class_name, &field_name, &descriptor);
+        let owner = self.find_static_field_owner(class_name, field_name, descriptor);
         if let Some(v) = owner
             .as_ref()
             .and_then(|owner| self.static_fields.get(owner))
-            .and_then(|m| m.get(&field_name))
+            .and_then(|m| m.get(field_name))
         {
             return Ok(v.clone());
         }
         // Well-known JDK static fields that cannot be initialised via <clinit>
         // because the JDK classes are not in the bundle.
         match (
-            owner.as_deref().unwrap_or(class_name.as_str()),
-            field_name.as_str(),
+            owner.as_deref().unwrap_or(class_name),
+            field_name,
         ) {
             ("java/lang/System", "out") => {
                 if let Some(v) = self.static_fields.get("java/lang/System").and_then(|m| m.get("out")) {
@@ -1057,7 +1067,7 @@ impl Vm {
                 self.static_fields
                     .entry("java/lang/System".to_owned())
                     .or_default()
-                    .insert(field_name, v.clone());
+                    .insert(field_name.to_owned(), v.clone());
                 Ok(v)
             }
             ("java/lang/System", "err") => {
@@ -1068,7 +1078,7 @@ impl Vm {
                 self.static_fields
                     .entry("java/lang/System".to_owned())
                     .or_default()
-                    .insert(field_name, v.clone());
+                    .insert(field_name.to_owned(), v.clone());
                 Ok(v)
             }
             ("java/lang/System", "in") => {
@@ -1084,7 +1094,7 @@ impl Vm {
                 self.static_fields
                     .entry("java/lang/System".to_owned())
                     .or_default()
-                    .insert(field_name, v.clone());
+                    .insert(field_name.to_owned(), v.clone());
                 Ok(v)
             }
             _ => Ok(default_value_for_descriptor(&descriptor)),
@@ -1097,11 +1107,13 @@ impl Vm {
         idx: u16,
         obj_ref: &JValue,
     ) -> Result<JValue, String> {
-        let (_, field_name, field_desc) = resolve_fieldref(cp, idx);
+        let field = self.resolve_fieldref_cached(cp, idx);
+        let field_name = field.member_name.as_str();
+        let field_desc = field.descriptor.as_str();
         match obj_ref.as_ref() {
             Some(r) => {
-                let default = default_value_for_descriptor(&field_desc);
-                Ok(r.borrow().fields.get(&field_name).cloned().unwrap_or(default))
+                let default = default_value_for_descriptor(field_desc);
+                Ok(r.borrow().fields.get(field_name).cloned().unwrap_or(default))
             }
             None => Err(format!("NullPointerException: getfield {field_name}")),
         }
@@ -1114,9 +1126,10 @@ impl Vm {
         obj_ref: &JValue,
         val: JValue,
     ) -> Result<(), String> {
-        let (_, field_name, _) = resolve_fieldref(cp, idx);
+        let field = self.resolve_fieldref_cached(cp, idx);
+        let field_name = field.member_name.as_str();
         match obj_ref.as_ref() {
-            Some(r) => { r.borrow_mut().fields.insert(field_name, val); Ok(()) }
+            Some(r) => { r.borrow_mut().fields.insert(field_name.to_owned(), val); Ok(()) }
             None => Err(format!("NullPointerException: putfield {field_name}")),
         }
     }

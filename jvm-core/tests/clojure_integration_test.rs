@@ -172,7 +172,7 @@ fn upstream_runner_namespace_list_matches_expected() {
     assert_eq!(selected, expected, "runner namespace selection changed");
 }
 
-fn run_upstream_namespace(namespace: &str) {
+fn run_upstream_selector(selector: &str) {
     let upstream_jar = std::path::Path::new("../clj-smoke/upstream-tests.jar");
     let jars_list = std::path::Path::new("../clj-smoke/clojure-jars.txt");
     if !upstream_jar.exists() || !jars_list.exists() {
@@ -188,7 +188,7 @@ fn run_upstream_namespace(namespace: &str) {
         shim_bundle(),
         &jar_data,
         "ClojureUpstreamTestEntry",
-        &[namespace.to_owned()],
+        &[selector.to_owned()],
         jvm_core::StdioMode::Ignore,
         jvm_core::StdioMode::Pipe,
         jvm_core::StdioMode::Pipe,
@@ -204,10 +204,16 @@ fn run_upstream_namespace(namespace: &str) {
     ) {
         Ok(exit) => exit,
         Err(timeout) => {
+            let profile = process.profile_report();
+            process.kill();
             let stdout = String::from_utf8(process.take_stdout()).expect("utf8 stdout");
             let stderr = String::from_utf8(process.take_stderr()).expect("utf8 stderr");
+            let profile_suffix = profile
+                .filter(|report| !stderr.contains(report))
+                .map(|report| format!("\nprofile:\n{report}"))
+                .unwrap_or_default();
             panic!(
-                "upstream Clojure tests timed out\nmax_pumps={}\npump_rounds={}\nmax_elapsed={:?}\nelapsed={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                "upstream Clojure tests timed out\nmax_pumps={}\npump_rounds={}\nmax_elapsed={:?}\nelapsed={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}{profile_suffix}",
                 timeout.max_pumps,
                 timeout.pump_rounds,
                 timeout.max_elapsed,
@@ -219,52 +225,107 @@ fn run_upstream_namespace(namespace: &str) {
     let stderr = String::from_utf8(process.take_stderr()).expect("utf8 stderr");
 
     if upstream_log_output() {
-        eprintln!("upstream stdout for {namespace}:\n{stdout}");
-        eprintln!("upstream stderr for {namespace}:\n{stderr}");
+        eprintln!("upstream stdout for {selector}:\n{stdout}");
+        eprintln!("upstream stderr for {selector}:\n{stderr}");
     }
 
     assert_eq!(
         exit.uncaught_exception,
         None,
-        "unexpected uncaught exception for {namespace}\nmax_pumps={UPSTREAM_MAX_PUMPS}\npump_rounds={UPSTREAM_PUMP_ROUNDS}\nmax_elapsed={max_elapsed:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "unexpected uncaught exception for {selector}\nmax_pumps={UPSTREAM_MAX_PUMPS}\npump_rounds={UPSTREAM_PUMP_ROUNDS}\nmax_elapsed={max_elapsed:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert_eq!(
         exit.exit_code,
         0,
-        "upstream Clojure tests failed for {namespace}\nmax_pumps={UPSTREAM_MAX_PUMPS}\npump_rounds={UPSTREAM_PUMP_ROUNDS}\nmax_elapsed={max_elapsed:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "upstream Clojure tests failed for {selector}\nmax_pumps={UPSTREAM_MAX_PUMPS}\npump_rounds={UPSTREAM_PUMP_ROUNDS}\nmax_elapsed={max_elapsed:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
         stdout.lines().any(|line| line.starts_with("ok namespaces=1")),
-        "missing upstream success marker for {namespace}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "missing upstream success marker for {selector}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
 
-macro_rules! upstream_namespace_test {
-    ($test_name:ident, $namespace:literal) => {
+macro_rules! upstream_selector_test {
+    ($test_name:ident, $selector:literal) => {
         #[test]
         #[ignore]
         fn $test_name() {
-            run_upstream_namespace($namespace);
+            run_upstream_selector($selector);
         }
     };
 }
 
-upstream_namespace_test!(clojure_upstream_atoms, "clojure.test-clojure.atoms");
-upstream_namespace_test!(clojure_diag_control, "clojure.test-clojure.control");
-upstream_namespace_test!(clojure_diag_evaluation, "clojure.test-clojure.evaluation");
-upstream_namespace_test!(clojure_diag_fn_bad_arglists, "upstream.fn-bad-arglists");
-upstream_namespace_test!(clojure_diag_fn_signatures, "upstream.fn-signatures");
-upstream_namespace_test!(clojure_diag_fn_missing_params, "upstream.fn-missing-params");
-upstream_namespace_test!(clojure_diag_keywords, "clojure.test-clojure.keywords");
-upstream_namespace_test!(clojure_upstream_logic, "clojure.test-clojure.logic");
-upstream_namespace_test!(clojure_diag_macros, "clojure.test-clojure.macros");
-upstream_namespace_test!(clojure_diag_metadata, "clojure.test-clojure.metadata");
-upstream_namespace_test!(
+upstream_selector_test!(clojure_upstream_atoms, "clojure.test-clojure.atoms");
+upstream_selector_test!(clojure_diag_control, "clojure.test-clojure.control");
+upstream_selector_test!(
+    clojure_diag_evaluation_eval,
+    "clojure.test-clojure.evaluation/Eval"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_literals,
+    "clojure.test-clojure.evaluation/Literals"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_symbol_resolution_qualified_vars,
+    "upstream.evaluation-symbol-resolution/QualifiedVars"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_symbol_resolution_qualified_classes,
+    "upstream.evaluation-symbol-resolution/QualifiedClasses"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_symbol_resolution_special_forms_a,
+    "upstream.evaluation-symbol-resolution/LookupOrderSpecialFormsA"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_symbol_resolution_special_forms_b,
+    "upstream.evaluation-symbol-resolution/LookupOrderSpecialFormsB"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_symbol_resolution_positive_class_mappings,
+    "upstream.evaluation-symbol-resolution/LookupOrderPositiveClassMappings"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_symbol_resolution_positive_local_binding,
+    "upstream.evaluation-symbol-resolution/LookupOrderPositiveLocalBinding"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_symbol_resolution_positive_current_namespace_var,
+    "upstream.evaluation-symbol-resolution/LookupOrderPositiveCurrentNamespaceVar"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_symbol_resolution_negative,
+    "upstream.evaluation-symbol-resolution/LookupOrderNegative"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_metadata,
+    "clojure.test-clojure.evaluation/Metadata"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_collections,
+    "clojure.test-clojure.evaluation/Collections"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_macros,
+    "clojure.test-clojure.evaluation/Macros"
+);
+upstream_selector_test!(
+    clojure_diag_evaluation_loading,
+    "clojure.test-clojure.evaluation/Loading"
+);
+upstream_selector_test!(clojure_diag_fn_bad_arglists, "upstream.fn-bad-arglists");
+upstream_selector_test!(clojure_diag_fn_signatures, "upstream.fn-signatures");
+upstream_selector_test!(clojure_diag_fn_missing_params, "upstream.fn-missing-params");
+upstream_selector_test!(clojure_diag_keywords, "clojure.test-clojure.keywords");
+upstream_selector_test!(clojure_upstream_logic, "clojure.test-clojure.logic");
+upstream_selector_test!(clojure_diag_macros, "clojure.test-clojure.macros");
+upstream_selector_test!(clojure_diag_metadata, "clojure.test-clojure.metadata");
+upstream_selector_test!(
     clojure_diag_other_functions,
     "clojure.test-clojure.other-functions"
 );
-upstream_namespace_test!(clojure_diag_predicates, "clojure.test-clojure.predicates");
-upstream_namespace_test!(clojure_diag_special, "clojure.test-clojure.special");
-upstream_namespace_test!(clojure_diag_string, "clojure.test-clojure.string");
-upstream_namespace_test!(clojure_upstream_try_catch, "clojure.test-clojure.try-catch");
-upstream_namespace_test!(clojure_diag_vectors, "clojure.test-clojure.vectors");
+upstream_selector_test!(clojure_diag_predicates, "clojure.test-clojure.predicates");
+upstream_selector_test!(clojure_diag_special, "clojure.test-clojure.special");
+upstream_selector_test!(clojure_diag_string, "clojure.test-clojure.string");
+upstream_selector_test!(clojure_upstream_try_catch, "clojure.test-clojure.try-catch");
+upstream_selector_test!(clojure_diag_vectors, "clojure.test-clojure.vectors");

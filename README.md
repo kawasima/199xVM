@@ -157,8 +157,8 @@ Artifacts produced by `build-clj-smoke.sh`:
 - `clj-smoke/clojure-jars.txt`: local copied runtime JARs for Clojure 1.12.0
 
 The upstream runner currently stages a selected subset of `clojure.test-clojure` namespaces.
-Execution is split into namespace-scoped ignored Rust tests (`clojure_upstream_*`) so failures
-localize to one namespace instead of one long monolithic run. See
+Execution is split into ignored Rust diagnostics (`clojure_upstream_*`, `clojure_diag_*`) so failures
+localize to one namespace, or one `deftest` var for the heavier paths, instead of one long monolithic run. See
 `test-sources/clojure/src/upstream/runner.clj` and `make clj-upstream-coverage` for the current
 exact selection and milestone numbers.
 
@@ -169,7 +169,7 @@ as opt-in diagnostics (`clojure_diag_*`). Today that includes the `fn` compiler/
 `special`, `string`, and `vectors`. That keeps the routinely used Clojure lane under the
 one-minute-per-test budget while preserving a dedicated place to investigate compiler/runtime
 performance and semantics gaps. For longer local diagnostics, `clojure_integration_test` also
-accepts `UPSTREAM_MAX_ELAPSED_SECS` and `UPSTREAM_LOG_OUTPUT`.
+accepts `UPSTREAM_MAX_ELAPSED_SECS`, `UPSTREAM_LOG_OUTPUT`, and `UPSTREAM_TIMING`.
 
 `make clj-upstream-coverage` reports a simple milestone metric for that subset:
 
@@ -182,10 +182,22 @@ The upstream harness currently applies a local `java.specification.version=1.8` 
 
 This remains an isolated diagnostic path — it is **not** part of `make test` or the default
 `cargo test`. The slow-path tests live in a dedicated integration target,
-`clojure_integration_test.rs`, with one smoke test plus namespace-scoped upstream diagnostics.
-For routine development, use `make clj-smoke-test` as the main Clojure gate. The namespace-scoped
+`clojure_integration_test.rs`, with one smoke test plus namespace-scoped or var-scoped upstream
+diagnostics. For routine development, use `make clj-smoke-test` as the main Clojure gate. The
 `clojure_upstream_*` tests are sequential diagnostic probes with a hard per-test timeout under
 60 seconds, intended to localize slow or broken areas rather than serve as a fast green suite.
+
+The VM also has a generic interpreter profiler that is not tied to the Clojure harness. Set
+`JVM_PROFILE=1` to emit an aggregated report to stderr at process end, and optionally set
+`JVM_PROFILE_TOP=<n>` to change how many methods / `Class.forName` targets / opcodes are shown.
+This works through `JvmProcess`, the direct VM invoke helpers, and the `run_bundle` CLI, so it can
+be used for any Java workload that runs on 199xVM.
+
+Heavier diagnostics can be targeted at a single upstream `deftest` var by passing a selector like
+`clojure.test-clojure.evaluation/Collections` through the runner. When one upstream `deftest`
+remains too large, the harness can also route to a local wrapper namespace that splits that var
+into smaller probes. The Rust harness uses those forms for `clojure_diag_evaluation_*` so
+`evaluation` remains debuggable without one 90-second monolith.
 
 This is additional validation signal for JVM capability work; the JLS/JVMS conformance matrix above remains the source of truth for project claims.
 

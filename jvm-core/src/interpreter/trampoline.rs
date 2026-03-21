@@ -16,7 +16,7 @@ pub(crate) struct FrameInfo {
     pub frame: Frame,
     pub code: Rc<Vec<u8>>,
     pub cp: Rc<Vec<ConstantPoolEntry>>,
-    pub frame_owner: String,
+    pub frame_owner: Rc<str>,
     pub bootstrap_methods: Rc<Vec<BootstrapMethod>>,
     pub exception_table: Rc<Vec<ExceptionTableEntry>>,
     /// Whether to push the return value onto the caller's operand stack.
@@ -86,11 +86,16 @@ impl Vm {
             fi.frame.last_opcode_pc = opcode_pc;
             let opcode = fi.code[fi.frame.pc];
             fi.frame.pc += 1;
+            let profile_owner = self.profiler.as_ref().map(|_| Rc::clone(&fi.frame_owner));
+            let profile_started = profile_owner.as_ref().map(|_| std::time::Instant::now());
 
             let result = self.execute_opcode(
                 &mut fi.frame, &fi.code, &fi.cp, &fi.frame_owner,
                 &fi.bootstrap_methods, &fi.exception_table, opcode,
             );
+            if let (Some(owner), Some(started)) = (profile_owner.as_ref(), profile_started) {
+                self.record_profile_sample(opcode, owner, started.elapsed());
+            }
 
             match result {
                 Ok(Some(ret)) => {
@@ -178,11 +183,17 @@ impl Vm {
                 let opcode = fi.code[fi.frame.pc];
                 fi.frame.pc += 1;
                 steps += 1;
+                let profile_owner = self.profiler.as_ref().map(|_| Rc::clone(&fi.frame_owner));
+                let profile_started = profile_owner.as_ref().map(|_| std::time::Instant::now());
 
                 let result = self.execute_opcode(
                     &mut fi.frame, &fi.code, &fi.cp, &fi.frame_owner,
                     &fi.bootstrap_methods, &fi.exception_table, opcode,
                 );
+                if let (Some(owner), Some(started)) = (profile_owner.as_ref(), profile_started)
+                {
+                    self.record_profile_sample(opcode, owner, started.elapsed());
+                }
 
                 match result {
                     Ok(Some(ret)) => {
@@ -606,7 +617,21 @@ impl Vm {
         let info = self.resolve_method_exec_info(class_name, method_name, descriptor)
             .ok_or_else(|| format!("Method not found: {class_name}.{method_name}{descriptor}"))?;
         if !info.has_code { return Ok(None); }
+        Ok(Some(self.build_static_frame_from_info(
+            &info,
+            args,
+            push_return,
+            method_name == "<clinit>",
+        )))
+    }
 
+    pub(crate) fn build_static_frame_from_info(
+        &mut self,
+        info: &super::MethodExecInfo,
+        args: Vec<JValue>,
+        push_return: bool,
+        is_class_initializer: bool,
+    ) -> FrameInfo {
         let mut locals = vec![JValue::Void; info.max_locals.max(info.param_slot_count)];
         let mut li = 0usize;
         for (a, t) in args.into_iter().zip(info.param_tokens.iter()) {
@@ -623,14 +648,17 @@ impl Vm {
         } else {
             None
         };
-        Ok(Some(FrameInfo {
+        FrameInfo {
             frame: Frame { locals, stack: Vec::new(), pc: 0, last_opcode_pc: 0 },
-            code: info.code, cp: info.cp, frame_owner: info.frame_owner,
-            bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
+            code: info.code.clone(),
+            cp: info.cp.clone(),
+            frame_owner: info.frame_owner.clone(),
+            bootstrap_methods: info.bootstrap_methods.clone(),
+            exception_table: info.exception_table.clone(),
             push_return, concat_state: None, lambda_return_adapt: None,
             synchronized_monitor,
-            class_initializer_owner: (method_name == "<clinit>").then(|| info.class_name.clone()),
-        }))
+            class_initializer_owner: is_class_initializer.then(|| info.class_name.clone()),
+        }
     }
 
     /// Inner helper for building a virtual frame (no lambda handling).

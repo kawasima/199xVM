@@ -36,6 +36,7 @@ fn main() {
     }
 
     let result = vm.invoke_static_threaded(main_class, method, descriptor, vec![]);
+    vm.write_profile_report_if_enabled();
     vm.flush_printstreams();
     match result {
         Ok(v) => {

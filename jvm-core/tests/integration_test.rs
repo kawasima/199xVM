@@ -583,6 +583,16 @@ fn reflection_includes_interface_default_methods() {
 }
 
 #[test]
+fn reflection_method_arrays_are_cached_but_not_aliased() {
+    let result = run_jar_test(
+        "ReflectionMethodArrayIsolationTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|true|true");
+}
+
+#[test]
 fn reflection_invocation_target_exception_exposes_cause() {
     let result = run_jar_test(
         "ReflectionInvocationCauseTest",
@@ -875,6 +885,12 @@ fn method_handle_shims() {
 fn regex_capture_groups() {
     let result = run_jar_test("RegexGroupsTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "3|1.12.0|1|12|0");
+}
+
+#[test]
+fn regex_find_escaped_parens() {
+    let result = run_jar_test("RegexFindEscapedParensTest", "run", "()Ljava/lang/String;");
+    assert_eq!(result, "true|Wrong number of args (0) passed to: :kw|false");
 }
 
 #[test]
