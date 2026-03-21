@@ -14,7 +14,7 @@ public class AccessControllerShimTest {
         }
     }
 
-    public static String run() {
+    public static String runActionOverloads() {
         String a = AccessController.doPrivileged((PrivilegedAction<String>) () -> "one");
         AccessControlContext context = new AccessControlContext(null);
         String b = AccessController.doPrivileged((PrivilegedAction<String>) () -> "two", context);

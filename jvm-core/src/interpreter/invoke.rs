@@ -49,18 +49,17 @@ impl Vm {
                     None => return Err(format!("Method not found: {class_name}.{method_name}{desc}")),
                 };
                 if !info.has_code {
-                    let (param_tokens, _) = Self::parse_method_descriptor_tokens(&info.descriptor);
-                    let mut native_args = Vec::with_capacity(param_tokens.len());
-                    let req: usize = param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum();
+                    let mut native_args = Vec::with_capacity(info.param_tokens.len());
+                    let req = info.param_slot_count;
                     let mut locals = vec![JValue::Void; info.max_locals.max(req)];
                     let mut li = 0usize;
-                    for (a, t) in args.into_iter().zip(param_tokens.iter()) {
+                    for (a, t) in args.into_iter().zip(info.param_tokens.iter()) {
                         if li >= locals.len() { break; }
                         locals[li] = self.adapt_value_for_descriptor(t, a);
                         li += if t == "J" || t == "D" { 2 } else { 1 };
                     }
                     let mut slot = 0usize;
-                    for t in &param_tokens {
+                    for t in info.param_tokens.iter() {
                         if slot < locals.len() { native_args.push(locals[slot].clone()); }
                         slot += if t == "J" || t == "D" { 2 } else { 1 };
                     }
@@ -95,12 +94,10 @@ impl Vm {
             }
             None => {
                 // Native fallback.
-                let resolved = if self.method_exists(class_name, method_name, descriptor) {
-                    descriptor.to_owned()
-                } else {
-                    self.find_method_real_descriptor(class_name, method_name, descriptor)
-                        .unwrap_or_else(|| descriptor.to_owned())
-                };
+                let resolved = self
+                    .resolve_method_signature(class_name, method_name, descriptor)
+                    .map(|(resolved, _)| resolved)
+                    .unwrap_or_else(|| descriptor.to_owned());
                 let desc = resolved.as_str();
                 if let Some(v) = self.native_virtual(&this, class_name, method_name, desc, &args) {
                     if let Some(err) = self.pending_exception_err() { return Err(err); }
@@ -241,12 +238,10 @@ impl Vm {
                 } else {
                     class_name.to_owned()
                 };
-                let resolved = if self.method_exists(&resolve_class, method_name, descriptor) {
-                    descriptor.to_owned()
-                } else {
-                    self.find_method_real_descriptor(&resolve_class, method_name, descriptor)
-                        .unwrap_or_else(|| descriptor.to_owned())
-                };
+                let resolved = self
+                    .resolve_method_signature(&resolve_class, method_name, descriptor)
+                    .map(|(resolved, _)| resolved)
+                    .unwrap_or_else(|| descriptor.to_owned());
                 let desc = resolved.as_str();
                 if let Some(v) = self.native_virtual(&this, &runtime_class, method_name, desc, &args) {
                     if let Some(err) = self.pending_exception_err() { return Err(err); }

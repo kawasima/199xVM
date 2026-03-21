@@ -7,22 +7,15 @@ use super::descriptors::*;
 use super::frame::*;
 
 impl Vm {
-    /// Search exception_table for a matching handler.
-    /// Returns (handler_pc, exception_object) if found.
-    pub(crate) fn find_exception_handler(
-        &mut self,
-        _frame: &Frame,
-        exception_table: &[ExceptionTableEntry],
-        cp: &[ConstantPoolEntry],
-        throw_pc: usize,
-        err_msg: &str,
-    ) -> Option<(usize, JValue)> {
-        // Extract exception class name from error message.
-        // Preferred format: "java/lang/SomeException: message" — extract the class name directly.
-        let exc_class = if err_msg.starts_with("java/") || err_msg.starts_with("javax/") {
-            err_msg.split(':').next().unwrap_or(err_msg).trim()
+    fn exception_class_name_from_err_msg<'a>(&self, err_msg: &'a str) -> &'a str {
+        let trim_exception_head = |s: &'a str| {
+            let s = s.split(" | cause: ").next().unwrap_or(s).trim();
+            s.split(": ").next().unwrap_or(s).trim()
+        };
+        if err_msg.starts_with("java/") || err_msg.starts_with("javax/") {
+            trim_exception_head(err_msg)
         } else if let Some(rest) = err_msg.strip_prefix("Exception: ") {
-            rest.split(':').next().unwrap_or(rest).trim()
+            trim_exception_head(rest)
         } else if err_msg.starts_with("NullPointerException") {
             "java/lang/NullPointerException"
         } else if err_msg.starts_with("ClassCastException") {
@@ -39,7 +32,29 @@ impl Vm {
             // Last resort: treat any error as java/lang/RuntimeException so
             // catch(Exception e) / catch-all can still handle it.
             "java/lang/RuntimeException"
-        };
+        }
+    }
+
+    /// Search exception_table for a matching handler.
+    /// Returns (handler_pc, exception_object) if found.
+    pub(crate) fn find_exception_handler(
+        &mut self,
+        _frame: &Frame,
+        exception_table: &[ExceptionTableEntry],
+        cp: &[ConstantPoolEntry],
+        throw_pc: usize,
+        err_msg: &str,
+    ) -> Option<(usize, JValue)> {
+        // Prefer the live exception object when native/shim code already set it.
+        let pending_class = self
+            .scheduler
+            .current_thread()
+            .pending_exception
+            .as_ref()
+            .map(|r| r.borrow().class_name.clone());
+        let exc_class = pending_class
+            .as_deref()
+            .unwrap_or_else(|| self.exception_class_name_from_err_msg(err_msg));
 
         for entry in exception_table {
             let start = entry.start_pc as usize;
@@ -674,17 +689,29 @@ impl Vm {
 
                 // ---- Field access ----
                 0xb2 => { // getstatic
+                    let opcode_pc = frame.pc - 1;
                     let idx = read_u16(code, &mut frame.pc);
+                    let (class_name, _, _) = resolve_fieldref(cp, idx);
+                    if self.ensure_class_init_or_schedule(&class_name)? {
+                        frame.pc = opcode_pc;
+                        return Ok(None);
+                    }
                     let v = self.resolve_static_field(cp, idx)?;
                     frame.stack.push(v);
                 }
                 0xb3 => { // putstatic
+                    let opcode_pc = frame.pc - 1;
                     let idx = read_u16(code, &mut frame.pc);
+                    let (cls, fld, desc) = resolve_fieldref(cp, idx);
+                    if self.ensure_class_init_or_schedule(&cls)? {
+                        frame.pc = opcode_pc;
+                        return Ok(None);
+                    }
                     let val = frame.stack.pop().unwrap_or(JValue::Void);
-                    let (cls, fld, _) = resolve_fieldref(cp, idx);
-                    // Per JVMS §5.5: putstatic triggers class initialization.
-                    self.ensure_class_init(&cls)?;
-                    self.static_fields.entry(cls).or_default().insert(fld, val);
+                    let owner = self
+                        .find_static_field_owner(&cls, &fld, &desc)
+                        .unwrap_or(cls);
+                    self.static_fields.entry(owner).or_default().insert(fld, val);
                 }
                 0xb4 => { // getfield
                     let idx = read_u16(code, &mut frame.pc);
@@ -729,7 +756,13 @@ impl Vm {
                     })?;
                 }
                 0xb8 => { // invokestatic
+                    let opcode_pc = frame.pc - 1;
                     let idx = read_u16(code, &mut frame.pc);
+                    let (class_name, _, _) = resolve_methodref(cp, idx);
+                    if self.ensure_class_init_or_schedule(&class_name)? {
+                        frame.pc = opcode_pc;
+                        return Ok(None);
+                    }
                     self.dispatch_static(cp, idx, frame)?;
                 }
                 0xb9 => { // invokeinterface
@@ -748,10 +781,13 @@ impl Vm {
 
                 // ---- Object creation ----
                 0xbb => { // new
+                    let opcode_pc = frame.pc - 1;
                     let idx = read_u16(code, &mut frame.pc);
                     let new_class = resolve_class_name(cp, idx);
-                    // Run <clinit> for the class being instantiated.
-                    self.ensure_class_init(&new_class)?;
+                    if self.ensure_class_init_or_schedule(&new_class)? {
+                        frame.pc = opcode_pc;
+                        return Ok(None);
+                    }
                     // A ParseError entry means the class was registered but malformed —
                     // surface consistently as ClassFormatError (same as Class.forName0 path).
                     if matches!(self.classes.get(&new_class), Some(super::LazyClass::ParseError(_))) {
@@ -996,21 +1032,32 @@ impl Vm {
         idx: u16,
     ) -> Result<JValue, String> {
         let (class_name, field_name, descriptor) = resolve_fieldref(cp, idx);
-        // Run <clinit> if not yet done (initialises static fields via putstatic).
-        self.ensure_class_init(&class_name)?;
-        // Search this class and its super-class chain for the static field (JVMS §5.4.3.2).
-        if let Some(v) = self.resolve_static_field_in_hierarchy(&class_name, &field_name) {
-            return Ok(v);
+        // Caller is responsible for any required class initialization. Re-entering
+        // ensure_class_init here can expose default static values while the threaded
+        // path is between "ownership claimed" and "clinit frame actually run".
+        let owner = self.find_static_field_owner(&class_name, &field_name, &descriptor);
+        if let Some(v) = owner
+            .as_ref()
+            .and_then(|owner| self.static_fields.get(owner))
+            .and_then(|m| m.get(&field_name))
+        {
+            return Ok(v.clone());
         }
         // Well-known JDK static fields that cannot be initialised via <clinit>
         // because the JDK classes are not in the bundle.
-        match (class_name.as_str(), field_name.as_str()) {
+        match (
+            owner.as_deref().unwrap_or(class_name.as_str()),
+            field_name.as_str(),
+        ) {
             ("java/lang/System", "out") => {
                 if let Some(v) = self.static_fields.get("java/lang/System").and_then(|m| m.get("out")) {
                     return Ok(v.clone());
                 }
                 let v = JValue::Ref(Some(JObject::new_print_stream(false)));
-                self.static_fields.entry(class_name).or_default().insert(field_name, v.clone());
+                self.static_fields
+                    .entry("java/lang/System".to_owned())
+                    .or_default()
+                    .insert(field_name, v.clone());
                 Ok(v)
             }
             ("java/lang/System", "err") => {
@@ -1018,7 +1065,10 @@ impl Vm {
                     return Ok(v.clone());
                 }
                 let v = JValue::Ref(Some(JObject::new_print_stream(true)));
-                self.static_fields.entry(class_name).or_default().insert(field_name, v.clone());
+                self.static_fields
+                    .entry("java/lang/System".to_owned())
+                    .or_default()
+                    .insert(field_name, v.clone());
                 Ok(v)
             }
             ("java/lang/System", "in") => {
@@ -1031,45 +1081,14 @@ impl Vm {
                 let stdin = JObject::new_process_pipe_input_stream();
                 let v = JValue::Ref(Some(stdin.clone()));
                 self.system_stdin = Some(stdin);
-                self.static_fields.entry(class_name).or_default().insert(field_name, v.clone());
+                self.static_fields
+                    .entry("java/lang/System".to_owned())
+                    .or_default()
+                    .insert(field_name, v.clone());
                 Ok(v)
             }
             _ => Ok(default_value_for_descriptor(&descriptor)),
         }
-    }
-
-    /// Walk the class hierarchy to find a static field value.
-    fn resolve_static_field_in_hierarchy(&mut self, class_name: &str, field_name: &str) -> Option<JValue> {
-        // Check this class first.
-        if let Some(v) = self.static_fields.get(class_name).and_then(|m| m.get(field_name)) {
-            return Some(v.clone());
-        }
-        // Check super class and interfaces.
-        self.ensure_class_ready(class_name);
-        let (super_name, iface_names) = if let Some(class) = self.get_class(class_name) {
-            let sup = if class.super_class != 0 {
-                Some(class.constant_pool.class_name(class.super_class).to_owned())
-            } else {
-                None
-            };
-            let ifaces: Vec<String> = class.interfaces.iter()
-                .map(|&idx| class.constant_pool.class_name(idx).to_owned())
-                .collect();
-            (sup, ifaces)
-        } else {
-            (None, vec![])
-        };
-        if let Some(super_name) = super_name {
-            if let Some(v) = self.resolve_static_field_in_hierarchy(&super_name, field_name) {
-                return Some(v);
-            }
-        }
-        for iface_name in iface_names {
-            if let Some(v) = self.resolve_static_field_in_hierarchy(&iface_name, field_name) {
-                return Some(v);
-            }
-        }
-        None
     }
 
     fn resolve_instance_field(

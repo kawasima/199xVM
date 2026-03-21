@@ -199,6 +199,71 @@ impl super::Vm {
                 }
                 Some(JValue::Int(result))
             }
+            ("java/lang/Integer", "highestOneBit", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                let out = if value == 0 {
+                    0
+                } else {
+                    1u32 << (31 - value.leading_zeros())
+                };
+                Some(JValue::Int(out as i32))
+            }
+            ("java/lang/Integer", "lowestOneBit", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0);
+                Some(JValue::Int(value & value.wrapping_neg()))
+            }
+            ("java/lang/Integer", "numberOfLeadingZeros", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.leading_zeros() as i32))
+            }
+            ("java/lang/Integer", "numberOfTrailingZeros", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.trailing_zeros() as i32))
+            }
+            ("java/lang/Integer", "bitCount", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.count_ones() as i32))
+            }
+            ("java/lang/Integer", "rotateLeft", "(II)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.rotate_left(distance) as i32))
+            }
+            ("java/lang/Integer", "rotateRight", "(II)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.rotate_right(distance) as i32))
+            }
+            ("java/lang/Integer", "reverseBytes", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.swap_bytes() as i32))
+            }
+            ("java/lang/Long", "bitCount", "(J)I") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Int(value.count_ones() as i32))
+            }
+            ("java/lang/Long", "numberOfLeadingZeros", "(J)I") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Int(value.leading_zeros() as i32))
+            }
+            ("java/lang/Long", "numberOfTrailingZeros", "(J)I") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Int(value.trailing_zeros() as i32))
+            }
+            ("java/lang/Long", "rotateLeft", "(JI)J") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Long(value.rotate_left(distance) as i64))
+            }
+            ("java/lang/Long", "rotateRight", "(JI)J") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Long(value.rotate_right(distance) as i64))
+            }
+            ("java/lang/Long", "reverseBytes", "(J)J") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Long(value.swap_bytes() as i64))
+            }
             ("java/lang/Class", "getPrimitiveClass", "(Ljava/lang/String;)Ljava/lang/Class;") => {
                 let name = match _args
                     .first()

@@ -8,14 +8,12 @@
 
 (def default-test-namespaces
   '[clojure.test-clojure.atoms
-    clojure.test-clojure.evaluation
-    clojure.test-clojure.fn
-    clojure.test-clojure.keywords
     clojure.test-clojure.logic
-    clojure.test-clojure.macros
-    clojure.test-clojure.other-functions
-    clojure.test-clojure.special
-    clojure.test-clojure.string])
+    clojure.test-clojure.try-catch
+    ])
+
+(def shared-test-namespaces
+  '[clojure.test-helper])
 
 (defn- selected-test-namespaces [args]
   (if (seq args)
@@ -29,12 +27,28 @@
   (System/setProperty "java.specification.version" "1.8")
   (System/setProperty "java.vm.specification.version" "1.8"))
 
+(defn- timing-ms [started-at]
+  (/ (- (System/nanoTime) started-at) 1000000.0))
+
+(defn- log-timing! [label started-at]
+  (binding [*out* *err*]
+    (println (format "timing %s %.2fms" label (timing-ms started-at)))
+    (flush)))
+
 (defn- run-selected-tests [args]
   (let [namespaces (selected-test-namespaces args)]
     (configure-upstream-compat!)
+    (doseq [namespace shared-test-namespaces]
+      (let [started-at (System/nanoTime)]
+        (require namespace)
+        (log-timing! (str "require " namespace) started-at)))
     (doseq [namespace namespaces]
-      (require namespace))
-    (let [summary (apply t/run-tests namespaces)]
+      (let [started-at (System/nanoTime)]
+        (require namespace)
+        (log-timing! (str "require " namespace) started-at)))
+    (let [started-at (System/nanoTime)
+          summary (apply t/run-tests namespaces)]
+      (log-timing! "run-tests" started-at)
       {:namespaces namespaces
        :summary summary
        :successful? (t/successful? summary)})))
