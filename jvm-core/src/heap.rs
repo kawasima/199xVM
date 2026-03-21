@@ -194,6 +194,15 @@ impl JObject {
         }))
     }
 
+    /// Create a primitive byte array.
+    pub fn new_byte_array(bytes: Vec<u8>) -> JRef {
+        Rc::new(RefCell::new(JObject {
+            class_name: "[B".to_owned(),
+            fields: HashMap::new(),
+            native: NativePayload::ByteArray(bytes),
+        }))
+    }
+
     /// Create a lambda/closure object.
     pub fn new_lambda(f: impl Fn(Vec<JValue>) -> JValue + 'static) -> JRef {
         Rc::new(RefCell::new(JObject {
