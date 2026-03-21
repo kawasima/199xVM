@@ -26,7 +26,6 @@ impl Vm {
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
         let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
-        self.ensure_class_init(&class_name)?;
         let n_args = count_args(&descriptor);
         let args = pop_args(frame, n_args);
 
