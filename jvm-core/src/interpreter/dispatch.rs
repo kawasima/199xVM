@@ -25,37 +25,43 @@ impl Vm {
         idx: u16,
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
-        let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
-        let n_args = count_args(&descriptor);
-        let args = pop_args(frame, n_args);
+        let member = self.resolve_methodref_cached(cp, idx);
+        let class_name = member.class_name.as_str();
+        let method_name = member.member_name.as_str();
+        let descriptor = member.descriptor.as_str();
+        let args = pop_args(frame, member.arg_count);
 
-        // Normalize descriptor and args (varargs synthesis) before branching.
-        let orig_args = args.clone();
-        let (desc, args) = match self.prepare_static_args(&class_name, &method_name, &descriptor, args) {
-            Some(pair) => pair,
-            None => {
-                // Method flags not found — fall back to invoke_static with original args.
-                let result = self.invoke_static(&class_name, &method_name, &descriptor, orig_args)?;
-                if !matches!(result, JValue::Void) { frame.stack.push(result); }
-                return Ok(None);
+        if let Some(site) = self.resolve_static_callsite_cached(cp, idx) {
+            let mut args = args;
+            if site.empty_varargs && args.len() < site.expected_arg_count {
+                args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
             }
-        };
-
-        let push_return = !desc.ends_with(")V");
-        match self.build_static_frame(&class_name, &method_name, &desc, args.clone(), push_return)? {
-            Some(fi) => {
+            if site.method_info.has_code {
+                let fi = self.build_static_frame_from_info(
+                    site.method_info.as_ref(),
+                    args,
+                    site.push_return,
+                    false,
+                );
                 *self.pending_frame_mut() = Some(fi);
-                Ok(None)
-            }
-            None => {
-                // Native fallback — args already have varargs synthesis applied.
-                let result = self.invoke_static(&class_name, &method_name, &desc, args)?;
+            } else {
+                let result = self.invoke_static_native_from_info(
+                    site.method_info.as_ref(),
+                    &site.method_name,
+                    args,
+                )?;
                 if !matches!(result, JValue::Void) {
                     frame.stack.push(result);
                 }
-                Ok(None)
             }
+            return Ok(None);
         }
+
+        let result = self.invoke_static(class_name, method_name, descriptor, args)?;
+        if !matches!(result, JValue::Void) {
+            frame.stack.push(result);
+        }
+        Ok(None)
     }
 
     pub(super) fn dispatch_virtual(
@@ -64,14 +70,16 @@ impl Vm {
         idx: u16,
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
-        let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
-        let n_args = count_args(&descriptor);
-        let args = pop_args(frame, n_args);
+        let member = self.resolve_methodref_cached(cp, idx);
+        let class_name = member.class_name.as_str();
+        let method_name = member.member_name.as_str();
+        let descriptor = member.descriptor.as_str();
+        let args = pop_args(frame, member.arg_count);
         let this_val = frame.stack.pop().unwrap();
         match this_val {
             JValue::Ref(Some(r)) => {
-                let push_return = !descriptor.ends_with(")V");
-                self.dispatch_virtual_on_ref(r, &class_name, &method_name, &descriptor, args, push_return, frame)
+                let push_return = !member.returns_void;
+                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame)
             }
             JValue::Ref(None) => Err(format!("NullPointerException: invokevirtual {class_name}.{method_name}{descriptor}")),
             other => Err(format!(
@@ -155,31 +163,33 @@ impl Vm {
         idx: u16,
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
-        let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
-        let n_args = count_args(&descriptor);
-        let args = pop_args(frame, n_args);
+        let member = self.resolve_methodref_cached(cp, idx);
+        let class_name = member.class_name.as_str();
+        let method_name = member.member_name.as_str();
+        let descriptor = member.descriptor.as_str();
+        let args = pop_args(frame, member.arg_count);
         let this_val = frame.stack.pop().unwrap();
         match this_val {
             JValue::Ref(Some(r)) => {
                 if method_name == "<init>" {
                     if class_name == "java/lang/String" {
-                        let s = self.string_from_init_args(&descriptor, &args, &r);
+                        let s = self.string_from_init_args(descriptor, &args, &r);
                         r.borrow_mut().native = NativePayload::JavaString(s);
                         return Ok(None); // void
                     }
-                    let has_method = self.method_exists(&class_name, &method_name, &descriptor);
+                    let has_method = self.method_exists(class_name, method_name, descriptor);
                     if !has_method {
                         return Ok(None); // no-op
                     }
                 }
-                let push_return = !descriptor.ends_with(")V");
-                match self.build_special_frame_inner(r.clone(), &class_name, &method_name, &descriptor, args.clone(), push_return)? {
+                let push_return = !member.returns_void;
+                match self.build_special_frame_inner(r.clone(), class_name, method_name, descriptor, args.clone(), push_return)? {
                     Some(fi) => {
                         *self.pending_frame_mut() = Some(fi);
                         Ok(None)
                     }
                     None => {
-                        let result = self.invoke_special(r, &class_name, &method_name, &descriptor, args)?;
+                        let result = self.invoke_special(r, class_name, method_name, descriptor, args)?;
                         if !matches!(result, JValue::Void) {
                             frame.stack.push(result);
                         }
@@ -200,35 +210,53 @@ impl Vm {
         idx: u16,
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
-        let (class_name, method_name, descriptor) = resolve_methodref(cp, idx);
-        let n_args = count_args(&descriptor);
-        let args = pop_args(frame, n_args);
+        let member = self.resolve_methodref_cached(cp, idx);
+        let class_name = member.class_name.as_str();
+        let method_name = member.member_name.as_str();
+        let descriptor = member.descriptor.as_str();
+        let args = pop_args(frame, member.arg_count);
 
-        let is_static = self.find_method_flags(&class_name, &method_name, &descriptor)
+        let is_static = self.find_method_flags(class_name, method_name, descriptor)
             .map(|flags| flags & 0x0008 != 0)
             .unwrap_or(false);
         if is_static {
-            let push_return = !descriptor.ends_with(")V");
-            match self.build_static_frame(&class_name, &method_name, &descriptor, args.clone(), push_return)? {
-                Some(fi) => {
-                    *self.pending_frame_mut() = Some(fi);
-                    return Ok(None);
+            if let Some(site) = self.resolve_static_callsite_cached(cp, idx) {
+                let mut args = args;
+                if site.empty_varargs && args.len() < site.expected_arg_count {
+                    args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
                 }
-                None => {
-                    let result = self.invoke_static(&class_name, &method_name, &descriptor, args)?;
+                if site.method_info.has_code {
+                    let fi = self.build_static_frame_from_info(
+                        site.method_info.as_ref(),
+                        args,
+                        site.push_return,
+                        false,
+                    );
+                    *self.pending_frame_mut() = Some(fi);
+                } else {
+                    let result = self.invoke_static_native_from_info(
+                        site.method_info.as_ref(),
+                        &site.method_name,
+                        args,
+                    )?;
                     if !matches!(result, JValue::Void) {
                         frame.stack.push(result);
                     }
-                    return Ok(None);
                 }
+                return Ok(None);
             }
+            let result = self.invoke_static(class_name, method_name, descriptor, args)?;
+            if !matches!(result, JValue::Void) {
+                frame.stack.push(result);
+            }
+            return Ok(None);
         }
 
         let this_val = frame.stack.pop().unwrap();
         match this_val {
             JValue::Ref(Some(r)) => {
-                let push_return = !descriptor.ends_with(")V");
-                self.dispatch_virtual_on_ref(r, &class_name, &method_name, &descriptor, args, push_return, frame)
+                let push_return = !member.returns_void;
+                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame)
             }
             JValue::Ref(None) => Err(format!("NullPointerException: invokeinterface {class_name}.{method_name}{descriptor}")),
             other => Err(format!(

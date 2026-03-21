@@ -588,6 +588,83 @@ impl super::Vm {
                 }
                 Some(JValue::Int(if ok { 1 } else { 0 }))
             }
+            ("java/util/regex/Matcher", "find") => {
+                let (regex, input, search_index) = {
+                    let mb = this.borrow();
+                    let pattern_ref = mb.fields.get("pattern")
+                        .or_else(|| mb.fields.get("__pattern"));
+                    let regex = pattern_ref
+                        .and_then(|v| v.as_ref())
+                        .and_then(|p| {
+                            let pb = p.borrow();
+                            pb.fields.get("regex")
+                                .or_else(|| pb.fields.get("__regex"))
+                                .and_then(|v| v.as_ref().cloned())
+                                .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        })
+                        .unwrap_or_default();
+                    let input = mb.fields.get("input")
+                        .or_else(|| mb.fields.get("__input"))
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let search_index = mb.fields.get("searchIndex")
+                        .map(|v| v.as_int().max(0) as usize)
+                        .unwrap_or(0);
+                    (regex, input, search_index)
+                };
+
+                if search_index > input.len() {
+                    this.borrow_mut().fields.remove("__groups");
+                    this.borrow_mut().fields.insert("matchStart".to_owned(), JValue::Int(-1));
+                    this.borrow_mut().fields.insert("matchEnd".to_owned(), JValue::Int(-1));
+                    return Some(JValue::Int(0));
+                }
+
+                let re = regex::Regex::new(&regex).ok();
+                let hay = &input[search_index..];
+                let caps = re.as_ref().and_then(|r| r.captures(hay));
+
+                if let Some(caps) = caps {
+                    let mut groups = Vec::new();
+                    for i in 0..caps.len() {
+                        if let Some(m) = caps.get(i) {
+                            groups.push(JValue::Ref(Some(self.intern_string(m.as_str()))));
+                        } else {
+                            groups.push(JValue::Ref(None));
+                        }
+                    }
+                    let groups_arr = JObject::new_array("[Ljava/lang/String;", groups);
+                    let (ms, me) = caps
+                        .get(0)
+                        .map(|m| ((search_index + m.start()) as i32, (search_index + m.end()) as i32))
+                        .unwrap_or((-1, -1));
+                    let next_search = if ms >= 0 && ms == me {
+                        (me as usize).saturating_add(1)
+                    } else {
+                        me.max(0) as usize
+                    };
+                    let mut mb = this.borrow_mut();
+                    mb.fields.insert("__groups".to_owned(), JValue::Ref(Some(groups_arr)));
+                    mb.fields.insert("matchStart".to_owned(), JValue::Int(ms));
+                    mb.fields.insert("matchEnd".to_owned(), JValue::Int(me));
+                    mb.fields.insert(
+                        "searchIndex".to_owned(),
+                        JValue::Int(next_search.min(input.len().saturating_add(1)) as i32),
+                    );
+                    return Some(JValue::Int(1));
+                }
+
+                let mut mb = this.borrow_mut();
+                mb.fields.remove("__groups");
+                mb.fields.insert("matchStart".to_owned(), JValue::Int(-1));
+                mb.fields.insert("matchEnd".to_owned(), JValue::Int(-1));
+                mb.fields.insert(
+                    "searchIndex".to_owned(),
+                    JValue::Int(input.len().saturating_add(1) as i32),
+                );
+                Some(JValue::Int(0))
+            }
             ("java/util/regex/Matcher", "group") => {
                 // group(int) — return captured group from __groups array
                 let idx = _args.first().map(|v| v.as_int().max(0) as usize).unwrap_or(0);

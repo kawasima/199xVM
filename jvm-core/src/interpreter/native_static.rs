@@ -290,33 +290,46 @@ impl super::Vm {
                         return Some(JValue::Void);
                     }
                 };
+                let profile_started = self.profiler.as_ref().map(|_| std::time::Instant::now());
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
                 // Primitive class names are VM-defined synthetic Class objects.
                 if matches!(
                     internal.as_str(),
                     "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void"
                 ) {
-                    return Some(JValue::Ref(Some(self.class_object(internal))));
+                    let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                    if let Some(started) = profile_started {
+                        self.record_for_name_sample(&runtime_name, started.elapsed());
+                    }
+                    return result;
                 }
                 // Array descriptors (e.g. "[I", "[Ljava/lang/String;") are synthetic types
                 // not backed by a ClassFile entry — return a class object directly.
                 if internal.starts_with('[') {
-                    return Some(JValue::Ref(Some(self.class_object(internal))));
+                    let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                    if let Some(started) = profile_started {
+                        self.record_for_name_sample(&runtime_name, started.elapsed());
+                    }
+                    return result;
                 }
                 self.ensure_class_ready(&internal);
-                match self.classes.get(&internal) {
-                    Some(super::LazyClass::Ready(_)) => {}
+                let result = match self.classes.get(&internal) {
+                    Some(super::LazyClass::Ready(_)) => None,
                     Some(super::LazyClass::ParseError(msg)) => {
                         let msg = msg.clone();
                         self.throw_class_format_error(&msg);
-                        return Some(JValue::Void);
+                        Some(JValue::Void)
                     }
                     _ => {
                         self.throw_class_not_found(&runtime_name);
-                        return Some(JValue::Void);
+                        Some(JValue::Void)
                     }
+                };
+                let result = result.unwrap_or_else(|| JValue::Ref(Some(self.class_object(internal))));
+                if let Some(started) = profile_started {
+                    self.record_for_name_sample(&runtime_name, started.elapsed());
                 }
-                Some(JValue::Ref(Some(self.class_object(internal))))
+                Some(result)
             }
             ("java/lang/Class", "forName1", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;") => {
                 let runtime_name = match _args
@@ -331,25 +344,40 @@ impl super::Vm {
                     }
                 };
                 let initialize = _args.get(1).map(|v| v.as_int() != 0).unwrap_or(true);
+                let profile_key = format!("{runtime_name}|init={initialize}");
+                let profile_started = self.profiler.as_ref().map(|_| std::time::Instant::now());
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
                 self.ensure_class_ready(&internal);
-                match self.classes.get(&internal) {
-                    Some(super::LazyClass::Ready(_)) => {}
+                let result = match self.classes.get(&internal) {
+                    Some(super::LazyClass::Ready(_)) => None,
                     Some(super::LazyClass::ParseError(msg)) => {
                         let msg = msg.clone();
                         self.throw_class_format_error(&msg);
-                        return Some(JValue::Void);
+                        Some(JValue::Void)
                     }
                     _ => {
-                        return Some(JValue::Ref(None)); // not found — caller checks null
+                        Some(JValue::Ref(None)) // not found — caller checks null
                     }
+                };
+                if let Some(result) = result {
+                    if let Some(started) = profile_started {
+                        self.record_for_name_sample(&profile_key, started.elapsed());
+                    }
+                    return Some(result);
                 }
                 if initialize {
                     if self.ensure_class_init(&internal).is_err() {
+                        if let Some(started) = profile_started {
+                            self.record_for_name_sample(&profile_key, started.elapsed());
+                        }
                         return Some(JValue::Void);
                     }
                 }
-                Some(JValue::Ref(Some(self.class_object(internal))))
+                let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                if let Some(started) = profile_started {
+                    self.record_for_name_sample(&profile_key, started.elapsed());
+                }
+                result
             }
             ("java/lang/ClassLoader", "getSystemClassLoader", "()Ljava/lang/ClassLoader;") => {
                 let cl = self.get_or_create_system_classloader();

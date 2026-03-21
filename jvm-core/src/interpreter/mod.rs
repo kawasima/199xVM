@@ -49,7 +49,25 @@ pub(super) struct MethodExecInfo {
     /// Number of local-variable slots consumed by parameters.
     pub param_slot_count: usize,
     /// Preformatted frame owner string used in diagnostics.
-    pub frame_owner: String,
+    pub frame_owner: Rc<str>,
+}
+
+#[derive(Clone)]
+pub(super) struct ResolvedMemberRef {
+    pub class_name: String,
+    pub member_name: String,
+    pub descriptor: String,
+    pub arg_count: usize,
+    pub returns_void: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct ResolvedStaticCallSite {
+    pub method_name: String,
+    pub expected_arg_count: usize,
+    pub push_return: bool,
+    pub empty_varargs: bool,
+    pub method_info: Rc<MethodExecInfo>,
 }
 
 #[derive(Clone)]
@@ -76,6 +94,120 @@ pub(super) struct ReflectConstructorInfo {
     pub param_types: Vec<String>,
     pub exception_types: Vec<String>,
     pub access_flags: u16,
+}
+
+#[derive(Default)]
+struct VmProfileStat {
+    count: u64,
+    nanos: u128,
+}
+
+struct VmProfiler {
+    opcode_counts: [u64; 256],
+    opcode_nanos: [u128; 256],
+    method_stats: HashMap<Rc<str>, VmProfileStat>,
+    for_name_stats: HashMap<String, VmProfileStat>,
+    top_n: usize,
+}
+
+impl VmProfiler {
+    fn from_env() -> Option<Self> {
+        let enabled = matches!(
+            std::env::var("JVM_PROFILE").ok().as_deref(),
+            Some("1" | "true" | "TRUE" | "yes" | "YES")
+        );
+        if !enabled {
+            return None;
+        }
+        let top_n = std::env::var("JVM_PROFILE_TOP")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(20);
+        Some(Self {
+            opcode_counts: [0; 256],
+            opcode_nanos: [0; 256],
+            method_stats: HashMap::new(),
+            for_name_stats: HashMap::new(),
+            top_n,
+        })
+    }
+
+    fn record(&mut self, opcode: u8, frame_owner: &Rc<str>, elapsed: std::time::Duration) {
+        let idx = usize::from(opcode);
+        let nanos = elapsed.as_nanos();
+        self.opcode_counts[idx] += 1;
+        self.opcode_nanos[idx] += nanos;
+        let stat = self.method_stats.entry(Rc::clone(frame_owner)).or_default();
+        stat.count += 1;
+        stat.nanos += nanos;
+    }
+
+    fn record_for_name(&mut self, runtime_name: &str, elapsed: std::time::Duration) {
+        let stat = self.for_name_stats.entry(runtime_name.to_owned()).or_default();
+        stat.count += 1;
+        stat.nanos += elapsed.as_nanos();
+    }
+
+    fn report(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("vm-profile top={}", self.top_n));
+
+        let mut methods: Vec<_> = self.method_stats.iter().collect();
+        methods.sort_by(|a, b| {
+            b.1.nanos
+                .cmp(&a.1.nanos)
+                .then_with(|| a.0.as_ref().cmp(b.0.as_ref()))
+        });
+        lines.push("methods:".to_owned());
+        for (name, stat) in methods.into_iter().take(self.top_n) {
+            lines.push(format!(
+                "  {:9.3} ms  {:8} ops  {}",
+                stat.nanos as f64 / 1_000_000.0,
+                stat.count,
+                name
+            ));
+        }
+
+        if !self.for_name_stats.is_empty() {
+            let mut for_names: Vec<_> = self.for_name_stats.iter().collect();
+            for_names.sort_by(|a, b| b.1.nanos.cmp(&a.1.nanos).then_with(|| a.0.cmp(b.0)));
+            lines.push("forName:".to_owned());
+            for (name, stat) in for_names.into_iter().take(self.top_n) {
+                lines.push(format!(
+                    "  {:9.3} ms  {:8} calls  {}",
+                    stat.nanos as f64 / 1_000_000.0,
+                    stat.count,
+                    name
+                ));
+            }
+        }
+
+        let mut opcodes: Vec<_> = self
+            .opcode_counts
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, count)| {
+                if *count == 0 {
+                    None
+                } else {
+                    Some((idx, *count, self.opcode_nanos[idx]))
+                }
+            })
+            .collect();
+        opcodes.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        lines.push("opcodes:".to_owned());
+        for (idx, count, nanos) in opcodes.into_iter().take(self.top_n) {
+            lines.push(format!(
+                "  0x{idx:02x}  {:9.3} ms  {:8} hits",
+                nanos as f64 / 1_000_000.0,
+                count
+            ));
+        }
+
+        lines.push(String::new());
+        lines.join("\n")
+    }
 }
 
 #[cfg(test)]
@@ -527,15 +659,23 @@ pub struct Vm {
     /// Resolved method signature cache: requested call site → (real descriptor, access flags).
     /// Avoids repeated relaxed descriptor matching and flags lookups on hot invoke paths.
     method_signature_cache: HashMap<(String, String, String), (String, u16)>,
+    /// Cached decoded method refs keyed by `(cp pointer, cp index)`.
+    methodref_constant_cache: HashMap<(usize, u16), Rc<ResolvedMemberRef>>,
+    /// Cached resolved static call sites keyed by `(cp pointer, cp index)`.
+    static_callsite_cache: HashMap<(usize, u16), Rc<ResolvedStaticCallSite>>,
     /// Static field owner cache: symbolic owner/name/descriptor → declaring class name.
     /// Mirrors HotSpot's resolved field entries well enough for repeated getstatic/putstatic.
     static_field_owner_cache: HashMap<(String, String, String), Option<String>>,
+    /// Cached decoded field refs keyed by `(cp pointer, cp index)`.
+    fieldref_constant_cache: HashMap<(usize, u16), Rc<ResolvedMemberRef>>,
     /// Cached resolved method execution metadata keyed by requested call-site triplet.
     method_exec_info_cache: HashMap<(String, String, String), MethodExecInfo>,
     /// Cached `<clinit>` presence for parsed classes.
     class_initializer_cache: HashMap<String, bool>,
     /// Cached presence of concrete non-static interface methods.
     concrete_interface_method_cache: HashMap<String, bool>,
+    /// Cached subtype checks keyed by `(runtime_class, target_class)`.
+    instanceof_cache: HashMap<(String, String), bool>,
     /// Cached ordered superinterfaces that must be initialized before a class.
     class_init_superinterface_cache: HashMap<String, Vec<String>>,
     /// Materialized non-class resources from loaded JARs, keyed by path.
@@ -552,6 +692,7 @@ pub struct Vm {
     pending_resources: HashMap<String, JarEntryRef>,
     /// Parsed ZIP archives kept alive so lazy entry reads do not re-scan the central directory.
     jar_archives: Vec<OwnedJarArchive>,
+    profiler: Option<VmProfiler>,
 }
 
 impl Vm {
@@ -583,10 +724,14 @@ impl Vm {
             monitors: HashMap::new(),
             method_owner_cache: HashMap::new(),
             method_signature_cache: HashMap::new(),
+            methodref_constant_cache: HashMap::new(),
+            static_callsite_cache: HashMap::new(),
             static_field_owner_cache: HashMap::new(),
+            fieldref_constant_cache: HashMap::new(),
             method_exec_info_cache: HashMap::new(),
             class_initializer_cache: HashMap::new(),
             concrete_interface_method_cache: HashMap::new(),
+            instanceof_cache: HashMap::new(),
             class_init_superinterface_cache: HashMap::new(),
             resources: HashMap::new(),
             resource_array_cache: HashMap::new(),
@@ -595,6 +740,7 @@ impl Vm {
             reflection_ctors_cache: HashMap::new(),
             pending_resources: HashMap::new(),
             jar_archives: Vec::new(),
+            profiler: VmProfiler::from_env(),
         }
     }
 
@@ -609,8 +755,12 @@ impl Vm {
     fn invalidate_resolution_caches(&mut self) {
         self.method_owner_cache.clear();
         self.method_signature_cache.clear();
+        self.methodref_constant_cache.clear();
+        self.static_callsite_cache.clear();
         self.static_field_owner_cache.clear();
+        self.fieldref_constant_cache.clear();
         self.method_exec_info_cache.clear();
+        self.instanceof_cache.clear();
     }
 
     fn invalidate_class_caches(&mut self, name: &str) {
@@ -1178,6 +1328,54 @@ impl Vm {
         }
     }
 
+    pub(in crate::interpreter) fn record_profile_sample(
+        &mut self,
+        opcode: u8,
+        frame_owner: &Rc<str>,
+        elapsed: std::time::Duration,
+    ) {
+        if let Some(profiler) = self.profiler.as_mut() {
+            profiler.record(opcode, frame_owner, elapsed);
+        }
+    }
+
+    pub fn profile_report(&self) -> Option<String> {
+        let profiler = self.profiler.as_ref()?;
+        let report = profiler.report();
+        if report.is_empty() {
+            None
+        } else {
+            Some(report)
+        }
+    }
+
+    pub fn take_profile_report(&mut self) -> Option<String> {
+        let profiler = self.profiler.take()?;
+        let report = profiler.report();
+        if report.is_empty() {
+            None
+        } else {
+            Some(report)
+        }
+    }
+
+    pub fn write_profile_report_if_enabled(&mut self) {
+        let Some(report) = self.profile_report() else {
+            return;
+        };
+        self.write_printstream_bytes(true, report.as_bytes());
+    }
+
+    pub(in crate::interpreter) fn record_for_name_sample(
+        &mut self,
+        runtime_name: &str,
+        elapsed: std::time::Duration,
+    ) {
+        if let Some(profiler) = self.profiler.as_mut() {
+            profiler.record_for_name(runtime_name, elapsed);
+        }
+    }
+
     pub fn set_stdio_modes(&mut self, stdin: StdioMode, stdout: StdioMode, stderr: StdioMode) {
         self.stdin_mode = stdin;
         self.stdout_mode = stdout;
@@ -1494,7 +1692,7 @@ impl Vm {
             bootstrap_methods,
             param_tokens: Rc::new(param_tokens),
             param_slot_count,
-            frame_owner: format!("{owner}.{method_name}{descriptor_out}"),
+            frame_owner: Rc::<str>::from(format!("{owner}.{method_name}{descriptor_out}")),
         };
         self.method_exec_info_cache.insert(cache_key, info.clone());
         Some(info)
@@ -2188,6 +2386,16 @@ impl Vm {
     /// Check if `runtime_class` is an instance of `target_class` (by name).
     /// Handles array types per JVMS §6.5.instanceof / §6.5.checkcast.
     fn is_instance_of(&mut self, runtime_class: &str, target_class: &str) -> bool {
+        let cache_key = (runtime_class.to_owned(), target_class.to_owned());
+        if let Some(cached) = self.instanceof_cache.get(&cache_key) {
+            return *cached;
+        }
+        let result = self.is_instance_of_uncached(runtime_class, target_class);
+        self.instanceof_cache.insert(cache_key, result);
+        result
+    }
+
+    fn is_instance_of_uncached(&mut self, runtime_class: &str, target_class: &str) -> bool {
         if runtime_class == target_class { return true; }
         if target_class == "java/lang/Object" { return true; }
 
