@@ -71,6 +71,13 @@ pub(super) struct ResolvedStaticCallSite {
 }
 
 #[derive(Clone)]
+pub(super) struct ResolvedVirtualCallSite {
+    pub dispatch_class: String,
+    pub method_name: String,
+    pub method_info: Rc<MethodExecInfo>,
+}
+
+#[derive(Clone)]
 pub(super) struct ReflectFieldInfo {
     pub name: String,
     pub descriptor: String,
@@ -663,6 +670,9 @@ pub struct Vm {
     methodref_constant_cache: HashMap<(usize, u16), Rc<ResolvedMemberRef>>,
     /// Cached resolved static call sites keyed by `(cp pointer, cp index)`.
     static_callsite_cache: HashMap<(usize, u16), Rc<ResolvedStaticCallSite>>,
+    /// Monomorphic virtual/interface call-site cache keyed by `(cp pointer, cp index)`.
+    /// Each entry remembers the most recently seen dispatch class for that call site.
+    virtual_callsite_cache: HashMap<(usize, u16), Rc<ResolvedVirtualCallSite>>,
     /// Static field owner cache: symbolic owner/name/descriptor → declaring class name.
     /// Mirrors HotSpot's resolved field entries well enough for repeated getstatic/putstatic.
     static_field_owner_cache: HashMap<(String, String, String), Option<String>>,
@@ -726,6 +736,7 @@ impl Vm {
             method_signature_cache: HashMap::new(),
             methodref_constant_cache: HashMap::new(),
             static_callsite_cache: HashMap::new(),
+            virtual_callsite_cache: HashMap::new(),
             static_field_owner_cache: HashMap::new(),
             fieldref_constant_cache: HashMap::new(),
             method_exec_info_cache: HashMap::new(),
@@ -757,6 +768,7 @@ impl Vm {
         self.method_signature_cache.clear();
         self.methodref_constant_cache.clear();
         self.static_callsite_cache.clear();
+        self.virtual_callsite_cache.clear();
         self.static_field_owner_cache.clear();
         self.fieldref_constant_cache.clear();
         self.method_exec_info_cache.clear();

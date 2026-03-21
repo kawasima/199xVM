@@ -716,6 +716,16 @@ impl Vm {
 
         if !info.has_code { return Ok(None); }
 
+        Ok(Some(self.build_virtual_frame_from_info(this, &info, args, push_return)))
+    }
+
+    pub(crate) fn build_virtual_frame_from_info(
+        &mut self,
+        this: JRef,
+        info: &super::MethodExecInfo,
+        args: Vec<JValue>,
+        push_return: bool,
+    ) -> FrameInfo {
         let req = 1 + info.param_slot_count;
         let total = info.max_locals.max(req);
         let mut locals = vec![JValue::Void; total];
@@ -728,14 +738,17 @@ impl Vm {
         }
 
         let synchronized_monitor = self.acquire_instance_synchronized_monitor(info.access_flags, &locals);
-        Ok(Some(FrameInfo {
+        FrameInfo {
             frame: Frame { locals, stack: Vec::new(), pc: 0, last_opcode_pc: 0 },
-            code: info.code, cp: info.cp, frame_owner: info.frame_owner,
-            bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
+            code: info.code.clone(),
+            cp: info.cp.clone(),
+            frame_owner: info.frame_owner.clone(),
+            bootstrap_methods: info.bootstrap_methods.clone(),
+            exception_table: info.exception_table.clone(),
             push_return, concat_state: None, lambda_return_adapt: None,
             synchronized_monitor,
             class_initializer_owner: None,
-        }))
+        }
     }
 
     /// Inner helper for building an invokespecial frame.
