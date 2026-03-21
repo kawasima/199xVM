@@ -87,7 +87,7 @@ clj-smoke-test: clj-smoke-bundle shim
 	cargo test --package jvm-core --test clojure_integration_test clojure_smoke -- --ignored --exact
 
 clj-upstream-test: clj-smoke-bundle shim
-	cargo test --package jvm-core --test clojure_integration_test clojure_smoke_upstream_subset -- --ignored --exact
+	cargo test --package jvm-core --test clojure_integration_test clojure_upstream_ -- --ignored --nocapture --test-threads=1
 
 clj-upstream-coverage:
 	bash scripts/clj-upstream-coverage.sh
@@ -103,7 +103,7 @@ clj-smoke-test-docker:
 clj-upstream-test-docker:
 	docker-compose run --rm clojure make clj-smoke-bundle
 	docker-compose run --rm java make shim
-	docker-compose run --rm rust cargo test --package jvm-core --test clojure_integration_test clojure_smoke_upstream_subset -- --ignored --exact
+	docker-compose run --rm rust cargo test --package jvm-core --test clojure_integration_test clojure_upstream_ -- --ignored --nocapture --test-threads=1
 
 clj-upstream-coverage-docker:
 	docker-compose run --rm clojure make clj-smoke-bundle
