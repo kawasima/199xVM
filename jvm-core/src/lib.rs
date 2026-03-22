@@ -5,6 +5,7 @@
 //! receiving the string representation of the return value.
 
 mod class_file;
+mod collections;
 pub mod heap;
 pub mod interpreter;
 

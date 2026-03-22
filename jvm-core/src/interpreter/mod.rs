@@ -8,7 +8,7 @@
 //! - Integer / long / reference comparisons and control flow
 //! - Native stubs for `java.lang.*` and `java.util.*`
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 #[cfg(target_arch = "wasm32")]
@@ -17,6 +17,7 @@ use wasm_bindgen::prelude::*;
 use crate::class_file::{
     self, Attribute, BootstrapMethod, ClassFile, ConstantPoolEntry, ExceptionTableEntry,
 };
+use crate::collections::{HashMap, HashSet};
 use crate::heap::{JObject, JRef, JValue};
 
 type OwnedJarArchive = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
@@ -64,6 +65,7 @@ pub(super) struct ResolvedMemberRef {
 #[derive(Clone)]
 pub(super) struct ResolvedStaticCallSite {
     pub method_name: String,
+    pub call_arg_count: usize,
     pub expected_arg_count: usize,
     pub push_return: bool,
     pub empty_varargs: bool,
@@ -75,6 +77,12 @@ pub(super) struct ResolvedVirtualCallSite {
     pub dispatch_class: String,
     pub method_name: String,
     pub method_info: Rc<MethodExecInfo>,
+}
+
+#[derive(Clone)]
+struct ClassInitPrerequisites {
+    super_name: Option<String>,
+    interface_names: Rc<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -134,8 +142,8 @@ impl VmProfiler {
         Some(Self {
             opcode_counts: [0; 256],
             opcode_nanos: [0; 256],
-            method_stats: HashMap::new(),
-            for_name_stats: HashMap::new(),
+            method_stats: HashMap::default(),
+            for_name_stats: HashMap::default(),
             top_n,
         })
     }
@@ -151,7 +159,10 @@ impl VmProfiler {
     }
 
     fn record_for_name(&mut self, runtime_name: &str, elapsed: std::time::Duration) {
-        let stat = self.for_name_stats.entry(runtime_name.to_owned()).or_default();
+        let stat = self
+            .for_name_stats
+            .entry(runtime_name.to_owned())
+            .or_default();
         stat.count += 1;
         stat.nanos += elapsed.as_nanos();
     }
@@ -223,9 +234,13 @@ mod tests {
     use std::io::{Cursor, Write};
 
     fn build_misnamed_jar() -> Vec<u8> {
-        let mut archive = zip::ZipArchive::new(Cursor::new(include_bytes!("../../tests/test.jar").as_slice()))
-            .expect("open test jar");
-        let mut class_file = archive.by_name("JarTestEntry.class").expect("JarTestEntry.class");
+        let mut archive = zip::ZipArchive::new(Cursor::new(
+            include_bytes!("../../tests/test.jar").as_slice(),
+        ))
+        .expect("open test jar");
+        let mut class_file = archive
+            .by_name("JarTestEntry.class")
+            .expect("JarTestEntry.class");
         let mut class_bytes = Vec::new();
         std::io::Read::read_to_end(&mut class_file, &mut class_bytes).expect("read class bytes");
 
@@ -235,7 +250,9 @@ mod tests {
             let mut writer = zip::ZipWriter::new(cursor);
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
-            writer.start_file("wrong/Path.class", options).expect("start class entry");
+            writer
+                .start_file("wrong/Path.class", options)
+                .expect("start class entry");
             writer.write_all(&class_bytes).expect("write class entry");
             writer.finish().expect("finish jar");
         }
@@ -243,8 +260,10 @@ mod tests {
     }
 
     fn class_entries_in_test_jar() -> Vec<(String, Vec<u8>)> {
-        let mut archive = zip::ZipArchive::new(Cursor::new(include_bytes!("../../tests/test.jar").as_slice()))
-            .expect("open test jar");
+        let mut archive = zip::ZipArchive::new(Cursor::new(
+            include_bytes!("../../tests/test.jar").as_slice(),
+        ))
+        .expect("open test jar");
         let mut classes = Vec::new();
         for i in 0..archive.len() {
             let mut file = archive.by_index(i).expect("test jar entry");
@@ -265,13 +284,21 @@ mod tests {
     #[test]
     fn jar_classes_stay_pending_until_first_access() {
         let mut vm = Vm::new();
-        let count = vm.load_jar(include_bytes!("../../tests/test.jar")).expect("load_jar failed");
+        let count = vm
+            .load_jar(include_bytes!("../../tests/test.jar"))
+            .expect("load_jar failed");
         assert!(count > 0, "expected at least one class in test JAR");
-        assert!(matches!(vm.classes.get("JarTestEntry"), Some(LazyClass::PendingJarEntry(_))));
+        assert!(matches!(
+            vm.classes.get("JarTestEntry"),
+            Some(LazyClass::PendingJarEntry(_))
+        ));
 
         vm.ensure_class_ready("JarTestEntry");
 
-        assert!(matches!(vm.classes.get("JarTestEntry"), Some(LazyClass::Ready(_))));
+        assert!(matches!(
+            vm.classes.get("JarTestEntry"),
+            Some(LazyClass::Ready(_))
+        ));
     }
 
     #[test]
@@ -279,14 +306,23 @@ mod tests {
         let mut vm = Vm::new();
         let count = vm.load_jar(&build_misnamed_jar()).expect("load_jar failed");
         assert_eq!(count, 1, "expected one class in misnamed jar");
-        assert!(matches!(vm.classes.get("wrong/Path"), Some(LazyClass::PendingJarEntry(_))));
-        assert!(vm.resolve_class("JarTestEntry").is_none(), "must not recover by internal name");
+        assert!(matches!(
+            vm.classes.get("wrong/Path"),
+            Some(LazyClass::PendingJarEntry(_))
+        ));
+        assert!(
+            vm.resolve_class("JarTestEntry").is_none(),
+            "must not recover by internal name"
+        );
 
         vm.ensure_class_ready("wrong/Path");
 
         match vm.classes.get("wrong/Path") {
             Some(LazyClass::ParseError(err)) => {
-                assert!(err.contains("Class name mismatch"), "unexpected error: {err}");
+                assert!(
+                    err.contains("Class name mismatch"),
+                    "unexpected error: {err}"
+                );
                 assert!(err.contains("wrong/Path"), "unexpected error: {err}");
                 assert!(err.contains("JarTestEntry"), "unexpected error: {err}");
             }
@@ -301,11 +337,15 @@ mod tests {
             .map(|(name, _)| name)
             .collect();
         let mut vm = Vm::new();
-        vm.load_jar(include_bytes!("../../tests/test.jar")).expect("load test jar");
+        vm.load_jar(include_bytes!("../../tests/test.jar"))
+            .expect("load test jar");
 
         for class_name in &class_names {
             assert!(
-                matches!(vm.classes.get(class_name), Some(LazyClass::PendingJarEntry(_))),
+                matches!(
+                    vm.classes.get(class_name),
+                    Some(LazyClass::PendingJarEntry(_))
+                ),
                 "expected pending jar entry before miss: {class_name}"
             );
         }
@@ -314,11 +354,17 @@ mod tests {
 
         for class_name in &class_names {
             assert!(
-                matches!(vm.classes.get(class_name), Some(LazyClass::PendingJarEntry(_))),
+                matches!(
+                    vm.classes.get(class_name),
+                    Some(LazyClass::PendingJarEntry(_))
+                ),
                 "packaged miss must not parse or rewrite pending entry: {class_name}"
             );
         }
-        assert!(vm.resolve_class("missing/Type").is_none(), "missing class must remain unresolved");
+        assert!(
+            vm.resolve_class("missing/Type").is_none(),
+            "missing class must remain unresolved"
+        );
     }
 }
 
@@ -528,12 +574,16 @@ impl Scheduler {
 
     /// Returns true if all threads are terminated.
     pub fn all_terminated(&self) -> bool {
-        self.threads.iter().all(|t| t.state == ThreadState::Terminated)
+        self.threads
+            .iter()
+            .all(|t| t.state == ThreadState::Terminated)
     }
 
     /// Returns true if only the main thread (id=0) is alive.
     pub fn only_main_alive(&self) -> bool {
-        self.threads.iter().all(|t| t.id == 0 || t.state == ThreadState::Terminated)
+        self.threads
+            .iter()
+            .all(|t| t.id == 0 || t.state == ThreadState::Terminated)
     }
 
     /// Advance to the next runnable thread (round-robin).
@@ -553,7 +603,9 @@ impl Scheduler {
     /// Check if any Joining threads should be woken because their target terminated.
     pub fn wake_joiners(&mut self) {
         // Collect terminated thread IDs into a HashSet for O(1) lookup.
-        let terminated: HashSet<ThreadId> = self.threads.iter()
+        let terminated: HashSet<ThreadId> = self
+            .threads
+            .iter()
             .filter(|t| t.state == ThreadState::Terminated)
             .map(|t| t.id)
             .collect();
@@ -569,7 +621,10 @@ impl Scheduler {
 
     /// Return the number of runnable threads.
     pub fn runnable_count(&self) -> usize {
-        self.threads.iter().filter(|t| t.state == ThreadState::Runnable).count()
+        self.threads
+            .iter()
+            .filter(|t| t.state == ThreadState::Runnable)
+            .count()
     }
 
     /// Return the total number of threads.
@@ -597,7 +652,8 @@ impl Scheduler {
 
     /// Return a summary of non-terminated thread states (for error diagnostics).
     pub fn alive_thread_summary(&self) -> String {
-        self.threads.iter()
+        self.threads
+            .iter()
             .filter(|t| t.state != ThreadState::Terminated)
             .map(|t| format!("thread {}={:?}", t.id, t.state))
             .collect::<Vec<_>>()
@@ -684,6 +740,10 @@ pub struct Vm {
     class_initializer_cache: HashMap<String, bool>,
     /// Cached presence of concrete non-static interface methods.
     concrete_interface_method_cache: HashMap<String, bool>,
+    /// Cached inherited instance-field counts used to pre-size object field storage.
+    instance_field_capacity_cache: HashMap<String, usize>,
+    /// Cached `<clinit>` prerequisites keyed by class name.
+    class_init_prerequisite_cache: HashMap<String, ClassInitPrerequisites>,
     /// Cached subtype checks keyed by `(runtime_class, target_class)`.
     instanceof_cache: HashMap<(String, String), bool>,
     /// Cached ordered superinterfaces that must be initialized before a class.
@@ -709,16 +769,16 @@ impl Vm {
     /// Create an empty VM with a main thread.
     pub fn new() -> Self {
         Vm {
-            classes: HashMap::new(),
-            string_pool: HashMap::new(),
-            static_fields: HashMap::new(),
-            clinit_done: HashSet::new(),
-            clinit_owners: HashMap::new(),
-            clinit_pending: HashSet::new(),
-            clinit_running: HashSet::new(),
-            clinit_failed: HashSet::new(),
+            classes: HashMap::default(),
+            string_pool: HashMap::default(),
+            static_fields: HashMap::default(),
+            clinit_done: HashSet::default(),
+            clinit_owners: HashMap::default(),
+            clinit_pending: HashSet::default(),
+            clinit_running: HashSet::default(),
+            clinit_failed: HashSet::default(),
             sync_clinit_stack: Vec::new(),
-            class_pool: HashMap::new(),
+            class_pool: HashMap::default(),
             stdout_buffer: String::new(),
             stderr_buffer: String::new(),
             stdin_mode: StdioMode::Pipe,
@@ -731,25 +791,27 @@ impl Vm {
             system_stdin: None,
             system_classloader: None,
             scheduler: Scheduler::new(),
-            monitors: HashMap::new(),
-            method_owner_cache: HashMap::new(),
-            method_signature_cache: HashMap::new(),
-            methodref_constant_cache: HashMap::new(),
-            static_callsite_cache: HashMap::new(),
-            virtual_callsite_cache: HashMap::new(),
-            static_field_owner_cache: HashMap::new(),
-            fieldref_constant_cache: HashMap::new(),
-            method_exec_info_cache: HashMap::new(),
-            class_initializer_cache: HashMap::new(),
-            concrete_interface_method_cache: HashMap::new(),
-            instanceof_cache: HashMap::new(),
-            class_init_superinterface_cache: HashMap::new(),
-            resources: HashMap::new(),
-            resource_array_cache: HashMap::new(),
-            reflection_fields_cache: HashMap::new(),
-            reflection_methods_cache: HashMap::new(),
-            reflection_ctors_cache: HashMap::new(),
-            pending_resources: HashMap::new(),
+            monitors: HashMap::default(),
+            method_owner_cache: HashMap::default(),
+            method_signature_cache: HashMap::default(),
+            methodref_constant_cache: HashMap::default(),
+            static_callsite_cache: HashMap::default(),
+            virtual_callsite_cache: HashMap::default(),
+            static_field_owner_cache: HashMap::default(),
+            fieldref_constant_cache: HashMap::default(),
+            method_exec_info_cache: HashMap::default(),
+            class_initializer_cache: HashMap::default(),
+            concrete_interface_method_cache: HashMap::default(),
+            instance_field_capacity_cache: HashMap::default(),
+            class_init_prerequisite_cache: HashMap::default(),
+            instanceof_cache: HashMap::default(),
+            class_init_superinterface_cache: HashMap::default(),
+            resources: HashMap::default(),
+            resource_array_cache: HashMap::default(),
+            reflection_fields_cache: HashMap::default(),
+            reflection_methods_cache: HashMap::default(),
+            reflection_ctors_cache: HashMap::default(),
+            pending_resources: HashMap::default(),
             jar_archives: Vec::new(),
             profiler: VmProfiler::from_env(),
         }
@@ -779,6 +841,8 @@ impl Vm {
         self.invalidate_resolution_caches();
         self.class_initializer_cache.remove(name);
         self.concrete_interface_method_cache.remove(name);
+        self.instance_field_capacity_cache.remove(name);
+        self.class_init_prerequisite_cache.remove(name);
         self.class_init_superinterface_cache.remove(name);
         self.reflection_fields_cache.remove(name);
         self.reflection_methods_cache.remove(name);
@@ -786,9 +850,12 @@ impl Vm {
     }
 
     fn read_jar_entry(&mut self, entry: &JarEntryRef) -> Result<Vec<u8>, String> {
-        let archive = self.jar_archives.get_mut(entry.jar_id)
+        let archive = self
+            .jar_archives
+            .get_mut(entry.jar_id)
             .ok_or_else(|| format!("Missing JAR backing store for {}", entry.entry_name))?;
-        let mut file = archive.by_index(entry.entry_index)
+        let mut file = archive
+            .by_index(entry.entry_index)
             .map_err(|e| format!("ZIP entry error for {}: {e}", entry.entry_name))?;
         if file.name() != entry.entry_name {
             return Err(format!(
@@ -856,10 +923,17 @@ impl Vm {
         {
             let monitor = match self.monitors.get_mut(&id) {
                 Some(m) => m,
-                None => return Err("java/lang/IllegalMonitorStateException: monitor not entered".to_owned()),
+                None => {
+                    return Err(
+                        "java/lang/IllegalMonitorStateException: monitor not entered".to_owned(),
+                    )
+                }
             };
             if monitor.owner != Some(thread_id) {
-                return Err("java/lang/IllegalMonitorStateException: current thread is not owner".to_owned());
+                return Err(
+                    "java/lang/IllegalMonitorStateException: current thread is not owner"
+                        .to_owned(),
+                );
             }
             monitor.count -= 1;
             if monitor.count == 0 {
@@ -888,7 +962,9 @@ impl Vm {
         if let Some(wid) = wake_thread {
             // Check if the woken thread needs saved_monitor_count restored.
             let restore_count = self.scheduler.thread(wid).and_then(|t| {
-                if matches!(t.state, ThreadState::WaitingOnCondition(_)) && t.saved_monitor_count > 0 {
+                if matches!(t.state, ThreadState::WaitingOnCondition(_))
+                    && t.saved_monitor_count > 0
+                {
                     Some(t.saved_monitor_count)
                 } else {
                     None
@@ -922,10 +998,17 @@ impl Vm {
         let saved_count = {
             let monitor = match self.monitors.get_mut(&id) {
                 Some(m) => m,
-                None => return Err("java/lang/IllegalMonitorStateException: object not locked".to_owned()),
+                None => {
+                    return Err(
+                        "java/lang/IllegalMonitorStateException: object not locked".to_owned()
+                    )
+                }
             };
             if monitor.owner != Some(thread_id) {
-                return Err("java/lang/IllegalMonitorStateException: current thread is not owner".to_owned());
+                return Err(
+                    "java/lang/IllegalMonitorStateException: current thread is not owner"
+                        .to_owned(),
+                );
             }
             // Save reentrant count and fully release.
             let saved = monitor.count;
@@ -969,10 +1052,14 @@ impl Vm {
 
         let monitor = match self.monitors.get_mut(&id) {
             Some(m) => m,
-            None => return Err("java/lang/IllegalMonitorStateException: object not locked".to_owned()),
+            None => {
+                return Err("java/lang/IllegalMonitorStateException: object not locked".to_owned())
+            }
         };
         if monitor.owner != Some(thread_id) {
-            return Err("java/lang/IllegalMonitorStateException: current thread is not owner".to_owned());
+            return Err(
+                "java/lang/IllegalMonitorStateException: current thread is not owner".to_owned(),
+            );
         }
         // Move one waiter from wait_queue to entry_queue.
         if let Some(waiter_id) = monitor.wait_queue.pop_front() {
@@ -988,10 +1075,14 @@ impl Vm {
 
         let monitor = match self.monitors.get_mut(&id) {
             Some(m) => m,
-            None => return Err("java/lang/IllegalMonitorStateException: object not locked".to_owned()),
+            None => {
+                return Err("java/lang/IllegalMonitorStateException: object not locked".to_owned())
+            }
         };
         if monitor.owner != Some(thread_id) {
-            return Err("java/lang/IllegalMonitorStateException: current thread is not owner".to_owned());
+            return Err(
+                "java/lang/IllegalMonitorStateException: current thread is not owner".to_owned(),
+            );
         }
         // Move all waiters to entry_queue.
         while let Some(waiter_id) = monitor.wait_queue.pop_front() {
@@ -1015,14 +1106,17 @@ impl Vm {
             if monitor.owner.is_none() {
                 if let Some(waiting_id) = monitor.entry_queue.pop_front() {
                     monitor.owner = Some(waiting_id);
-                    let restore_count = self.scheduler.thread(waiting_id).and_then(|t| match t.state {
-                        ThreadState::WaitingOnCondition(wait_obj_id)
-                            if wait_obj_id == id && t.saved_monitor_count > 0 =>
-                        {
-                            Some(t.saved_monitor_count)
-                        }
-                        _ => None,
-                    });
+                    let restore_count =
+                        self.scheduler
+                            .thread(waiting_id)
+                            .and_then(|t| match t.state {
+                                ThreadState::WaitingOnCondition(wait_obj_id)
+                                    if wait_obj_id == id && t.saved_monitor_count > 0 =>
+                                {
+                                    Some(t.saved_monitor_count)
+                                }
+                                _ => None,
+                            });
                     monitor.count = restore_count.unwrap_or(1);
                     wake_thread = Some(waiting_id);
                 }
@@ -1041,16 +1135,28 @@ impl Vm {
     /// These exceptions are allocated directly by the VM without running Java
     /// constructors, so we must populate the fields that Throwable methods
     /// assume are always initialized.
-    pub(in crate::interpreter) fn init_vm_throwable(&mut self, exc: &JRef, detail_message: Option<JRef>) {
+    pub(in crate::interpreter) fn init_vm_throwable(
+        &mut self,
+        exc: &JRef,
+        detail_message: Option<JRef>,
+    ) {
         let stack_trace = JObject::new_array("[Ljava/lang/StackTraceElement;", vec![]);
         let mut obj = exc.borrow_mut();
-        obj.fields.insert("detailMessage".to_owned(), JValue::Ref(detail_message));
-        obj.fields.insert("cause".to_owned(), JValue::Ref(Some(Rc::clone(exc))));
-        obj.fields.insert("stackTrace".to_owned(), JValue::Ref(Some(stack_trace)));
-        obj.fields.insert("suppressedExceptions".to_owned(), JValue::Ref(None));
+        obj.fields
+            .insert("detailMessage".to_owned(), JValue::Ref(detail_message));
+        obj.fields
+            .insert("cause".to_owned(), JValue::Ref(Some(Rc::clone(exc))));
+        obj.fields
+            .insert("stackTrace".to_owned(), JValue::Ref(Some(stack_trace)));
+        obj.fields
+            .insert("suppressedExceptions".to_owned(), JValue::Ref(None));
     }
 
-    pub(in crate::interpreter) fn new_vm_exception(&mut self, class_name: &str, detail_message: Option<JRef>) -> JRef {
+    pub(in crate::interpreter) fn new_vm_exception(
+        &mut self,
+        class_name: &str,
+        detail_message: Option<JRef>,
+    ) -> JRef {
         let exc = JObject::new(class_name);
         self.init_vm_throwable(&exc, detail_message);
         exc
@@ -1085,7 +1191,10 @@ impl Vm {
 
     /// Spawn a new green thread that will execute the `run()` method of the
     /// given java.lang.Thread object. Returns the new thread's ID.
-    pub(in crate::interpreter) fn thread_start(&mut self, thread_obj: JRef) -> Result<ThreadId, String> {
+    pub(in crate::interpreter) fn thread_start(
+        &mut self,
+        thread_obj: JRef,
+    ) -> Result<ThreadId, String> {
         // Reject double-start: check if a ThreadContext already exists for this object.
         if self.find_thread_id_by_object(&thread_obj).is_some() {
             return Err("java/lang/IllegalThreadStateException: thread already started".to_owned());
@@ -1095,12 +1204,15 @@ impl Vm {
 
         // Build a frame for `run()V` on the Thread object.
         let class_name = thread_obj.borrow().class_name.clone();
-        let fi = self.build_virtual_frame_inner(
-            thread_obj, &class_name, "run", "()V", vec![], false,
-        )?;
+        let fi =
+            self.build_virtual_frame_inner(thread_obj, &class_name, "run", "()V", vec![], false)?;
         match fi {
             Some(frame_info) => {
-                self.scheduler.thread_mut(id).unwrap().call_stack.push(frame_info);
+                self.scheduler
+                    .thread_mut(id)
+                    .unwrap()
+                    .call_stack
+                    .push(frame_info);
             }
             None => {
                 // run() is not found in bytecode — this shouldn't happen for Thread
@@ -1135,7 +1247,10 @@ impl Vm {
         {
             let mut b = obj.borrow_mut();
             b.fields.insert("tid".to_owned(), JValue::Int(0));
-            b.fields.insert("name".to_owned(), JValue::Ref(Some(self.intern_string("main"))));
+            b.fields.insert(
+                "name".to_owned(),
+                JValue::Ref(Some(self.intern_string("main"))),
+            );
             b.fields.insert("priority".to_owned(), JValue::Int(5));
             b.fields.insert("daemon".to_owned(), JValue::Int(0));
         }
@@ -1144,14 +1259,18 @@ impl Vm {
     }
 
     /// Find the thread ID associated with a java.lang.Thread object.
-    pub(in crate::interpreter) fn find_thread_id_by_object(&self, thread_obj: &JRef) -> Option<ThreadId> {
+    pub(in crate::interpreter) fn find_thread_id_by_object(
+        &self,
+        thread_obj: &JRef,
+    ) -> Option<ThreadId> {
         self.scheduler.find_thread_id_by_object(thread_obj)
     }
 
     /// Check if a thread (identified by its java.lang.Thread object) is alive.
     pub(in crate::interpreter) fn thread_is_alive(&self, thread_obj: &JRef) -> bool {
         if let Some(id) = self.find_thread_id_by_object(thread_obj) {
-            self.scheduler.thread(id)
+            self.scheduler
+                .thread(id)
                 .map(|t| t.state != ThreadState::Terminated)
                 .unwrap_or(false)
         } else {
@@ -1161,7 +1280,10 @@ impl Vm {
 
     /// Register a pre-parsed class file (always stored as `Ready`).
     pub fn load_class(&mut self, class_file: ClassFile) {
-        let name = class_file.constant_pool.class_name(class_file.this_class).to_owned();
+        let name = class_file
+            .constant_pool
+            .class_name(class_file.this_class)
+            .to_owned();
         self.invalidate_class_caches(&name);
         self.classes.insert(name, LazyClass::Ready(class_file));
     }
@@ -1195,17 +1317,22 @@ impl Vm {
     pub fn load_jar(&mut self, jar_bytes: &[u8]) -> Result<usize, String> {
         use std::io::Cursor;
         let reader = Cursor::new(jar_bytes.to_vec());
-        let mut archive = zip::ZipArchive::new(reader)
-            .map_err(|e| format!("Invalid JAR/ZIP: {e}"))?;
+        let mut archive =
+            zip::ZipArchive::new(reader).map_err(|e| format!("Invalid JAR/ZIP: {e}"))?;
         let jar_id = self.jar_archives.len();
         let mut class_entries = Vec::new();
         let mut resource_entries = Vec::new();
         let mut count = 0;
         for i in 0..archive.len() {
-            let file = archive.by_index(i)
+            let file = archive
+                .by_index(i)
                 .map_err(|e| format!("ZIP entry error: {e}"))?;
             let name = file.name().to_owned();
-            let entry = JarEntryRef { jar_id, entry_index: i, entry_name: name.clone() };
+            let entry = JarEntryRef {
+                jar_id,
+                entry_index: i,
+                entry_name: name.clone(),
+            };
             if let Some(class_name) = name.strip_suffix(".class") {
                 if !class_name.is_empty() {
                     class_entries.push((class_name.to_owned(), entry));
@@ -1241,7 +1368,9 @@ impl Vm {
         }
         let pending = self.classes.remove(name);
         let result = match pending {
-            Some(LazyClass::PendingBytes(bytes)) => class_file::parse(&bytes).map_err(|e| e.to_string()),
+            Some(LazyClass::PendingBytes(bytes)) => {
+                class_file::parse(&bytes).map_err(|e| e.to_string())
+            }
             Some(LazyClass::PendingJarEntry(entry)) => match self.read_jar_entry(&entry) {
                 Ok(bytes) => match class_file::parse(&bytes) {
                     Ok(cf) => {
@@ -1269,10 +1398,13 @@ impl Vm {
             None => return,
         };
         match result {
-            Ok(cf) => { self.classes.insert(name.to_owned(), LazyClass::Ready(cf)); }
+            Ok(cf) => {
+                self.classes.insert(name.to_owned(), LazyClass::Ready(cf));
+            }
             Err(e) => {
                 eprintln!("Warning: failed to parse class '{name}': {e}");
-                self.classes.insert(name.to_owned(), LazyClass::ParseError(e));
+                self.classes
+                    .insert(name.to_owned(), LazyClass::ParseError(e));
             }
         }
     }
@@ -1318,7 +1450,9 @@ impl Vm {
     pub(in crate::interpreter) fn get_class(&self, name: &str) -> Option<&ClassFile> {
         match self.classes.get(name)? {
             LazyClass::Ready(cf) => Some(cf),
-            LazyClass::PendingBytes(_) | LazyClass::PendingJarEntry(_) | LazyClass::ParseError(_) => None,
+            LazyClass::PendingBytes(_)
+            | LazyClass::PendingJarEntry(_)
+            | LazyClass::ParseError(_) => None,
         }
     }
 
@@ -1494,12 +1628,14 @@ impl Vm {
                     }
                 }
                 let next = if depth < 8 {
-                    b.fields.get("cause")
+                    b.fields
+                        .get("cause")
                         .and_then(|v| v.as_ref())
                         .filter(|cause| !Rc::ptr_eq(cause, r))
                         .cloned()
                         .or_else(|| {
-                            b.fields.get("target")
+                            b.fields
+                                .get("target")
                                 .and_then(|v| v.as_ref())
                                 .filter(|target| !Rc::ptr_eq(target, r))
                                 .cloned()
@@ -1521,7 +1657,11 @@ impl Vm {
     }
 
     fn pending_exception_err(&self) -> Option<String> {
-        self.scheduler.current_thread().pending_exception.as_ref().map(|r| self.format_exception_ref(r))
+        self.scheduler
+            .current_thread()
+            .pending_exception
+            .as_ref()
+            .map(|r| self.format_exception_ref(r))
     }
 
     /// Return (or lazily create) the singleton system ClassLoader instance.
@@ -1537,7 +1677,8 @@ impl Vm {
     /// Set `pending_exception` to a `NoClassDefFoundError` for `name`.
     /// `name` should be the internal (slash-separated) class name.
     pub(in crate::interpreter) fn throw_no_class_def_found(&mut self, name: &str) {
-        let exc = self.new_vm_exception_message("java/lang/NoClassDefFoundError", name.replace('/', "."));
+        let exc =
+            self.new_vm_exception_message("java/lang/NoClassDefFoundError", name.replace('/', "."));
         *self.pending_exception_mut() = Some(exc);
     }
 
@@ -1564,7 +1705,9 @@ impl Vm {
     pub(in crate::interpreter) fn throw_runtime_exception(&mut self, detail: &str) {
         let exc = JObject::new("java/lang/RuntimeException");
         let msg = self.intern_string(detail.to_owned());
-        exc.borrow_mut().fields.insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
+        exc.borrow_mut()
+            .fields
+            .insert("detailMessage".to_owned(), JValue::Ref(Some(msg)));
         *self.pending_exception_mut() = Some(exc);
     }
 
@@ -1621,7 +1764,9 @@ impl Vm {
         } else {
             None
         };
-        let iface_names: Vec<String> = class.interfaces.iter()
+        let iface_names: Vec<String> = class
+            .interfaces
+            .iter()
             .map(|&idx| class.constant_pool.class_name(idx).to_owned())
             .collect();
         // borrow on `class` ends here
@@ -1666,7 +1811,10 @@ impl Vm {
                 && class.constant_pool.utf8(m.descriptor_index) == descriptor
         })?;
         let class_name_out = class.constant_pool.class_name(class.this_class).to_owned();
-        let descriptor_out = class.constant_pool.utf8(class.methods[method_idx].descriptor_index).to_owned();
+        let descriptor_out = class
+            .constant_pool
+            .utf8(class.methods[method_idx].descriptor_index)
+            .to_owned();
         let access_flags = class.methods[method_idx].access_flags;
         let (max_locals, has_code, code, exception_table) =
             if let Some(ca) = class.methods[method_idx].code() {
@@ -1680,13 +1828,17 @@ impl Vm {
                 (0, false, Rc::new(Vec::new()), Rc::new(Vec::new()))
             };
         let cp = Rc::clone(&class.constant_pool.entries);
-        let bootstrap_methods = class.attributes.iter().find_map(|a| {
-            if let Attribute::BootstrapMethods(bms) = a {
-                Some(Rc::new(bms.clone()))
-            } else {
-                None
-            }
-        }).unwrap_or_else(|| Rc::new(Vec::new()));
+        let bootstrap_methods = class
+            .attributes
+            .iter()
+            .find_map(|a| {
+                if let Attribute::BootstrapMethods(bms) = a {
+                    Some(Rc::new(bms.clone()))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| Rc::new(Vec::new()));
         let (param_tokens, _) = Self::parse_method_descriptor_tokens(&descriptor_out);
         let param_slot_count = param_tokens
             .iter()
@@ -1718,7 +1870,11 @@ impl Vm {
         method_name: &str,
         descriptor: &str,
     ) -> Option<String> {
-        let cache_key = (class_name.to_owned(), method_name.to_owned(), descriptor.to_owned());
+        let cache_key = (
+            class_name.to_owned(),
+            method_name.to_owned(),
+            descriptor.to_owned(),
+        );
         if let Some(cached) = self.method_owner_cache.get(&cache_key) {
             return cached.clone();
         }
@@ -1752,7 +1908,9 @@ impl Vm {
         } else {
             None
         };
-        let iface_names: Vec<String> = class.interfaces.iter()
+        let iface_names: Vec<String> = class
+            .interfaces
+            .iter()
             .map(|&idx| class.constant_pool.class_name(idx).to_owned())
             .collect();
         // borrow on `class` ends here
@@ -1777,7 +1935,8 @@ impl Vm {
         method_name: &str,
         descriptor: &str,
     ) -> bool {
-        self.find_method_owner(class_name, method_name, descriptor).is_some()
+        self.find_method_owner(class_name, method_name, descriptor)
+            .is_some()
     }
 
     /// Resolve the actual descriptor and access flags for a call site.
@@ -1807,7 +1966,8 @@ impl Vm {
         }
         let flags = flags?;
         let result = (resolved_descriptor, flags);
-        self.method_signature_cache.insert(cache_key, result.clone());
+        self.method_signature_cache
+            .insert(cache_key, result.clone());
         Some(result)
     }
 
@@ -1832,7 +1992,9 @@ impl Vm {
         for m in &class.methods {
             let n = class.constant_pool.utf8(m.name_index);
             let d = class.constant_pool.utf8(m.descriptor_index);
-            if n != method_name { continue; }
+            if n != method_name {
+                continue;
+            }
             let d_param = d.split(')').next().unwrap_or("(");
             if d_param == param_part {
                 return Some(d.to_owned());
@@ -1848,21 +2010,36 @@ impl Vm {
                 }
             }
         }
-        if arg_count_match.is_some() { return arg_count_match; }
-        if varargs_match.is_some() { return varargs_match; }
-        let super_name = self.get_class(class_name)
+        if arg_count_match.is_some() {
+            return arg_count_match;
+        }
+        if varargs_match.is_some() {
+            return varargs_match;
+        }
+        let super_name = self
+            .get_class(class_name)
             .filter(|c| c.super_class != 0)
             .map(|c| c.constant_pool.class_name(c.super_class).to_owned());
-        let iface_names: Vec<String> = self.get_class(class_name)
-            .map(|c| c.interfaces.iter().map(|&idx| c.constant_pool.class_name(idx).to_owned()).collect())
+        let iface_names: Vec<String> = self
+            .get_class(class_name)
+            .map(|c| {
+                c.interfaces
+                    .iter()
+                    .map(|&idx| c.constant_pool.class_name(idx).to_owned())
+                    .collect()
+            })
             .unwrap_or_default();
         if let Some(super_name) = super_name {
-            if let Some(result) = self.find_method_real_descriptor(&super_name, method_name, descriptor) {
+            if let Some(result) =
+                self.find_method_real_descriptor(&super_name, method_name, descriptor)
+            {
                 return Some(result);
             }
         }
         for iface_name in iface_names {
-            if let Some(result) = self.find_method_real_descriptor(&iface_name, method_name, descriptor) {
+            if let Some(result) =
+                self.find_method_real_descriptor(&iface_name, method_name, descriptor)
+            {
                 return Some(result);
             }
         }
@@ -1888,6 +2065,33 @@ impl Vm {
         self.class_initializer_cache
             .insert(class_name.to_owned(), has_clinit);
         has_clinit
+    }
+
+    pub(super) fn instance_field_capacity(&mut self, class_name: &str) -> usize {
+        if let Some(cached) = self.instance_field_capacity_cache.get(class_name) {
+            return *cached;
+        }
+        self.ensure_class_ready(class_name);
+        let capacity = match self.get_class(class_name) {
+            Some(class) => {
+                let own_fields = class
+                    .fields
+                    .iter()
+                    .filter(|field| field.access_flags & 0x0008 == 0)
+                    .count();
+                let super_fields = if class.super_class != 0 {
+                    let super_name = class.constant_pool.class_name(class.super_class).to_owned();
+                    self.instance_field_capacity(&super_name)
+                } else {
+                    0
+                };
+                own_fields + super_fields
+            }
+            None => 0,
+        };
+        self.instance_field_capacity_cache
+            .insert(class_name.to_owned(), capacity);
+        capacity
     }
 
     fn declares_concrete_interface_method(&mut self, class_name: &str) -> bool {
@@ -1961,7 +2165,7 @@ impl Vm {
             .iter()
             .map(|&idx| class.constant_pool.class_name(idx).to_owned())
             .collect();
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut ordered = Vec::new();
         for iface in direct_ifaces {
             self.collect_class_init_superinterfaces(&iface, &mut seen, &mut ordered);
@@ -2019,16 +2223,12 @@ impl Vm {
             .map(|&idx| class.constant_pool.class_name(idx).to_owned())
             .collect();
         for iface_name in iface_names {
-            if let Some(owner) =
-                self.find_static_field_owner(&iface_name, field_name, descriptor)
-            {
+            if let Some(owner) = self.find_static_field_owner(&iface_name, field_name, descriptor) {
                 return Some(owner);
             }
         }
         if let Some(super_name) = super_name {
-            if let Some(owner) =
-                self.find_static_field_owner(&super_name, field_name, descriptor)
-            {
+            if let Some(owner) = self.find_static_field_owner(&super_name, field_name, descriptor) {
                 return Some(owner);
             }
         }
@@ -2128,10 +2328,7 @@ impl Vm {
         }
     }
 
-    pub(crate) fn unregister_thread_clinit_frames(
-        &mut self,
-        call_stack: &[trampoline::FrameInfo],
-    ) {
+    pub(crate) fn unregister_thread_clinit_frames(&mut self, call_stack: &[trampoline::FrameInfo]) {
         for fi in call_stack.iter().rev() {
             self.pop_thread_clinit_frame(fi);
         }
@@ -2152,13 +2349,28 @@ impl Vm {
             .any(|active| active == class_name)
     }
 
-    fn class_init_prerequisites(&mut self, class_name: &str) -> (Option<String>, Vec<String>) {
+    fn class_init_prerequisites(&mut self, class_name: &str) -> ClassInitPrerequisites {
+        if let Some(cached) = self.class_init_prerequisite_cache.get(class_name) {
+            return cached.clone();
+        }
         self.ensure_class_ready(class_name);
         let Some(class) = self.get_class(class_name) else {
-            return (None, Vec::new());
+            let prerequisites = ClassInitPrerequisites {
+                super_name: None,
+                interface_names: Rc::new(Vec::new()),
+            };
+            self.class_init_prerequisite_cache
+                .insert(class_name.to_owned(), prerequisites.clone());
+            return prerequisites;
         };
         if (class.access_flags & 0x0200) != 0 {
-            return (None, Vec::new());
+            let prerequisites = ClassInitPrerequisites {
+                super_name: None,
+                interface_names: Rc::new(Vec::new()),
+            };
+            self.class_init_prerequisite_cache
+                .insert(class_name.to_owned(), prerequisites.clone());
+            return prerequisites;
         }
         let super_name = if class.super_class != 0 {
             let s = class.constant_pool.class_name(class.super_class).to_owned();
@@ -2166,8 +2378,13 @@ impl Vm {
         } else {
             None
         };
-        let iface_names = self.class_init_superinterfaces(class_name);
-        (super_name, iface_names)
+        let prerequisites = ClassInitPrerequisites {
+            super_name,
+            interface_names: Rc::new(self.class_init_superinterfaces(class_name)),
+        };
+        self.class_init_prerequisite_cache
+            .insert(class_name.to_owned(), prerequisites.clone());
+        prerequisites
     }
 
     fn class_init_depends_on(
@@ -2179,19 +2396,23 @@ impl Vm {
         if !visited.insert(class_name.to_owned()) {
             return false;
         }
-        let (super_name, iface_names) = self.class_init_prerequisites(class_name);
-        if super_name.as_deref() == Some(prerequisite) {
+        let prerequisites = self.class_init_prerequisites(class_name);
+        if prerequisites.super_name.as_deref() == Some(prerequisite) {
             return true;
         }
-        if iface_names.iter().any(|iface| iface == prerequisite) {
+        if prerequisites
+            .interface_names
+            .iter()
+            .any(|iface| iface == prerequisite)
+        {
             return true;
         }
-        if let Some(super_name) = super_name {
+        if let Some(super_name) = prerequisites.super_name {
             if self.class_init_depends_on(&super_name, prerequisite, visited) {
                 return true;
             }
         }
-        for iface in iface_names {
+        for iface in prerequisites.interface_names.iter() {
             if self.class_init_depends_on(&iface, prerequisite, visited) {
                 return true;
             }
@@ -2209,7 +2430,7 @@ impl Vm {
                 .cloned(),
         );
         active.into_iter().any(|active_class| {
-            let mut visited = HashSet::new();
+            let mut visited = HashSet::default();
             self.class_init_depends_on(class_name, &active_class, &mut visited)
         })
     }
@@ -2239,14 +2460,14 @@ impl Vm {
         self.begin_class_init(class_name);
         self.clinit_pending.insert(class_name.to_owned());
 
-        let (super_name, iface_names) = self.class_init_prerequisites(class_name);
-        if let Some(s) = super_name {
+        let prerequisites = self.class_init_prerequisites(class_name);
+        if let Some(s) = prerequisites.super_name {
             if let Err(err) = self.ensure_class_init(&s) {
                 self.mark_class_init_failed(class_name);
                 return Err(err);
             }
         }
-        for iface in iface_names {
+        for iface in prerequisites.interface_names.iter() {
             if let Err(err) = self.ensure_class_init(&iface) {
                 self.mark_class_init_failed(class_name);
                 return Err(err);
@@ -2262,9 +2483,12 @@ impl Vm {
         self.clinit_running.insert(class_name.to_owned());
         if let Err(e) = self.invoke_static(class_name, "<clinit>", "()V", vec![]) {
             let cause = self.pending_exception_mut().take();
-            let eiie = self.new_vm_exception_message("java/lang/ExceptionInInitializerError", e.clone());
+            let eiie =
+                self.new_vm_exception_message("java/lang/ExceptionInInitializerError", e.clone());
             if let Some(c) = cause {
-                eiie.borrow_mut().fields.insert("cause".to_owned(), JValue::Ref(Some(c)));
+                eiie.borrow_mut()
+                    .fields
+                    .insert("cause".to_owned(), JValue::Ref(Some(c)));
             }
             *self.pending_exception_mut() = Some(eiie);
             self.mark_class_init_failed(class_name);
@@ -2274,7 +2498,10 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn ensure_class_init_or_schedule(&mut self, class_name: &str) -> Result<bool, String> {
+    pub(crate) fn ensure_class_init_or_schedule(
+        &mut self,
+        class_name: &str,
+    ) -> Result<bool, String> {
         if self.clinit_done.contains(class_name) {
             return Ok(false);
         }
@@ -2299,8 +2526,8 @@ impl Vm {
             }
         }
 
-        let (super_name, iface_names) = self.class_init_prerequisites(class_name);
-        if let Some(s) = super_name {
+        let prerequisites = self.class_init_prerequisites(class_name);
+        if let Some(s) = prerequisites.super_name {
             match self.ensure_class_init_or_schedule(&s) {
                 Ok(should_yield) => {
                     if should_yield || !self.clinit_done.contains(&s) {
@@ -2316,10 +2543,10 @@ impl Vm {
                 }
             }
         }
-        for iface in iface_names {
+        for iface in prerequisites.interface_names.iter() {
             match self.ensure_class_init_or_schedule(&iface) {
                 Ok(should_yield) => {
-                    if should_yield || !self.clinit_done.contains(&iface) {
+                    if should_yield || !self.clinit_done.contains(iface.as_str()) {
                         if self.current_stack_is_in_class_init_prerequisite_of(class_name) {
                             return Ok(false);
                         }
@@ -2354,7 +2581,9 @@ impl Vm {
                         e.clone(),
                     );
                     if let Some(c) = cause {
-                        eiie.borrow_mut().fields.insert("cause".to_owned(), JValue::Ref(Some(c)));
+                        eiie.borrow_mut()
+                            .fields
+                            .insert("cause".to_owned(), JValue::Ref(Some(c)));
                     }
                     *self.pending_exception_mut() = Some(eiie);
                     self.mark_class_init_failed(class_name);
@@ -2374,7 +2603,12 @@ impl Vm {
     fn create_multi_array(&self, desc: &str, sizes: &[usize], depth: usize) -> JRef {
         let count = sizes[depth];
         if depth + 1 >= sizes.len() {
-            let elem = if desc.ends_with("[I") || desc.ends_with("[B") || desc.ends_with("[C") || desc.ends_with("[S") || desc.ends_with("[Z") {
+            let elem = if desc.ends_with("[I")
+                || desc.ends_with("[B")
+                || desc.ends_with("[C")
+                || desc.ends_with("[S")
+                || desc.ends_with("[Z")
+            {
                 JValue::Int(0)
             } else if desc.ends_with("[J") {
                 JValue::Long(0)
@@ -2408,8 +2642,12 @@ impl Vm {
     }
 
     fn is_instance_of_uncached(&mut self, runtime_class: &str, target_class: &str) -> bool {
-        if runtime_class == target_class { return true; }
-        if target_class == "java/lang/Object" { return true; }
+        if runtime_class == target_class {
+            return true;
+        }
+        if target_class == "java/lang/Object" {
+            return true;
+        }
 
         if runtime_class.starts_with('[') {
             if target_class == "java/lang/Cloneable" || target_class == "java/io/Serializable" {
@@ -2430,7 +2668,9 @@ impl Vm {
 
         self.ensure_class_ready(runtime_class);
         let (iface_names, super_name) = if let Some(class) = self.get_class(runtime_class) {
-            let ifaces: Vec<String> = class.interfaces.iter()
+            let ifaces: Vec<String> = class
+                .interfaces
+                .iter()
                 .map(|&idx| class.constant_pool.class_name(idx).to_owned())
                 .collect();
             let sup = if class.super_class != 0 {
@@ -2443,7 +2683,9 @@ impl Vm {
             return false;
         };
         for iface_name in &iface_names {
-            if self.is_instance_of(iface_name, target_class) { return true; }
+            if self.is_instance_of(iface_name, target_class) {
+                return true;
+            }
         }
         if let Some(super_name) = super_name {
             if self.is_instance_of(&super_name, target_class) {
