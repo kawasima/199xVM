@@ -12,6 +12,7 @@ js-sys = "0.3"
 regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+rustc-hash = { version = "2", optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
@@ -26,7 +27,8 @@ version = "0.1"
 optional = true
 
 [features]
-default = ["console_error_panic_hook"]
+default = ["console_error_panic_hook", "fast-hash"]
+fast-hash = ["dep:rustc-hash"]
 
 [profile.release]
 opt-level = "s"

@@ -4,11 +4,10 @@ use std::rc::Rc;
 use crate::class_file::{BootstrapMethod, ConstantPoolEntry};
 use crate::heap::{JObject, JRef, JValue, NativePayload};
 
-use super::Vm;
 use super::descriptors::*;
 use super::frame::*;
 use super::trampoline::FrameInfo;
-
+use super::{ResolvedStaticCallSite, Vm};
 
 impl Vm {
     // -----------------------------------------------------------------------
@@ -19,43 +18,53 @@ impl Vm {
     // Returns Ok(None) always (the result is either pushed inline or deferred).
     // -----------------------------------------------------------------------
 
+    pub(super) fn dispatch_static_from_site(
+        &mut self,
+        site: &ResolvedStaticCallSite,
+        frame: &mut Frame,
+    ) -> Result<Option<JValue>, String> {
+        let mut args = pop_args(frame, site.call_arg_count);
+        if site.empty_varargs && args.len() < site.expected_arg_count {
+            args.push(JValue::Ref(Some(JObject::new_array(
+                "[Ljava/lang/Object;",
+                vec![],
+            ))));
+        }
+        if site.method_info.has_code {
+            let fi = self.build_static_frame_from_info(
+                site.method_info.as_ref(),
+                args,
+                site.push_return,
+                false,
+            );
+            *self.pending_frame_mut() = Some(fi);
+        } else {
+            let result = self.invoke_static_native_from_info(
+                site.method_info.as_ref(),
+                &site.method_name,
+                args,
+            )?;
+            if !matches!(result, JValue::Void) {
+                frame.stack.push(result);
+            }
+        }
+        Ok(None)
+    }
+
     pub(super) fn dispatch_static(
         &mut self,
         cp: &[ConstantPoolEntry],
         idx: u16,
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
+        if let Some(site) = self.resolve_static_callsite_cached(cp, idx) {
+            return self.dispatch_static_from_site(site.as_ref(), frame);
+        }
         let member = self.resolve_methodref_cached(cp, idx);
         let class_name = member.class_name.as_str();
         let method_name = member.member_name.as_str();
         let descriptor = member.descriptor.as_str();
         let args = pop_args(frame, member.arg_count);
-
-        if let Some(site) = self.resolve_static_callsite_cached(cp, idx) {
-            let mut args = args;
-            if site.empty_varargs && args.len() < site.expected_arg_count {
-                args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
-            }
-            if site.method_info.has_code {
-                let fi = self.build_static_frame_from_info(
-                    site.method_info.as_ref(),
-                    args,
-                    site.push_return,
-                    false,
-                );
-                *self.pending_frame_mut() = Some(fi);
-            } else {
-                let result = self.invoke_static_native_from_info(
-                    site.method_info.as_ref(),
-                    &site.method_name,
-                    args,
-                )?;
-                if !matches!(result, JValue::Void) {
-                    frame.stack.push(result);
-                }
-            }
-            return Ok(None);
-        }
 
         let result = self.invoke_static(class_name, method_name, descriptor, args)?;
         if !matches!(result, JValue::Void) {
@@ -170,7 +179,14 @@ impl Vm {
             }
         }
 
-        match self.build_virtual_frame_inner(r.clone(), class_name, method_name, descriptor, args.clone(), push_return)? {
+        match self.build_virtual_frame_inner(
+            r.clone(),
+            class_name,
+            method_name,
+            descriptor,
+            args.clone(),
+            push_return,
+        )? {
             Some(fi) => {
                 *self.pending_frame_mut() = Some(fi);
                 Ok(None)
@@ -180,7 +196,13 @@ impl Vm {
                 // (instead of the recursive invoke_virtual path which uses
                 // run_trampoline — the non-time-sliced variant that ignores
                 // thread state changes like WaitingOnCondition).
-                if let Some(fi) = self.try_build_lambda_sam_frame(&r, method_name, descriptor, args.clone(), push_return)? {
+                if let Some(fi) = self.try_build_lambda_sam_frame(
+                    &r,
+                    method_name,
+                    descriptor,
+                    args.clone(),
+                    push_return,
+                )? {
                     *self.pending_frame_mut() = Some(fi);
                     return Ok(None);
                 }
@@ -257,14 +279,18 @@ impl Vm {
         let descriptor = member.descriptor.as_str();
         let args = pop_args(frame, member.arg_count);
 
-        let is_static = self.find_method_flags(class_name, method_name, descriptor)
+        let is_static = self
+            .find_method_flags(class_name, method_name, descriptor)
             .map(|flags| flags & 0x0008 != 0)
             .unwrap_or(false);
         if is_static {
             if let Some(site) = self.resolve_static_callsite_cached(cp, idx) {
                 let mut args = args;
                 if site.empty_varargs && args.len() < site.expected_arg_count {
-                    args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
+                    args.push(JValue::Ref(Some(JObject::new_array(
+                        "[Ljava/lang/Object;",
+                        vec![],
+                    ))));
                 }
                 if site.method_info.has_code {
                     let fi = self.build_static_frame_from_info(
@@ -329,14 +355,23 @@ impl Vm {
             let borrow = r.borrow();
             match &borrow.native {
                 NativePayload::BytecodeLambda {
-                    sam_method, sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured,
+                    sam_method,
+                    sam_desc,
+                    impl_class,
+                    impl_method,
+                    impl_desc,
+                    ref_kind,
+                    captured,
                 } => {
                     let sam_arg_count = count_args(sam_desc);
                     let call_arg_count = count_args(descriptor);
                     if method_name == sam_method.as_str() && call_arg_count == sam_arg_count {
                         Some((
-                            impl_class.clone(), impl_method.clone(), impl_desc.clone(),
-                            *ref_kind, captured.clone(),
+                            impl_class.clone(),
+                            impl_method.clone(),
+                            impl_desc.clone(),
+                            *ref_kind,
+                            captured.clone(),
                         ))
                     } else {
                         None
@@ -361,12 +396,17 @@ impl Vm {
             }
             let recv = full_args.remove(0);
             match recv {
-                JValue::Ref(Some(recv_ref)) => {
-                    self.build_virtual_frame_inner(
-                        recv_ref, &impl_class, &impl_method, &impl_desc, full_args, push_return,
-                    )
-                }
-                _ => Err(format!("Lambda SAM dispatch: expected Ref for receiver, got {recv:?}")),
+                JValue::Ref(Some(recv_ref)) => self.build_virtual_frame_inner(
+                    recv_ref,
+                    &impl_class,
+                    &impl_method,
+                    &impl_desc,
+                    full_args,
+                    push_return,
+                ),
+                _ => Err(format!(
+                    "Lambda SAM dispatch: expected Ref for receiver, got {recv:?}"
+                )),
             }
         } else if ref_kind == 8 {
             // newinvokespecial — constructor reference (e.g. Age::new).
@@ -375,7 +415,13 @@ impl Vm {
         } else {
             // Static dispatch.
             self.ensure_class_init(&impl_class)?;
-            self.build_static_frame(&impl_class, &impl_method, &impl_desc, full_args, push_return)
+            self.build_static_frame(
+                &impl_class,
+                &impl_method,
+                &impl_desc,
+                full_args,
+                push_return,
+            )
         }?;
 
         // Attach return-type adaptation info so the trampoline can box
@@ -397,44 +443,63 @@ impl Vm {
         bootstrap_methods: &[BootstrapMethod],
     ) -> Result<JValue, String> {
         let (bm_index, nat_index) = match &cp[idx as usize] {
-            ConstantPoolEntry::InvokeDynamic { bootstrap_method_attr_index, name_and_type_index } => {
-                (*bootstrap_method_attr_index, *name_and_type_index)
+            ConstantPoolEntry::InvokeDynamic {
+                bootstrap_method_attr_index,
+                name_and_type_index,
+            } => (*bootstrap_method_attr_index, *name_and_type_index),
+            other => {
+                return Err(format!(
+                    "Expected InvokeDynamic at cp[{idx}], got {other:?}"
+                ))
             }
-            other => return Err(format!("Expected InvokeDynamic at cp[{idx}], got {other:?}")),
         };
 
         let (method_name, descriptor) = match &cp[nat_index as usize] {
-            ConstantPoolEntry::NameAndType { name_index, descriptor_index } => {
-                let n = match &cp[*name_index as usize] { ConstantPoolEntry::Utf8(s) => s.clone(), _ => String::new() };
-                let d = match &cp[*descriptor_index as usize] { ConstantPoolEntry::Utf8(s) => s.clone(), _ => String::new() };
+            ConstantPoolEntry::NameAndType {
+                name_index,
+                descriptor_index,
+            } => {
+                let n = match &cp[*name_index as usize] {
+                    ConstantPoolEntry::Utf8(s) => s.clone(),
+                    _ => String::new(),
+                };
+                let d = match &cp[*descriptor_index as usize] {
+                    ConstantPoolEntry::Utf8(s) => s.clone(),
+                    _ => String::new(),
+                };
                 (n, d)
             }
-            other => return Err(format!("Expected NameAndType at cp[{nat_index}], got {other:?}")),
+            other => {
+                return Err(format!(
+                    "Expected NameAndType at cp[{nat_index}], got {other:?}"
+                ))
+            }
         };
 
-        let bm = bootstrap_methods.get(bm_index as usize)
-            .ok_or_else(|| format!(
+        let bm = bootstrap_methods.get(bm_index as usize).ok_or_else(|| {
+            format!(
                 "Invalid bootstrap method index {bm_index} ({} bootstrap methods available)",
                 bootstrap_methods.len()
-            ))?;
+            )
+        })?;
         let bm_ref_idx = bm.bootstrap_method_ref;
         let bm_class = match &cp[bm_ref_idx as usize] {
-            ConstantPoolEntry::MethodHandle { reference_index, .. } => {
-                match &cp[*reference_index as usize] {
-                    ConstantPoolEntry::Methodref { class_index, .. } => {
-                        match &cp[*class_index as usize] {
-                            ConstantPoolEntry::Class { name_index } => {
-                                match &cp[*name_index as usize] {
-                                    ConstantPoolEntry::Utf8(s) => s.clone(),
-                                    _ => String::new(),
-                                }
+            ConstantPoolEntry::MethodHandle {
+                reference_index, ..
+            } => match &cp[*reference_index as usize] {
+                ConstantPoolEntry::Methodref { class_index, .. } => {
+                    match &cp[*class_index as usize] {
+                        ConstantPoolEntry::Class { name_index } => {
+                            match &cp[*name_index as usize] {
+                                ConstantPoolEntry::Utf8(s) => s.clone(),
+                                _ => String::new(),
                             }
-                            _ => String::new(),
                         }
+                        _ => String::new(),
                     }
-                    _ => String::new(),
                 }
-            }
+                _ => String::new(),
+            },
             _ => String::new(),
         };
 
@@ -448,11 +513,20 @@ impl Vm {
                 // Resolve it to (ref_kind, class, method, descriptor).
                 let impl_info = bm.bootstrap_arguments.get(1).and_then(|&arg_idx| {
                     match cp.get(arg_idx as usize)? {
-                        ConstantPoolEntry::MethodHandle { reference_kind, reference_index } => {
+                        ConstantPoolEntry::MethodHandle {
+                            reference_kind,
+                            reference_index,
+                        } => {
                             let rk = *reference_kind;
                             match cp.get(*reference_index as usize)? {
-                                ConstantPoolEntry::Methodref { class_index, name_and_type_index }
-                                | ConstantPoolEntry::InterfaceMethodref { class_index, name_and_type_index } => {
+                                ConstantPoolEntry::Methodref {
+                                    class_index,
+                                    name_and_type_index,
+                                }
+                                | ConstantPoolEntry::InterfaceMethodref {
+                                    class_index,
+                                    name_and_type_index,
+                                } => {
                                     let cls = match cp.get(*class_index as usize)? {
                                         ConstantPoolEntry::Class { name_index } => {
                                             match cp.get(*name_index as usize)? {
@@ -462,18 +536,24 @@ impl Vm {
                                         }
                                         _ => return None,
                                     };
-                                    let (mname, mdesc) = match cp.get(*name_and_type_index as usize)? {
-                                        ConstantPoolEntry::NameAndType { name_index, descriptor_index } => {
-                                            let n = match cp.get(*name_index as usize)? {
-                                                ConstantPoolEntry::Utf8(s) => s.clone(), _ => return None,
-                                            };
-                                            let d = match cp.get(*descriptor_index as usize)? {
-                                                ConstantPoolEntry::Utf8(s) => s.clone(), _ => return None,
-                                            };
-                                            (n, d)
-                                        }
-                                        _ => return None,
-                                    };
+                                    let (mname, mdesc) =
+                                        match cp.get(*name_and_type_index as usize)? {
+                                            ConstantPoolEntry::NameAndType {
+                                                name_index,
+                                                descriptor_index,
+                                            } => {
+                                                let n = match cp.get(*name_index as usize)? {
+                                                    ConstantPoolEntry::Utf8(s) => s.clone(),
+                                                    _ => return None,
+                                                };
+                                                let d = match cp.get(*descriptor_index as usize)? {
+                                                    ConstantPoolEntry::Utf8(s) => s.clone(),
+                                                    _ => return None,
+                                                };
+                                                (n, d)
+                                            }
+                                            _ => return None,
+                                        };
                                     Some((rk, cls, mname, mdesc))
                                 }
                                 _ => None,
@@ -483,8 +563,10 @@ impl Vm {
                     }
                 });
 
-                let sam_desc = bm.bootstrap_arguments.first().and_then(|&arg_idx| {
-                    match cp.get(arg_idx as usize)? {
+                let sam_desc = bm
+                    .bootstrap_arguments
+                    .first()
+                    .and_then(|&arg_idx| match cp.get(arg_idx as usize)? {
                         ConstantPoolEntry::MethodType { descriptor_index } => {
                             match cp.get(*descriptor_index as usize)? {
                                 ConstantPoolEntry::Utf8(s) => Some(s.clone()),
@@ -492,13 +574,14 @@ impl Vm {
                             }
                         }
                         _ => None,
-                    }
-                }).unwrap_or_default();
+                    })
+                    .unwrap_or_default();
 
-                let lambda = if let Some((ref_kind, impl_class, impl_method, impl_desc)) = impl_info {
+                let lambda = if let Some((ref_kind, impl_class, impl_method, impl_desc)) = impl_info
+                {
                     let obj = Rc::new(RefCell::new(JObject {
                         class_name: "$$Lambda".to_owned(),
-                        fields: std::collections::HashMap::new(),
+                        fields: Default::default(),
                         native: NativePayload::BytecodeLambda {
                             sam_method: method_name,
                             sam_desc,
@@ -548,7 +631,9 @@ impl Vm {
                         if let Some(a) = args.get(arg_idx) {
                             let is_bool = arg_types.get(arg_idx) == Some(&'Z');
                             match a {
-                                JValue::Int(v) if is_bool => result.push_str(if *v != 0 { "true" } else { "false" }),
+                                JValue::Int(v) if is_bool => {
+                                    result.push_str(if *v != 0 { "true" } else { "false" })
+                                }
                                 JValue::Int(v) if arg_types.get(arg_idx) == Some(&'C') => {
                                     // char argument — convert int to character
                                     result.push(char::from_u32(*v as u32).unwrap_or('\u{FFFD}'));
@@ -562,7 +647,13 @@ impl Vm {
                                         result.push_str(s);
                                     } else {
                                         // Call toString() on the object.
-                                        match self.invoke_virtual(r.clone(), &r.borrow().class_name.clone(), "toString", "()Ljava/lang/String;", vec![]) {
+                                        match self.invoke_virtual(
+                                            r.clone(),
+                                            &r.borrow().class_name.clone(),
+                                            "toString",
+                                            "()Ljava/lang/String;",
+                                            vec![],
+                                        ) {
                                             Ok(JValue::Ref(Some(sr))) => {
                                                 if let Some(s) = sr.borrow().as_java_string() {
                                                     result.push_str(s);
@@ -584,17 +675,25 @@ impl Vm {
                         match bm.bootstrap_arguments.get(ba_idx) {
                             Some(&cp_idx) => match cp.get(cp_idx as usize) {
                                 Some(ConstantPoolEntry::String { string_index }) => {
-                                    if let Some(ConstantPoolEntry::Utf8(s)) = cp.get(*string_index as usize) {
+                                    if let Some(ConstantPoolEntry::Utf8(s)) =
+                                        cp.get(*string_index as usize)
+                                    {
                                         result.push_str(s);
                                     }
                                 }
-                                Some(ConstantPoolEntry::Integer(v)) => result.push_str(&v.to_string()),
+                                Some(ConstantPoolEntry::Integer(v)) => {
+                                    result.push_str(&v.to_string())
+                                }
                                 Some(ConstantPoolEntry::Long(v)) => result.push_str(&v.to_string()),
                                 Some(ConstantPoolEntry::Float(v)) => {
                                     // Use Java-compatible formatting: finite values via Rust,
                                     // but infinities/NaN must match Java's Float.toString output.
                                     if v.is_infinite() {
-                                        result.push_str(if *v > 0.0 { "Infinity" } else { "-Infinity" });
+                                        result.push_str(if *v > 0.0 {
+                                            "Infinity"
+                                        } else {
+                                            "-Infinity"
+                                        });
                                     } else if v.is_nan() {
                                         result.push_str("NaN");
                                     } else {
@@ -603,7 +702,11 @@ impl Vm {
                                 }
                                 Some(ConstantPoolEntry::Double(v)) => {
                                     if v.is_infinite() {
-                                        result.push_str(if *v > 0.0 { "Infinity" } else { "-Infinity" });
+                                        result.push_str(if *v > 0.0 {
+                                            "Infinity"
+                                        } else {
+                                            "-Infinity"
+                                        });
                                     } else if v.is_nan() {
                                         result.push_str("NaN");
                                     } else {
@@ -612,7 +715,9 @@ impl Vm {
                                 }
                                 Some(ConstantPoolEntry::Utf8(s)) => result.push_str(s),
                                 Some(ConstantPoolEntry::Class { name_index }) => {
-                                    if let Some(ConstantPoolEntry::Utf8(s)) = cp.get(*name_index as usize) {
+                                    if let Some(ConstantPoolEntry::Utf8(s)) =
+                                        cp.get(*name_index as usize)
+                                    {
                                         result.push_str(s);
                                     }
                                 }
@@ -626,12 +731,18 @@ impl Vm {
                                 Some(other) => {
                                     let detail = format!("unsupported \\x02 constant in StringConcatFactory recipe: {other:?}");
                                     self.throw_bootstrap_method_error(&detail);
-                                    return Err(format!("java/lang/BootstrapMethodError: {detail}"));
+                                    return Err(format!(
+                                        "java/lang/BootstrapMethodError: {detail}"
+                                    ));
                                 }
                                 None => {
-                                    let detail = format!("invalid CP index {cp_idx} in StringConcatFactory recipe");
+                                    let detail = format!(
+                                        "invalid CP index {cp_idx} in StringConcatFactory recipe"
+                                    );
                                     self.throw_bootstrap_method_error(&detail);
-                                    return Err(format!("java/lang/BootstrapMethodError: {detail}"));
+                                    return Err(format!(
+                                        "java/lang/BootstrapMethodError: {detail}"
+                                    ));
                                 }
                             },
                             None => {} // no constant at this index — emit nothing
@@ -650,8 +761,10 @@ impl Vm {
                 let args = pop_args(frame, n_args);
                 // args[0] = object to switch on, args[1] = restart index (int)
                 let obj = args.first().cloned().unwrap_or(JValue::Ref(None));
-                let case_classes: Vec<String> = bm.bootstrap_arguments.iter().map(|&arg_idx| {
-                    match &cp[arg_idx as usize] {
+                let case_classes: Vec<String> = bm
+                    .bootstrap_arguments
+                    .iter()
+                    .map(|&arg_idx| match &cp[arg_idx as usize] {
                         ConstantPoolEntry::Class { name_index } => {
                             match &cp[*name_index as usize] {
                                 ConstantPoolEntry::Utf8(s) => s.clone(),
@@ -659,14 +772,16 @@ impl Vm {
                             }
                         }
                         _ => String::new(),
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 let matched_idx = match obj.as_ref() {
                     None => -1i32, // null → default case
                     Some(r) => {
                         let runtime_class = r.borrow().class_name.clone();
-                        case_classes.iter().position(|c| self.is_instance_of(&runtime_class, c))
+                        case_classes
+                            .iter()
+                            .position(|c| self.is_instance_of(&runtime_class, c))
                             .map(|i| i as i32)
                             .unwrap_or(-1)
                     }
@@ -689,8 +804,10 @@ impl Vm {
                 let _captured = pop_args(frame, n_args);
 
                 // Extract record class name from bootstrap arg[0].
-                let record_class = bm.bootstrap_arguments.first().and_then(|&idx| {
-                    match cp.get(idx as usize)? {
+                let record_class = bm
+                    .bootstrap_arguments
+                    .first()
+                    .and_then(|&idx| match cp.get(idx as usize)? {
                         ConstantPoolEntry::Class { name_index } => {
                             match cp.get(*name_index as usize)? {
                                 ConstantPoolEntry::Utf8(s) => Some(s.clone()),
@@ -698,15 +815,21 @@ impl Vm {
                             }
                         }
                         _ => None,
-                    }
-                }).unwrap_or_default();
+                    })
+                    .unwrap_or_default();
 
                 // Simple class name (after last '/') for toString output.
-                let class_simple_name = record_class.split('/').last().unwrap_or(&record_class).to_owned();
+                let class_simple_name = record_class
+                    .split('/')
+                    .last()
+                    .unwrap_or(&record_class)
+                    .to_owned();
 
                 // Component names from bootstrap arg[1] (semicolon-separated string).
-                let component_names: Vec<String> = bm.bootstrap_arguments.get(1).and_then(|&idx| {
-                    match cp.get(idx as usize)? {
+                let component_names: Vec<String> = bm
+                    .bootstrap_arguments
+                    .get(1)
+                    .and_then(|&idx| match cp.get(idx as usize)? {
                         ConstantPoolEntry::String { string_index } => {
                             match cp.get(*string_index as usize)? {
                                 ConstantPoolEntry::Utf8(s) => Some(s.clone()),
@@ -715,49 +838,66 @@ impl Vm {
                         }
                         ConstantPoolEntry::Utf8(s) => Some(s.clone()),
                         _ => None,
-                    }
-                }).map(|s| if s.is_empty() { vec![] } else { s.split(';').map(|c| c.to_owned()).collect() })
-                  .unwrap_or_default();
+                    })
+                    .map(|s| {
+                        if s.is_empty() {
+                            vec![]
+                        } else {
+                            s.split(';').map(|c| c.to_owned()).collect()
+                        }
+                    })
+                    .unwrap_or_default();
 
                 // Getter MethodHandles from bootstrap args[2..].
-                let getters: Vec<(String, String, String)> = bm.bootstrap_arguments.iter().skip(2).filter_map(|&arg_idx| {
-                    match cp.get(arg_idx as usize)? {
-                        ConstantPoolEntry::MethodHandle { reference_index, .. } => {
-                            match cp.get(*reference_index as usize)? {
-                                ConstantPoolEntry::Methodref { class_index, name_and_type_index } => {
-                                    let cls = match cp.get(*class_index as usize)? {
-                                        ConstantPoolEntry::Class { name_index } => {
-                                            match cp.get(*name_index as usize)? {
-                                                ConstantPoolEntry::Utf8(s) => s.clone(),
-                                                _ => return None,
-                                            }
+                let getters: Vec<(String, String, String)> = bm
+                    .bootstrap_arguments
+                    .iter()
+                    .skip(2)
+                    .filter_map(|&arg_idx| match cp.get(arg_idx as usize)? {
+                        ConstantPoolEntry::MethodHandle {
+                            reference_index, ..
+                        } => match cp.get(*reference_index as usize)? {
+                            ConstantPoolEntry::Methodref {
+                                class_index,
+                                name_and_type_index,
+                            } => {
+                                let cls = match cp.get(*class_index as usize)? {
+                                    ConstantPoolEntry::Class { name_index } => {
+                                        match cp.get(*name_index as usize)? {
+                                            ConstantPoolEntry::Utf8(s) => s.clone(),
+                                            _ => return None,
                                         }
-                                        _ => return None,
-                                    };
-                                    let (mname, mdesc) = match cp.get(*name_and_type_index as usize)? {
-                                        ConstantPoolEntry::NameAndType { name_index, descriptor_index } => {
-                                            let n = match cp.get(*name_index as usize)? {
-                                                ConstantPoolEntry::Utf8(s) => s.clone(), _ => return None,
-                                            };
-                                            let d = match cp.get(*descriptor_index as usize)? {
-                                                ConstantPoolEntry::Utf8(s) => s.clone(), _ => return None,
-                                            };
-                                            (n, d)
-                                        }
-                                        _ => return None,
-                                    };
-                                    Some((cls, mname, mdesc))
-                                }
-                                _ => None,
+                                    }
+                                    _ => return None,
+                                };
+                                let (mname, mdesc) = match cp.get(*name_and_type_index as usize)? {
+                                    ConstantPoolEntry::NameAndType {
+                                        name_index,
+                                        descriptor_index,
+                                    } => {
+                                        let n = match cp.get(*name_index as usize)? {
+                                            ConstantPoolEntry::Utf8(s) => s.clone(),
+                                            _ => return None,
+                                        };
+                                        let d = match cp.get(*descriptor_index as usize)? {
+                                            ConstantPoolEntry::Utf8(s) => s.clone(),
+                                            _ => return None,
+                                        };
+                                        (n, d)
+                                    }
+                                    _ => return None,
+                                };
+                                Some((cls, mname, mdesc))
                             }
-                        }
+                            _ => None,
+                        },
                         _ => None,
-                    }
-                }).collect();
+                    })
+                    .collect();
 
                 let obj = Rc::new(RefCell::new(JObject {
                     class_name: "$$RecordMethod".to_owned(),
-                    fields: std::collections::HashMap::new(),
+                    fields: Default::default(),
                     native: NativePayload::RecordMethod {
                         method: method_name,
                         class_simple_name,

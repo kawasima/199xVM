@@ -58,10 +58,19 @@ fn run_jar_test(class: &str, method: &str, descriptor: &str) -> String {
     match result {
         Ok(v) => {
             if let jvm_core::heap::JValue::Ref(Some(ref r)) = v {
-                let is_str = matches!(r.borrow().native, jvm_core::heap::NativePayload::JavaString(_));
+                let is_str = matches!(
+                    r.borrow().native,
+                    jvm_core::heap::NativePayload::JavaString(_)
+                );
                 if !is_str {
                     let cn = r.borrow().class_name.clone();
-                    if let Ok(s) = vm.invoke_virtual(r.clone(), &cn, "toString", "()Ljava/lang/String;", vec![]) {
+                    if let Ok(s) = vm.invoke_virtual(
+                        r.clone(),
+                        &cn,
+                        "toString",
+                        "()Ljava/lang/String;",
+                        vec![],
+                    ) {
                         return jvalue_to_string(&s);
                     }
                 }
@@ -97,11 +106,7 @@ fn jvalue_to_string(v: &jvm_core::heap::JValue) -> String {
 
 #[test]
 fn integer_tostring() {
-    let result = run_jar_test(
-        "IntToStringTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("IntToStringTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "42");
 }
 
@@ -111,11 +116,7 @@ fn integer_tostring() {
 
 #[test]
 fn string_concat() {
-    let result = run_jar_test(
-        "StringConcatTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("StringConcatTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "OK: 42");
 }
 
@@ -127,11 +128,7 @@ fn string_concat() {
 
 #[test]
 fn local_datetime_now() {
-    let result = run_jar_test(
-        "LocalDateTimeNowTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("LocalDateTimeNowTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "ok");
 }
 
@@ -139,11 +136,7 @@ fn local_datetime_now() {
 
 #[test]
 fn arraylist_basics() {
-    let result = run_jar_test(
-        "ListTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ListTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "2: hello world");
 }
 
@@ -153,11 +146,7 @@ fn arraylist_basics() {
 
 #[test]
 fn try_catch_npe() {
-    let result = run_jar_test(
-        "TryCatchTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("TryCatchTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "CAUGHT");
 }
 
@@ -173,11 +162,7 @@ fn try_catch_checked_exception() {
 
 #[test]
 fn factorial_long() {
-    let result = run_jar_test(
-        "Factorial",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("Factorial", "run", "()Ljava/lang/String;");
     assert_eq!(result, "10!=3628800 15!=1307674368000");
 }
 
@@ -187,11 +172,7 @@ fn factorial_long() {
 
 #[test]
 fn arrays_copy_of_int() {
-    let result = run_jar_test(
-        "ArraysCopyOfTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ArraysCopyOfTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "5:1,3,0");
 }
 
@@ -267,11 +248,7 @@ fn system_exit_sets_process_exit_code_without_uncaught_exception() {
 
 #[test]
 fn seeded_random_shims() {
-    let result = run_jar_test(
-        "RandomShimTest",
-        "runSeededRandom",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("RandomShimTest", "runSeededRandom", "()Ljava/lang/String;");
     assert_eq!(result, "true|true|true|[2, 4, 5, 1, 3]");
 }
 
@@ -287,11 +264,7 @@ fn secure_random_shim_api() {
 
 #[test]
 fn stack_shim_api() {
-    let result = run_jar_test(
-        "StackShimTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("StackShimTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "alpha|beta|beta|2|beta|false|alpha|true");
 }
 
@@ -301,41 +274,25 @@ fn stack_shim_api() {
 
 #[test]
 fn parse_number_shims() {
-    let result = run_jar_test(
-        "ParseNumbersTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ParseNumbersTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "3.5|2.25|true|true|true");
 }
 
 #[test]
 fn floating_wrapper_instance_predicates() {
-    let result = run_jar_test(
-        "DoubleInstanceMethodsTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("DoubleInstanceMethodsTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "true|true|true|true");
 }
 
 #[test]
 fn objects_null_predicates() {
-    let result = run_jar_test(
-        "ObjectsPredicatesTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ObjectsPredicatesTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "true|false|false|true");
 }
 
 #[test]
 fn integer_bit_intrinsics() {
-    let result = run_jar_test(
-        "IntegerBitIntrinsicsTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("IntegerBitIntrinsicsTest", "run", "()Ljava/lang/String;");
     assert_eq!(
         result,
         "16|27|4|32|1|67305985|32|59|4|256|1|578437695752307201"
@@ -348,11 +305,7 @@ fn integer_bit_intrinsics() {
 
 #[test]
 fn inherited_static_field_uses_declaring_owner() {
-    let result = run_jar_test(
-        "InheritedStaticFieldTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("InheritedStaticFieldTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "1|7|7");
 }
 
@@ -362,11 +315,7 @@ fn inherited_static_field_uses_declaring_owner() {
 
 #[test]
 fn stream_reduce_optional() {
-    let result = run_jar_test(
-        "StreamReduceTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("StreamReduceTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "abc:false");
 }
 
@@ -376,11 +325,7 @@ fn stream_reduce_optional() {
 
 #[test]
 fn lambda_overload_arity() {
-    let result = run_jar_test(
-        "LambdaOverloadTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("LambdaOverloadTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "HELLO!|HI?");
 }
 
@@ -390,21 +335,13 @@ fn lambda_overload_arity() {
 
 #[test]
 fn synchronized_blocks() {
-    let result = run_jar_test(
-        "SynchronizedTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("SynchronizedTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "13");
 }
 
 #[test]
 fn synchronized_null_monitor_throws_npe() {
-    let result = run_jar_test(
-        "SynchronizedNullTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("SynchronizedNullTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "npe-ok");
 }
 
@@ -414,22 +351,23 @@ fn synchronized_null_monitor_throws_npe() {
 
 #[test]
 fn classloader_api() {
-    let result = run_jar_test(
-        "ClassLoaderTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ClassLoaderTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "cl:ok|forName:ok|loadClass:ok");
 }
 
 #[test]
 fn classloader_missing_class_throws_cnfe() {
-    let result = run_jar_test(
-        "ClassLoaderNegativeTest",
-        "run",
-        "()Ljava/lang/String;",
+    let result = run_jar_test("ClassLoaderNegativeTest", "run", "()Ljava/lang/String;");
+    assert_eq!(
+        result,
+        "ClassNotFoundException:com.example.NonExistentClass"
     );
-    assert_eq!(result, "ClassNotFoundException:com.example.NonExistentClass");
+}
+
+#[test]
+fn class_for_name_array_and_repeat_init() {
+    let result = run_jar_test("ClassForNameArrayInitTest", "run", "()Ljava/lang/String;");
+    assert_eq!(result, "array-ok|1");
 }
 
 #[test]
@@ -439,7 +377,12 @@ fn classloader_resource_streams_are_independent() {
     vm.load_jar(jar_loader_test_jar()).expect("load test jar");
 
     let class_loader = match vm
-        .invoke_static("java/lang/ClassLoader", "getSystemClassLoader", "()Ljava/lang/ClassLoader;", vec![])
+        .invoke_static(
+            "java/lang/ClassLoader",
+            "getSystemClassLoader",
+            "()Ljava/lang/ClassLoader;",
+            vec![],
+        )
         .expect("getSystemClassLoader")
     {
         jvm_core::heap::JValue::Ref(Some(r)) => r,
@@ -485,7 +428,10 @@ fn classloader_resource_streams_are_independent() {
     };
     assert!(std::rc::Rc::ptr_eq(&left_buf, &right_buf));
     assert_eq!(left.borrow().fields.get("pos").map(|v| v.as_int()), Some(0));
-    assert_eq!(right.borrow().fields.get("pos").map(|v| v.as_int()), Some(0));
+    assert_eq!(
+        right.borrow().fields.get("pos").map(|v| v.as_int()),
+        Some(0)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -494,11 +440,7 @@ fn classloader_resource_streams_are_independent() {
 
 #[test]
 fn clinit_exception_wrapped_in_eiie() {
-    let result = run_jar_test(
-        "ClinitExceptionTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ClinitExceptionTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "ExceptionInInitializerError");
 }
 
@@ -508,11 +450,7 @@ fn clinit_exception_wrapped_in_eiie() {
 
 #[test]
 fn concrete_interface_method_no_abstract_method_error() {
-    let result = run_jar_test(
-        "AbstractMethodTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("AbstractMethodTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "hello");
 }
 
@@ -522,11 +460,7 @@ fn concrete_interface_method_no_abstract_method_error() {
 
 #[test]
 fn reference_queue_basics() {
-    let result = run_jar_test(
-        "ReferenceQueueTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ReferenceQueueTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "ok");
 }
 
@@ -536,11 +470,7 @@ fn reference_queue_basics() {
 
 #[test]
 fn clinit_erroneous_state_throws_ncdfe_on_second_access() {
-    let result = run_jar_test(
-        "ClinitErroneousStateTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ClinitErroneousStateTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "EIIE,NCDFE");
 }
 
@@ -564,11 +494,7 @@ fn class_init_skips_plain_superinterfaces() {
 
 #[test]
 fn interface_default_method_dispatch() {
-    let result = run_jar_test(
-        "InterfaceDefaultMethodTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("InterfaceDefaultMethodTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "I am Thing");
 }
 
@@ -632,7 +558,10 @@ fn reflection_invoke_exception_can_be_unwrapped_and_caught() {
         "run",
         "()Ljava/lang/String;",
     );
-    assert_eq!(result, "ReflectionInvocationCatchUnwrapTest$Cookies:wrapped");
+    assert_eq!(
+        result,
+        "ReflectionInvocationCatchUnwrapTest$Cookies:wrapped"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -641,71 +570,43 @@ fn reflection_invoke_exception_can_be_unwrapped_and_caught() {
 
 #[test]
 fn thread_start_join_basic() {
-    let result = run_jar_test(
-        "ThreadBasicTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ThreadBasicTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "ABC");
 }
 
 #[test]
 fn thread_get_stack_trace_shim() {
-    let result = run_jar_test(
-        "ThreadStackTraceShimTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ThreadStackTraceShimTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "len=0");
 }
 
 #[test]
 fn monitor_contention_two_threads() {
-    let result = run_jar_test(
-        "MonitorContentionTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("MonitorContentionTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "10");
 }
 
 #[test]
 fn wait_notify_producer_consumer() {
-    let result = run_jar_test(
-        "WaitNotifyTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("WaitNotifyTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "produced:42,consumed:42");
 }
 
 #[test]
 fn notify_all_wakes_multiple_waiters() {
-    let result = run_jar_test(
-        "NotifyAllTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("NotifyAllTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "3");
 }
 
 #[test]
 fn wait_without_lock_throws_imse() {
-    let result = run_jar_test(
-        "WaitWithoutLockTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("WaitWithoutLockTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "wait:IMSE,notify:IMSE,notifyAll:IMSE");
 }
 
 #[test]
 fn reentrant_wait_restores_count() {
-    let result = run_jar_test(
-        "ReentrantWaitTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("ReentrantWaitTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "ok");
 }
 
@@ -715,11 +616,7 @@ fn reentrant_wait_restores_count() {
 
 #[test]
 fn synchronized_methods() {
-    let result = run_jar_test(
-        "SynchronizedMethodTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("SynchronizedMethodTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "3,2,200,2");
 }
 
@@ -729,11 +626,7 @@ fn synchronized_methods() {
 
 #[test]
 fn compact_source_file() {
-    let result = run_jar_test(
-        "CompactTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("CompactTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "ok");
 }
 
@@ -743,11 +636,7 @@ fn compact_source_file() {
 
 #[test]
 fn lambda_default_method() {
-    let result = run_jar_test(
-        "LambdaDefaultMethodTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("LambdaDefaultMethodTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "hello:default");
 }
 
@@ -757,11 +646,7 @@ fn lambda_default_method() {
 
 #[test]
 fn net_test() {
-    let result = run_jar_test(
-        "NetTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("NetTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "hello+world|hello world|example.com");
 }
 
@@ -771,11 +656,7 @@ fn net_test() {
 
 #[test]
 fn url_test() {
-    let result = run_jar_test(
-        "URLTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("URLTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "https|example.com|8080|/path|q=1|frag|example.com");
 }
 
@@ -785,11 +666,7 @@ fn url_test() {
 
 #[test]
 fn matcher_test() {
-    let result = run_jar_test(
-        "MatcherTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("MatcherTest", "run", "()Ljava/lang/String;");
     // true|false|true|true|true|false|false
     // 1: ^foo$ matches "foo"
     // 2: ^foo$ does not match "foobar"
@@ -807,11 +684,7 @@ fn matcher_test() {
 
 #[test]
 fn stream_collect_filter_map() {
-    let result = run_jar_test(
-        "StreamCollectTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("StreamCollectTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "APPLE,AVOCADO");
 }
 
@@ -821,11 +694,7 @@ fn stream_collect_filter_map() {
 
 #[test]
 fn stream_collectors_joining() {
-    let result = run_jar_test(
-        "StreamJoinTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("StreamJoinTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "a-b-c");
 }
 
@@ -835,11 +704,7 @@ fn stream_collectors_joining() {
 
 #[test]
 fn int_stream_range_filter_sum() {
-    let result = run_jar_test(
-        "IntStreamTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("IntStreamTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "sum=30");
 }
 
@@ -849,11 +714,7 @@ fn int_stream_range_filter_sum() {
 
 #[test]
 fn tree_map_natural_ordering() {
-    let result = run_jar_test(
-        "TreeMapTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("TreeMapTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "apple=1,banana=2,cherry=3");
 }
 
@@ -863,11 +724,7 @@ fn tree_map_natural_ordering() {
 
 #[test]
 fn tree_set_sorted_iteration() {
-    let result = run_jar_test(
-        "TreeSetTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("TreeSetTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "10,20,30");
 }
 
@@ -877,11 +734,7 @@ fn tree_set_sorted_iteration() {
 
 #[test]
 fn priority_queue_poll_order() {
-    let result = run_jar_test(
-        "PriorityQueueTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("PriorityQueueTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "10,20,30");
 }
 
@@ -898,7 +751,10 @@ fn clojure_bootstrap_shims() {
 #[test]
 fn method_handle_shims() {
     let result = run_jar_test("MethodHandleShimTest", "run", "()Ljava/lang/String;");
-    assert_eq!(result, "canAccess|()V|(I[Ljava/lang/Object;)Ljava/lang/String;|(Ljava/lang/Object;J)I");
+    assert_eq!(
+        result,
+        "canAccess|()V|(I[Ljava/lang/Object;)Ljava/lang/String;|(Ljava/lang/Object;J)I"
+    );
 }
 
 #[test]
@@ -929,17 +785,16 @@ fn load_jar_and_run() {
     jvm_core::load_bundle(&mut vm, shim_bundle());
     let count = vm.load_jar(jar_loader_test_jar()).expect("load_jar failed");
     assert!(count > 0, "expected at least one class from JAR");
-    let result = match vm.invoke_static_threaded(
-        "JarTestEntry", "run", "()Ljava/lang/String;", vec![],
-    ) {
-        Ok(v) => match v {
-            jvm_core::heap::JValue::Ref(Some(r)) => {
-                r.borrow().as_java_string().unwrap_or_default().to_owned()
-            }
-            _ => format!("{v:?}"),
-        },
-        Err(e) => format!("ERROR: {e}"),
-    };
+    let result =
+        match vm.invoke_static_threaded("JarTestEntry", "run", "()Ljava/lang/String;", vec![]) {
+            Ok(v) => match v {
+                jvm_core::heap::JValue::Ref(Some(r)) => {
+                    r.borrow().as_java_string().unwrap_or_default().to_owned()
+                }
+                _ => format!("{v:?}"),
+            },
+            Err(e) => format!("ERROR: {e}"),
+        };
     assert_eq!(result, "jar-ok");
 }
 
@@ -949,13 +804,18 @@ fn load_jar_resource() {
     jvm_core::load_bundle(&mut vm, shim_bundle());
     vm.load_jar(jar_loader_test_jar()).expect("load_jar failed");
     assert!(vm.has_resource("resource.txt"), "resource.txt not found");
-    assert!(!vm.resources.contains_key("resource.txt"),
-        "resource.txt should remain compressed until first access");
-    let data = vm.read_resource("resource.txt")
+    assert!(
+        !vm.resources.contains_key("resource.txt"),
+        "resource.txt should remain compressed until first access"
+    );
+    let data = vm
+        .read_resource("resource.txt")
         .expect("read_resource failed")
         .expect("resource.txt missing");
-    assert!(vm.resources.contains_key("resource.txt"),
-        "resource.txt should be cached after first access");
+    assert!(
+        vm.resources.contains_key("resource.txt"),
+        "resource.txt should be cached after first access"
+    );
     let text = std::str::from_utf8(&data).unwrap().trim();
     assert_eq!(text, "hello from jar resource");
 }
@@ -1146,7 +1006,10 @@ fn launcher_process_pipe_write_after_close_is_ignored() {
             break;
         }
     }
-    assert!(exited, "process did not exit after writing to closed system streams");
+    assert!(
+        exited,
+        "process did not exit after writing to closed system streams"
+    );
     assert_eq!(String::from_utf8(process.take_stdout()).unwrap(), "A");
     assert_eq!(String::from_utf8(process.take_stderr()).unwrap(), "B");
 
@@ -1229,7 +1092,9 @@ fn launcher_process_rejects_invalid_classpath_jar() {
         Err(err) => err,
     };
     assert!(
-        err.contains("launchClasspathMain failed during classpath load: Failed to load classpath JAR #0"),
+        err.contains(
+            "launchClasspathMain failed during classpath load: Failed to load classpath JAR #0"
+        ),
         "unexpected error: {err}"
     );
 }
@@ -1246,11 +1111,7 @@ fn printstream_non_marker_still_uses_underlying_stream() {
 
 #[test]
 fn boolean_type() {
-    let result = run_jar_test(
-        "BooleanTypeTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("BooleanTypeTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "boolean");
 }
 
@@ -1260,10 +1121,6 @@ fn boolean_type() {
 
 #[test]
 fn io_println() {
-    let result = run_jar_test(
-        "IOPrintlnTest",
-        "run",
-        "()Ljava/lang/String;",
-    );
+    let result = run_jar_test("IOPrintlnTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "ok");
 }

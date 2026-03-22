@@ -193,6 +193,13 @@ The VM also has a generic interpreter profiler that is not tied to the Clojure h
 This works through `JvmProcess`, the direct VM invoke helpers, and the `run_bundle` CLI, so it can
 be used for any Java workload that runs on 199xVM.
 
+For local performance work, `jvm-core` now defaults to a `fast-hash` feature that swaps several
+internal VM maps/sets to `rustc-hash`. This is meant as a throughput-oriented default for trusted
+developer workloads, not as a hard requirement. Builds that care more about hash-flooding
+resistance can disable it and fall back to the standard randomized hashers with
+`cargo test --package jvm-core --no-default-features` or by re-enabling only the features they
+need without `fast-hash`.
+
 Heavier diagnostics can be targeted at a single upstream `deftest` var by passing a selector like
 `clojure.test-clojure.evaluation/Collections` through the runner. When one upstream `deftest`
 remains too large, the harness can also route to a local wrapper namespace that splits that var
