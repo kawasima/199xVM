@@ -25,8 +25,12 @@ Results are written to `target/criterion/` as HTML reports.
 |---|---|---|
 | `method_call_1000x` | `BenchMethodCall.run()` | O(n) method lookup + constant pool clone per static call |
 | `static_field_1000x` | `BenchStaticField.run()` | `format!` string allocation on every `getstatic`/`putstatic` |
+| `inherited_static_field_1000x` | `BenchInheritedStaticField.run()` | inherited `getstatic`/`putstatic` owner resolution on every access |
 | `string_ldc_1000x` | `BenchStringLdc.run()` | `String::clone` on every `ldc` string constant |
 | `virtual_call_1000x` | `BenchVirtualCall.run()` | Interface virtual dispatch + interface name list rebuild |
+| `declared_methods_1000x` | `BenchDeclaredMethods.run()` | repeated `Class.getDeclaredMethods()` metadata rebuild |
+| `process_clinit_launch_to_exit` | `ClinitYieldProcessMain.main()` | launcher/process path when the first bytecode schedules a heavy `<clinit>` |
+| `process_super_clinit_chain_launch_to_exit` | `ClinitChainYieldProcessMain.main()` | launcher/process path when class initialization walks a heavy superclass chain |
 
 Each Java method runs a loop of 1000 iterations so the per-call overhead is amplified and measurable above criterion's noise floor.
 
@@ -45,6 +49,9 @@ cargo bench --package jvm-core -- --baseline before
 ```
 
 criterion will print a percentage change and confidence interval for each benchmark.
+
+The historical tables below predate the later class-init and inherited-static-field scenarios, so
+they currently cover only the original four microbenchmarks.
 
 ## Baseline (2026-03-12, unoptimized interpreter)
 

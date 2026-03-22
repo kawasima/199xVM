@@ -43,7 +43,10 @@ if [[ ! -d "$suite_root" ]]; then
   exit 1
 fi
 
-mapfile -t selected_namespaces < <(
+selected_namespaces=()
+while IFS= read -r ns; do
+  [[ -n "$ns" ]] && selected_namespaces+=("$ns")
+done < <(
   rg --no-filename -o 'clojure\.test-clojure\.[[:alnum:].-]+' "$RUNNER_FILE" | awk '!seen[$0]++'
 )
 

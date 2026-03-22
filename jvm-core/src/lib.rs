@@ -5,6 +5,7 @@
 //! receiving the string representation of the return value.
 
 mod class_file;
+mod collections;
 pub mod heap;
 pub mod interpreter;
 
@@ -342,6 +343,7 @@ fn invoke_and_collect(
         }
         Err(e) => format!("ERROR: {e}"),
     };
+    vm.write_profile_report_if_enabled();
     vm.flush_printstreams();
     out
 }

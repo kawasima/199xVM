@@ -4,8 +4,8 @@
 //! This avoids a full GC implementation while being sufficient for short-lived
 //! decoder invocations like Raoh.
 
+use crate::collections::{hash_map_with_capacity, HashMap};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 /// A Java value that can appear on the operand stack or in a local variable slot.
@@ -167,20 +167,27 @@ impl std::fmt::Debug for NativePayload {
 }
 
 impl JObject {
-    /// Create a plain Java object with the given class name.
-    pub fn new(class_name: impl Into<String>) -> JRef {
+    pub(crate) fn with_field_capacity(
+        class_name: impl Into<String>,
+        field_capacity: usize,
+    ) -> JRef {
         Rc::new(RefCell::new(JObject {
             class_name: class_name.into(),
-            fields: HashMap::new(),
+            fields: hash_map_with_capacity(field_capacity),
             native: NativePayload::None,
         }))
+    }
+
+    /// Create a plain Java object with the given class name.
+    pub fn new(class_name: impl Into<String>) -> JRef {
+        Self::with_field_capacity(class_name, 0)
     }
 
     /// Create a `java.lang.String` backed by a Rust `String`.
     pub fn new_string(s: impl Into<String>) -> JRef {
         Rc::new(RefCell::new(JObject {
             class_name: "java/lang/String".to_owned(),
-            fields: HashMap::new(),
+            fields: HashMap::default(),
             native: NativePayload::JavaString(s.into()),
         }))
     }
@@ -189,8 +196,17 @@ impl JObject {
     pub fn new_array(class_name: impl Into<String>, elements: Vec<JValue>) -> JRef {
         Rc::new(RefCell::new(JObject {
             class_name: class_name.into(),
-            fields: HashMap::new(),
+            fields: HashMap::default(),
             native: NativePayload::Array(elements),
+        }))
+    }
+
+    /// Create a primitive byte array.
+    pub fn new_byte_array(bytes: Vec<u8>) -> JRef {
+        Rc::new(RefCell::new(JObject {
+            class_name: "[B".to_owned(),
+            fields: HashMap::default(),
+            native: NativePayload::ByteArray(bytes),
         }))
     }
 
@@ -198,7 +214,7 @@ impl JObject {
     pub fn new_lambda(f: impl Fn(Vec<JValue>) -> JValue + 'static) -> JRef {
         Rc::new(RefCell::new(JObject {
             class_name: "$$Lambda".to_owned(),
-            fields: HashMap::new(),
+            fields: HashMap::default(),
             native: NativePayload::Lambda(Rc::new(f)),
         }))
     }
@@ -207,7 +223,7 @@ impl JObject {
     pub fn new_print_stream(is_err: bool) -> JRef {
         Rc::new(RefCell::new(JObject {
             class_name: "java/io/PrintStream".to_owned(),
-            fields: HashMap::new(),
+            fields: HashMap::default(),
             native: NativePayload::PrintStream(is_err),
         }))
     }
@@ -216,7 +232,7 @@ impl JObject {
     pub fn new_process_pipe_input_stream() -> JRef {
         Rc::new(RefCell::new(JObject {
             class_name: "java/io/ProcessPipeInputStream".to_owned(),
-            fields: HashMap::new(),
+            fields: HashMap::default(),
             native: NativePayload::ProcessPipeInputStream,
         }))
     }

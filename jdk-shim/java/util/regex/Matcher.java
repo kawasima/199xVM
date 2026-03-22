@@ -58,30 +58,7 @@ public final class Matcher {
 
     private static native boolean nativeMatches(String regex, String input);
 
-    public boolean find() {
-        String r = pattern.pattern();
-        if (r.length() == 0) {
-            matchStart = -1;
-            matchEnd = -1;
-            return false;
-        }
-        int at = -1;
-        if (searchIndex <= input.length()) {
-            int rel = input.substring(searchIndex).indexOf(r);
-            if (rel >= 0) {
-                at = searchIndex + rel;
-            }
-        }
-        if (at < 0) {
-            matchStart = -1;
-            matchEnd = -1;
-            return false;
-        }
-        matchStart = at;
-        matchEnd = at + r.length();
-        searchIndex = matchEnd;
-        return true;
-    }
+    public native boolean find();
 
     public int start() {
         return matchStart;

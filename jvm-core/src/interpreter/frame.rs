@@ -6,6 +6,7 @@ pub(crate) struct Frame {
     pub locals: Vec<JValue>,
     pub stack: Vec<JValue>,
     pub pc: usize,
+    pub last_opcode_pc: usize,
 }
 
 /// Pop `n` arguments from the operand stack, returned in call order.

@@ -1,5 +1,5 @@
-use std::rc::Rc;
 use crate::heap::{JObject, JValue, NativePayload};
+use std::rc::Rc;
 
 /// Returns true if `regex` ends with an unescaped `$` anchor.
 /// A `$` is escaped when preceded by an odd number of backslashes.
@@ -51,18 +51,31 @@ impl super::Vm {
         _args: &[JValue],
     ) -> Option<JValue> {
         match (_class_name, _method_name, _descriptor) {
-            ("java/util/regex/Pattern", "compile", "(Ljava/lang/String;)Ljava/util/regex/Pattern;") => {
+            (
+                "java/util/regex/Pattern",
+                "compile",
+                "(Ljava/lang/String;)Ljava/util/regex/Pattern;",
+            ) => {
                 let regex = _args
                     .first()
                     .and_then(|v| v.as_ref())
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let p = JObject::new("java/util/regex/Pattern");
-                p.borrow_mut().fields.insert("__regex".to_owned(), JValue::Ref(Some(self.intern_string(regex))));
-                p.borrow_mut().fields.insert("__flags".to_owned(), JValue::Int(0));
+                p.borrow_mut().fields.insert(
+                    "__regex".to_owned(),
+                    JValue::Ref(Some(self.intern_string(regex))),
+                );
+                p.borrow_mut()
+                    .fields
+                    .insert("__flags".to_owned(), JValue::Int(0));
                 Some(JValue::Ref(Some(p)))
             }
-            ("java/util/regex/Pattern", "compile", "(Ljava/lang/String;I)Ljava/util/regex/Pattern;") => {
+            (
+                "java/util/regex/Pattern",
+                "compile",
+                "(Ljava/lang/String;I)Ljava/util/regex/Pattern;",
+            ) => {
                 let regex = _args
                     .first()
                     .and_then(|v| v.as_ref())
@@ -70,11 +83,20 @@ impl super::Vm {
                     .unwrap_or_default();
                 let flags = _args.get(1).map(|v| v.as_int()).unwrap_or(0);
                 let p = JObject::new("java/util/regex/Pattern");
-                p.borrow_mut().fields.insert("__regex".to_owned(), JValue::Ref(Some(self.intern_string(regex))));
-                p.borrow_mut().fields.insert("__flags".to_owned(), JValue::Int(flags));
+                p.borrow_mut().fields.insert(
+                    "__regex".to_owned(),
+                    JValue::Ref(Some(self.intern_string(regex))),
+                );
+                p.borrow_mut()
+                    .fields
+                    .insert("__flags".to_owned(), JValue::Int(flags));
                 Some(JValue::Ref(Some(p)))
             }
-            ("java/util/regex/Pattern", "matches", "(Ljava/lang/String;Ljava/lang/CharSequence;)Z") => {
+            (
+                "java/util/regex/Pattern",
+                "matches",
+                "(Ljava/lang/String;Ljava/lang/CharSequence;)Z",
+            ) => {
                 let regex = _args
                     .first()
                     .and_then(|v| v.as_ref())
@@ -88,7 +110,11 @@ impl super::Vm {
                 let ok = regex_full_match(&regex, &input);
                 Some(JValue::Int(if ok { 1 } else { 0 }))
             }
-            ("java/util/regex/Matcher", "nativeMatches", "(Ljava/lang/String;Ljava/lang/String;)Z") => {
+            (
+                "java/util/regex/Matcher",
+                "nativeMatches",
+                "(Ljava/lang/String;Ljava/lang/String;)Z",
+            ) => {
                 let regex = _args
                     .first()
                     .and_then(|v| v.as_ref())
@@ -199,6 +225,71 @@ impl super::Vm {
                 }
                 Some(JValue::Int(result))
             }
+            ("java/lang/Integer", "highestOneBit", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                let out = if value == 0 {
+                    0
+                } else {
+                    1u32 << (31 - value.leading_zeros())
+                };
+                Some(JValue::Int(out as i32))
+            }
+            ("java/lang/Integer", "lowestOneBit", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0);
+                Some(JValue::Int(value & value.wrapping_neg()))
+            }
+            ("java/lang/Integer", "numberOfLeadingZeros", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.leading_zeros() as i32))
+            }
+            ("java/lang/Integer", "numberOfTrailingZeros", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.trailing_zeros() as i32))
+            }
+            ("java/lang/Integer", "bitCount", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.count_ones() as i32))
+            }
+            ("java/lang/Integer", "rotateLeft", "(II)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.rotate_left(distance) as i32))
+            }
+            ("java/lang/Integer", "rotateRight", "(II)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.rotate_right(distance) as i32))
+            }
+            ("java/lang/Integer", "reverseBytes", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.swap_bytes() as i32))
+            }
+            ("java/lang/Long", "bitCount", "(J)I") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Int(value.count_ones() as i32))
+            }
+            ("java/lang/Long", "numberOfLeadingZeros", "(J)I") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Int(value.leading_zeros() as i32))
+            }
+            ("java/lang/Long", "numberOfTrailingZeros", "(J)I") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Int(value.trailing_zeros() as i32))
+            }
+            ("java/lang/Long", "rotateLeft", "(JI)J") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Long(value.rotate_left(distance) as i64))
+            }
+            ("java/lang/Long", "rotateRight", "(JI)J") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Long(value.rotate_right(distance) as i64))
+            }
+            ("java/lang/Long", "reverseBytes", "(J)J") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Long(value.swap_bytes() as i64))
+            }
             ("java/lang/Class", "getPrimitiveClass", "(Ljava/lang/String;)Ljava/lang/Class;") => {
                 let name = match _args
                     .first()
@@ -225,35 +316,79 @@ impl super::Vm {
                         return Some(JValue::Void);
                     }
                 };
+                let profile_started = self.profiler.as_ref().map(|_| std::time::Instant::now());
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
                 // Primitive class names are VM-defined synthetic Class objects.
                 if matches!(
                     internal.as_str(),
-                    "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void"
+                    "boolean"
+                        | "byte"
+                        | "char"
+                        | "short"
+                        | "int"
+                        | "long"
+                        | "float"
+                        | "double"
+                        | "void"
                 ) {
-                    return Some(JValue::Ref(Some(self.class_object(internal))));
+                    let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                    if let Some(started) = profile_started {
+                        self.record_for_name_sample(&runtime_name, started.elapsed());
+                    }
+                    return result;
                 }
                 // Array descriptors (e.g. "[I", "[Ljava/lang/String;") are synthetic types
                 // not backed by a ClassFile entry — return a class object directly.
                 if internal.starts_with('[') {
-                    return Some(JValue::Ref(Some(self.class_object(internal))));
+                    let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                    if let Some(started) = profile_started {
+                        self.record_for_name_sample(&runtime_name, started.elapsed());
+                    }
+                    return result;
                 }
-                self.ensure_class_ready(&internal);
                 match self.classes.get(&internal) {
-                    Some(super::LazyClass::Ready(_)) => {}
+                    Some(super::LazyClass::Ready(_)) => {
+                        let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                        if let Some(started) = profile_started {
+                            self.record_for_name_sample(&runtime_name, started.elapsed());
+                        }
+                        return result;
+                    }
                     Some(super::LazyClass::ParseError(msg)) => {
                         let msg = msg.clone();
                         self.throw_class_format_error(&msg);
+                        if let Some(started) = profile_started {
+                            self.record_for_name_sample(&runtime_name, started.elapsed());
+                        }
                         return Some(JValue::Void);
+                    }
+                    _ => {}
+                }
+                self.ensure_class_ready(&internal);
+                let result = match self.classes.get(&internal) {
+                    Some(super::LazyClass::Ready(_)) => None,
+                    Some(super::LazyClass::ParseError(msg)) => {
+                        let msg = msg.clone();
+                        self.throw_class_format_error(&msg);
+                        Some(JValue::Void)
                     }
                     _ => {
                         self.throw_class_not_found(&runtime_name);
-                        return Some(JValue::Void);
+                        Some(JValue::Void)
                     }
+                };
+                let result =
+                    result.unwrap_or_else(|| JValue::Ref(Some(self.class_object(internal))));
+                if let Some(started) = profile_started {
+                    self.record_for_name_sample(&runtime_name, started.elapsed());
                 }
-                Some(JValue::Ref(Some(self.class_object(internal))))
+                Some(result)
             }
-            ("java/lang/Class", "forName1", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;") => {
+            (
+                "java/lang/Class",
+                "forName1",
+                "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;",
+            ) => {
                 let runtime_name = match _args
                     .first()
                     .and_then(|v| v.as_ref())
@@ -266,31 +401,74 @@ impl super::Vm {
                     }
                 };
                 let initialize = _args.get(1).map(|v| v.as_int() != 0).unwrap_or(true);
+                let profile_key = format!("{runtime_name}|init={initialize}");
+                let profile_started = self.profiler.as_ref().map(|_| std::time::Instant::now());
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
-                self.ensure_class_ready(&internal);
+                if internal.starts_with('[') {
+                    let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                    if let Some(started) = profile_started {
+                        self.record_for_name_sample(&profile_key, started.elapsed());
+                    }
+                    return result;
+                }
                 match self.classes.get(&internal) {
-                    Some(super::LazyClass::Ready(_)) => {}
+                    Some(super::LazyClass::Ready(_))
+                        if !initialize || self.clinit_done.contains(&internal) =>
+                    {
+                        let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                        if let Some(started) = profile_started {
+                            self.record_for_name_sample(&profile_key, started.elapsed());
+                        }
+                        return result;
+                    }
                     Some(super::LazyClass::ParseError(msg)) => {
                         let msg = msg.clone();
                         self.throw_class_format_error(&msg);
+                        if let Some(started) = profile_started {
+                            self.record_for_name_sample(&profile_key, started.elapsed());
+                        }
                         return Some(JValue::Void);
                     }
-                    _ => {
-                        return Some(JValue::Ref(None)); // not found — caller checks null
+                    _ => {}
+                }
+                self.ensure_class_ready(&internal);
+                let result = match self.classes.get(&internal) {
+                    Some(super::LazyClass::Ready(_)) => None,
+                    Some(super::LazyClass::ParseError(msg)) => {
+                        let msg = msg.clone();
+                        self.throw_class_format_error(&msg);
+                        Some(JValue::Void)
                     }
+                    _ => {
+                        Some(JValue::Ref(None)) // not found — caller checks null
+                    }
+                };
+                if let Some(result) = result {
+                    if let Some(started) = profile_started {
+                        self.record_for_name_sample(&profile_key, started.elapsed());
+                    }
+                    return Some(result);
                 }
                 if initialize {
                     if self.ensure_class_init(&internal).is_err() {
+                        if let Some(started) = profile_started {
+                            self.record_for_name_sample(&profile_key, started.elapsed());
+                        }
                         return Some(JValue::Void);
                     }
                 }
-                Some(JValue::Ref(Some(self.class_object(internal))))
+                let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                if let Some(started) = profile_started {
+                    self.record_for_name_sample(&profile_key, started.elapsed());
+                }
+                result
             }
             ("java/lang/ClassLoader", "getSystemClassLoader", "()Ljava/lang/ClassLoader;") => {
                 let cl = self.get_or_create_system_classloader();
                 Some(JValue::Ref(Some(cl)))
             }
-            ("java/lang/Double", "doubleToLongBits", "(D)J") | ("java/lang/Double", "doubleToRawLongBits", "(D)J") => {
+            ("java/lang/Double", "doubleToLongBits", "(D)J")
+            | ("java/lang/Double", "doubleToRawLongBits", "(D)J") => {
                 let d = _args.first().map(|v| v.as_double()).unwrap_or(0.0);
                 Some(JValue::Long(d.to_bits() as i64))
             }
@@ -298,7 +476,8 @@ impl super::Vm {
                 let l = _args.first().map(|v| v.as_long()).unwrap_or(0);
                 Some(JValue::Double(f64::from_bits(l as u64)))
             }
-            ("java/lang/Float", "floatToRawIntBits", "(F)I") | ("java/lang/Float", "floatToIntBits", "(F)I") => {
+            ("java/lang/Float", "floatToRawIntBits", "(F)I")
+            | ("java/lang/Float", "floatToIntBits", "(F)I") => {
                 let f = _args.first().map(|v| v.as_float()).unwrap_or(0.0);
                 Some(JValue::Int(f.to_bits() as i32))
             }
@@ -375,16 +554,21 @@ impl super::Vm {
                     .unwrap_or(0);
                 Some(JValue::Int(hc))
             }
-            (
-                "java/lang/System",
-                "arraycopy",
-                "(Ljava/lang/Object;ILjava/lang/Object;II)V",
-            ) => {
+            ("java/lang/System", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V") => {
                 let src = _args.first().and_then(|v| v.as_ref()).cloned()?;
-                let src_pos = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let src_pos = _args
+                    .get(1)
+                    .map(|v| v.as_int().max(0) as usize)
+                    .unwrap_or(0);
                 let dst = _args.get(2).and_then(|v| v.as_ref()).cloned()?;
-                let dst_pos = _args.get(3).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
-                let len = _args.get(4).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let dst_pos = _args
+                    .get(3)
+                    .map(|v| v.as_int().max(0) as usize)
+                    .unwrap_or(0);
+                let len = _args
+                    .get(4)
+                    .map(|v| v.as_int().max(0) as usize)
+                    .unwrap_or(0);
 
                 let src_snapshot = {
                     let src_b = src.borrow();
@@ -448,13 +632,20 @@ impl super::Vm {
                 }
                 Some(JValue::Void)
             }
-            ("java/lang/reflect/Array", "newInstance", "(Ljava/lang/Class;I)Ljava/lang/Object;") => {
+            (
+                "java/lang/reflect/Array",
+                "newInstance",
+                "(Ljava/lang/Class;I)Ljava/lang/Object;",
+            ) => {
                 let component = _args
                     .first()
                     .and_then(|v| v.as_ref())
                     .and_then(|c| self.class_internal_name_from_obj(c))
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let len = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let len = _args
+                    .get(1)
+                    .map(|v| v.as_int().max(0) as usize)
+                    .unwrap_or(0);
                 let arr = match component.as_str() {
                     "boolean" => JObject::new_array("[Z", vec![JValue::Int(0); len]),
                     "byte" => JObject::new_array("[B", vec![JValue::Int(0); len]),
@@ -467,11 +658,17 @@ impl super::Vm {
                     _ if component.starts_with('[') => {
                         JObject::new_array(format!("[{component}"), vec![JValue::Ref(None); len])
                     }
-                    _ => JObject::new_array(format!("[L{component};"), vec![JValue::Ref(None); len]),
+                    _ => {
+                        JObject::new_array(format!("[L{component};"), vec![JValue::Ref(None); len])
+                    }
                 };
                 Some(JValue::Ref(Some(arr)))
             }
-            ("java/lang/reflect/Array", "newInstance", "(Ljava/lang/Class;[I)Ljava/lang/Object;") => {
+            (
+                "java/lang/reflect/Array",
+                "newInstance",
+                "(Ljava/lang/Class;[I)Ljava/lang/Object;",
+            ) => {
                 let component = _args
                     .first()
                     .and_then(|v| v.as_ref())
@@ -481,8 +678,14 @@ impl super::Vm {
                     .get(1)
                     .and_then(|v| v.as_ref())
                     .and_then(|r| match &r.borrow().native {
-                        NativePayload::Array(v) => Some(v.iter().map(|x| x.as_int().max(0) as usize).collect::<Vec<_>>()),
-                        NativePayload::IntArray(v) => Some(v.iter().map(|x| (*x).max(0) as usize).collect::<Vec<_>>()),
+                        NativePayload::Array(v) => Some(
+                            v.iter()
+                                .map(|x| x.as_int().max(0) as usize)
+                                .collect::<Vec<_>>(),
+                        ),
+                        NativePayload::IntArray(v) => {
+                            Some(v.iter().map(|x| (*x).max(0) as usize).collect::<Vec<_>>())
+                        }
                         _ => None,
                     })
                     .unwrap_or_default();
@@ -519,7 +722,10 @@ impl super::Vm {
                 Some(JValue::Int(len))
             }
             ("java/lang/reflect/Array", "get", "(Ljava/lang/Object;I)Ljava/lang/Object;") => {
-                let idx = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let idx = _args
+                    .get(1)
+                    .map(|v| v.as_int().max(0) as usize)
+                    .unwrap_or(0);
                 let v = _args
                     .first()
                     .and_then(|x| x.as_ref())
@@ -534,7 +740,10 @@ impl super::Vm {
                 Some(self.wrap_primitive_value(v))
             }
             ("java/lang/reflect/Array", "set", "(Ljava/lang/Object;ILjava/lang/Object;)V") => {
-                let idx = _args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+                let idx = _args
+                    .get(1)
+                    .map(|v| v.as_int().max(0) as usize)
+                    .unwrap_or(0);
                 let value = _args.get(2).cloned().unwrap_or(JValue::Ref(None));
                 if let Some(r) = _args.first().and_then(|x| x.as_ref()) {
                     let mut arr = r.borrow_mut();
@@ -585,13 +794,19 @@ impl super::Vm {
             }
             ("java/lang/Thread", "sleep", "(J)V") => {
                 // Validate: negative durations are illegal per JDK spec.
-                let millis = _args.first().map(|v| match v {
-                    JValue::Long(l) => *l,
-                    JValue::Int(i) => *i as i64,
-                    _ => 0,
-                }).unwrap_or(0);
+                let millis = _args
+                    .first()
+                    .map(|v| match v {
+                        JValue::Long(l) => *l,
+                        JValue::Int(i) => *i as i64,
+                        _ => 0,
+                    })
+                    .unwrap_or(0);
                 if millis < 0 {
-                    let exc = self.new_vm_exception_message("java/lang/IllegalArgumentException", "sleep duration must be >= 0");
+                    let exc = self.new_vm_exception_message(
+                        "java/lang/IllegalArgumentException",
+                        "sleep duration must be >= 0",
+                    );
                     *self.pending_exception_mut() = Some(exc);
                     return Some(JValue::Void);
                 }
