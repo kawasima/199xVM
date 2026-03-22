@@ -24,6 +24,7 @@ type OwnedJarArchive = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
 /// All execution-time data extracted from a resolved method in a single pass.
 /// Returned by [`Vm::resolve_method_exec_info`] to avoid repeated `find_method`
 /// calls and to give each field a self-documenting name.
+#[derive(Clone)]
 pub(super) struct MethodExecInfo {
     /// Internal class name that owns the resolved method.
     pub class_name: String,
@@ -34,15 +35,179 @@ pub(super) struct MethodExecInfo {
     /// `true` when the method has a `Code` attribute (i.e. is not abstract/native).
     pub has_code: bool,
     /// Raw bytecode.
-    pub code: Vec<u8>,
+    pub code: Rc<Vec<u8>>,
     /// Exception handler table.
-    pub exception_table: Vec<ExceptionTableEntry>,
+    pub exception_table: Rc<Vec<ExceptionTableEntry>>,
     /// Shared constant-pool entries (`Rc` for O(1) clone).
     pub cp: Rc<Vec<ConstantPoolEntry>>,
     /// Bootstrap methods from the `BootstrapMethods` attribute.
-    pub bootstrap_methods: Vec<BootstrapMethod>,
+    pub bootstrap_methods: Rc<Vec<BootstrapMethod>>,
     /// `access_flags` from the method_info entry.
     pub access_flags: u16,
+    /// Pre-parsed parameter descriptor tokens reused across frame construction.
+    pub param_tokens: Rc<Vec<String>>,
+    /// Number of local-variable slots consumed by parameters.
+    pub param_slot_count: usize,
+    /// Preformatted frame owner string used in diagnostics.
+    pub frame_owner: Rc<str>,
+}
+
+#[derive(Clone)]
+pub(super) struct ResolvedMemberRef {
+    pub class_name: String,
+    pub member_name: String,
+    pub descriptor: String,
+    pub arg_count: usize,
+    pub returns_void: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct ResolvedStaticCallSite {
+    pub method_name: String,
+    pub expected_arg_count: usize,
+    pub push_return: bool,
+    pub empty_varargs: bool,
+    pub method_info: Rc<MethodExecInfo>,
+}
+
+#[derive(Clone)]
+pub(super) struct ReflectFieldInfo {
+    pub name: String,
+    pub descriptor: String,
+    pub type_name: String,
+    pub access_flags: u16,
+}
+
+#[derive(Clone)]
+pub(super) struct ReflectMethodInfo {
+    pub name: String,
+    pub descriptor: String,
+    pub param_types: Vec<String>,
+    pub return_type: String,
+    pub exception_types: Vec<String>,
+    pub access_flags: u16,
+}
+
+#[derive(Clone)]
+pub(super) struct ReflectConstructorInfo {
+    pub descriptor: String,
+    pub param_types: Vec<String>,
+    pub exception_types: Vec<String>,
+    pub access_flags: u16,
+}
+
+#[derive(Default)]
+struct VmProfileStat {
+    count: u64,
+    nanos: u128,
+}
+
+struct VmProfiler {
+    opcode_counts: [u64; 256],
+    opcode_nanos: [u128; 256],
+    method_stats: HashMap<Rc<str>, VmProfileStat>,
+    for_name_stats: HashMap<String, VmProfileStat>,
+    top_n: usize,
+}
+
+impl VmProfiler {
+    fn from_env() -> Option<Self> {
+        let enabled = matches!(
+            std::env::var("JVM_PROFILE").ok().as_deref(),
+            Some("1" | "true" | "TRUE" | "yes" | "YES")
+        );
+        if !enabled {
+            return None;
+        }
+        let top_n = std::env::var("JVM_PROFILE_TOP")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(20);
+        Some(Self {
+            opcode_counts: [0; 256],
+            opcode_nanos: [0; 256],
+            method_stats: HashMap::new(),
+            for_name_stats: HashMap::new(),
+            top_n,
+        })
+    }
+
+    fn record(&mut self, opcode: u8, frame_owner: &Rc<str>, elapsed: std::time::Duration) {
+        let idx = usize::from(opcode);
+        let nanos = elapsed.as_nanos();
+        self.opcode_counts[idx] += 1;
+        self.opcode_nanos[idx] += nanos;
+        let stat = self.method_stats.entry(Rc::clone(frame_owner)).or_default();
+        stat.count += 1;
+        stat.nanos += nanos;
+    }
+
+    fn record_for_name(&mut self, runtime_name: &str, elapsed: std::time::Duration) {
+        let stat = self.for_name_stats.entry(runtime_name.to_owned()).or_default();
+        stat.count += 1;
+        stat.nanos += elapsed.as_nanos();
+    }
+
+    fn report(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("vm-profile top={}", self.top_n));
+
+        let mut methods: Vec<_> = self.method_stats.iter().collect();
+        methods.sort_by(|a, b| {
+            b.1.nanos
+                .cmp(&a.1.nanos)
+                .then_with(|| a.0.as_ref().cmp(b.0.as_ref()))
+        });
+        lines.push("methods:".to_owned());
+        for (name, stat) in methods.into_iter().take(self.top_n) {
+            lines.push(format!(
+                "  {:9.3} ms  {:8} ops  {}",
+                stat.nanos as f64 / 1_000_000.0,
+                stat.count,
+                name
+            ));
+        }
+
+        if !self.for_name_stats.is_empty() {
+            let mut for_names: Vec<_> = self.for_name_stats.iter().collect();
+            for_names.sort_by(|a, b| b.1.nanos.cmp(&a.1.nanos).then_with(|| a.0.cmp(b.0)));
+            lines.push("forName:".to_owned());
+            for (name, stat) in for_names.into_iter().take(self.top_n) {
+                lines.push(format!(
+                    "  {:9.3} ms  {:8} calls  {}",
+                    stat.nanos as f64 / 1_000_000.0,
+                    stat.count,
+                    name
+                ));
+            }
+        }
+
+        let mut opcodes: Vec<_> = self
+            .opcode_counts
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, count)| {
+                if *count == 0 {
+                    None
+                } else {
+                    Some((idx, *count, self.opcode_nanos[idx]))
+                }
+            })
+            .collect();
+        opcodes.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        lines.push("opcodes:".to_owned());
+        for (idx, count, nanos) in opcodes.into_iter().take(self.top_n) {
+            lines.push(format!(
+                "  0x{idx:02x}  {:9.3} ms  {:8} hits",
+                nanos as f64 / 1_000_000.0,
+                count
+            ));
+        }
+
+        lines.push(String::new());
+        lines.join("\n")
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +438,8 @@ pub(crate) struct ThreadContext {
     pub pending_frame: Option<trampoline::FrameInfo>,
     /// The thread's own call stack (for green thread scheduling).
     pub call_stack: Vec<trampoline::FrameInfo>,
+    /// `<clinit>` frames currently active while the thread's call stack is borrowed out.
+    pub active_clinit_stack: Vec<String>,
     /// The java.lang.Thread object associated with this thread.
     pub thread_object: Option<JRef>,
     /// Number of instructions executed in the current time slice.
@@ -289,6 +456,7 @@ impl ThreadContext {
             pending_exception: None,
             pending_frame: None,
             call_stack: Vec::new(),
+            active_clinit_stack: Vec::new(),
             thread_object: None,
             instruction_count: 0,
             saved_monitor_count: 0,
@@ -306,6 +474,8 @@ pub(crate) struct Scheduler {
 
 /// Maximum instructions per thread before yielding to the next runnable thread.
 const TIME_SLICE: usize = 1000;
+/// Larger slice used when effectively only one runnable thread exists.
+const SINGLE_RUNNABLE_TIME_SLICE: usize = 20_000;
 
 impl Scheduler {
     pub(in crate::interpreter) fn new() -> Self {
@@ -445,8 +615,16 @@ pub struct Vm {
     pub(in crate::interpreter) static_fields: HashMap<String, HashMap<String, JValue>>,
     /// Classes whose `<clinit>` has already been run successfully.
     pub(in crate::interpreter) clinit_done: HashSet<String>,
+    /// Classes whose initialization is currently owned by a thread (JVMS §5.5 step 6).
+    clinit_owners: HashMap<String, ThreadId>,
+    /// Classes whose prerequisites are being initialized before their own `<clinit>` is posted.
+    pub(in crate::interpreter) clinit_pending: HashSet<String>,
+    /// Classes whose own `<clinit>` frame is posted or currently executing.
+    pub(in crate::interpreter) clinit_running: HashSet<String>,
     /// Classes whose `<clinit>` threw an exception (erroneous state per JVMS §5.5).
     pub(in crate::interpreter) clinit_failed: HashSet<String>,
+    /// `<clinit>` frames currently executing on the synchronous `run_trampoline` path.
+    sync_clinit_stack: Vec<String>,
     /// Canonical Class objects keyed by internal class name or descriptor.
     pub(in crate::interpreter) class_pool: HashMap<String, JRef>,
     /// Buffered `System.out.print` content until newline/println.
@@ -478,12 +656,43 @@ pub struct Vm {
     /// Method resolution cache: (class, method_name, descriptor) → owner class name.
     /// Avoids repeated super-chain walks for the same method lookup.
     method_owner_cache: HashMap<(String, String, String), Option<String>>,
+    /// Resolved method signature cache: requested call site → (real descriptor, access flags).
+    /// Avoids repeated relaxed descriptor matching and flags lookups on hot invoke paths.
+    method_signature_cache: HashMap<(String, String, String), (String, u16)>,
+    /// Cached decoded method refs keyed by `(cp pointer, cp index)`.
+    methodref_constant_cache: HashMap<(usize, u16), Rc<ResolvedMemberRef>>,
+    /// Cached resolved static call sites keyed by `(cp pointer, cp index)`.
+    static_callsite_cache: HashMap<(usize, u16), Rc<ResolvedStaticCallSite>>,
+    /// Static field owner cache: symbolic owner/name/descriptor → declaring class name.
+    /// Mirrors HotSpot's resolved field entries well enough for repeated getstatic/putstatic.
+    static_field_owner_cache: HashMap<(String, String, String), Option<String>>,
+    /// Cached decoded field refs keyed by `(cp pointer, cp index)`.
+    fieldref_constant_cache: HashMap<(usize, u16), Rc<ResolvedMemberRef>>,
+    /// Cached resolved method execution metadata keyed by requested call-site triplet.
+    method_exec_info_cache: HashMap<(String, String, String), MethodExecInfo>,
+    /// Cached `<clinit>` presence for parsed classes.
+    class_initializer_cache: HashMap<String, bool>,
+    /// Cached presence of concrete non-static interface methods.
+    concrete_interface_method_cache: HashMap<String, bool>,
+    /// Cached subtype checks keyed by `(runtime_class, target_class)`.
+    instanceof_cache: HashMap<(String, String), bool>,
+    /// Cached ordered superinterfaces that must be initialized before a class.
+    class_init_superinterface_cache: HashMap<String, Vec<String>>,
     /// Materialized non-class resources from loaded JARs, keyed by path.
     pub resources: HashMap<String, Vec<u8>>,
+    /// Shared byte-array objects for resource-backed input streams.
+    resource_array_cache: HashMap<String, JRef>,
+    /// Cached declared-field metadata, analogous to OpenJDK's ReflectionData fast path.
+    reflection_fields_cache: HashMap<String, Rc<Vec<ReflectFieldInfo>>>,
+    /// Cached declared-method metadata, analogous to OpenJDK's ReflectionData fast path.
+    reflection_methods_cache: HashMap<String, Rc<Vec<ReflectMethodInfo>>>,
+    /// Cached declared-constructor metadata, analogous to OpenJDK's ReflectionData fast path.
+    reflection_ctors_cache: HashMap<String, Rc<Vec<ReflectConstructorInfo>>>,
     /// Non-class resources that still point at compressed JAR entries.
     pending_resources: HashMap<String, JarEntryRef>,
     /// Parsed ZIP archives kept alive so lazy entry reads do not re-scan the central directory.
     jar_archives: Vec<OwnedJarArchive>,
+    profiler: Option<VmProfiler>,
 }
 
 impl Vm {
@@ -494,7 +703,11 @@ impl Vm {
             string_pool: HashMap::new(),
             static_fields: HashMap::new(),
             clinit_done: HashSet::new(),
+            clinit_owners: HashMap::new(),
+            clinit_pending: HashSet::new(),
+            clinit_running: HashSet::new(),
             clinit_failed: HashSet::new(),
+            sync_clinit_stack: Vec::new(),
             class_pool: HashMap::new(),
             stdout_buffer: String::new(),
             stderr_buffer: String::new(),
@@ -510,10 +723,54 @@ impl Vm {
             scheduler: Scheduler::new(),
             monitors: HashMap::new(),
             method_owner_cache: HashMap::new(),
+            method_signature_cache: HashMap::new(),
+            methodref_constant_cache: HashMap::new(),
+            static_callsite_cache: HashMap::new(),
+            static_field_owner_cache: HashMap::new(),
+            fieldref_constant_cache: HashMap::new(),
+            method_exec_info_cache: HashMap::new(),
+            class_initializer_cache: HashMap::new(),
+            concrete_interface_method_cache: HashMap::new(),
+            instanceof_cache: HashMap::new(),
+            class_init_superinterface_cache: HashMap::new(),
             resources: HashMap::new(),
+            resource_array_cache: HashMap::new(),
+            reflection_fields_cache: HashMap::new(),
+            reflection_methods_cache: HashMap::new(),
+            reflection_ctors_cache: HashMap::new(),
             pending_resources: HashMap::new(),
             jar_archives: Vec::new(),
+            profiler: VmProfiler::from_env(),
         }
+    }
+
+    pub(in crate::interpreter) fn effective_time_slice(&self) -> usize {
+        if self.scheduler.runnable_count() <= 1 {
+            SINGLE_RUNNABLE_TIME_SLICE
+        } else {
+            TIME_SLICE
+        }
+    }
+
+    fn invalidate_resolution_caches(&mut self) {
+        self.method_owner_cache.clear();
+        self.method_signature_cache.clear();
+        self.methodref_constant_cache.clear();
+        self.static_callsite_cache.clear();
+        self.static_field_owner_cache.clear();
+        self.fieldref_constant_cache.clear();
+        self.method_exec_info_cache.clear();
+        self.instanceof_cache.clear();
+    }
+
+    fn invalidate_class_caches(&mut self, name: &str) {
+        self.invalidate_resolution_caches();
+        self.class_initializer_cache.remove(name);
+        self.concrete_interface_method_cache.remove(name);
+        self.class_init_superinterface_cache.remove(name);
+        self.reflection_fields_cache.remove(name);
+        self.reflection_methods_cache.remove(name);
+        self.reflection_ctors_cache.remove(name);
     }
 
     fn read_jar_entry(&mut self, entry: &JarEntryRef) -> Result<Vec<u8>, String> {
@@ -893,6 +1150,7 @@ impl Vm {
     /// Register a pre-parsed class file (always stored as `Ready`).
     pub fn load_class(&mut self, class_file: ClassFile) {
         let name = class_file.constant_pool.class_name(class_file.this_class).to_owned();
+        self.invalidate_class_caches(&name);
         self.classes.insert(name, LazyClass::Ready(class_file));
     }
 
@@ -900,11 +1158,17 @@ impl Vm {
     /// The class is parsed only when first accessed via [`Self::ensure_class_ready`].
     /// If the class is already registered (e.g., as `Ready`), the existing entry is kept.
     pub fn load_lazy(&mut self, name: String, bytes: Vec<u8>) {
-        self.classes.entry(name).or_insert(LazyClass::PendingBytes(bytes));
+        if !self.classes.contains_key(&name) {
+            self.invalidate_class_caches(&name);
+            self.classes.insert(name, LazyClass::PendingBytes(bytes));
+        }
     }
 
     fn load_lazy_jar_entry(&mut self, name: String, entry: JarEntryRef) {
-        self.classes.entry(name).or_insert(LazyClass::PendingJarEntry(entry));
+        if !self.classes.contains_key(&name) {
+            self.invalidate_class_caches(&name);
+            self.classes.insert(name, LazyClass::PendingJarEntry(entry));
+        }
     }
 
     /// Load classes and resources from a JAR (ZIP) byte array.
@@ -945,6 +1209,7 @@ impl Vm {
         }
         for (name, entry) in resource_entries {
             self.resources.remove(&name);
+            self.resource_array_cache.remove(&name);
             self.pending_resources.insert(name, entry);
         }
         Ok(count)
@@ -1019,6 +1284,23 @@ impl Vm {
         Ok(Some(data))
     }
 
+    pub(in crate::interpreter) fn resource_byte_array(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<JRef>, String> {
+        let normalized = name.strip_prefix('/').unwrap_or(name);
+        if let Some(array) = self.resource_array_cache.get(normalized) {
+            return Ok(Some(array.clone()));
+        }
+        let Some(data) = self.read_resource(normalized)? else {
+            return Ok(None);
+        };
+        let array = JObject::new_byte_array(data);
+        self.resource_array_cache
+            .insert(normalized.to_owned(), array.clone());
+        Ok(Some(array))
+    }
+
     /// Return a reference to a parsed class.
     /// Caller must have called `ensure_class_ready` first (or know the class is already Ready).
     pub(in crate::interpreter) fn get_class(&self, name: &str) -> Option<&ClassFile> {
@@ -1043,6 +1325,54 @@ impl Vm {
         if self.stderr_mode == StdioMode::Inherit && !self.stderr_buffer.is_empty() {
             Self::emit_host_line(true, &self.stderr_buffer);
             self.stderr_buffer.clear();
+        }
+    }
+
+    pub(in crate::interpreter) fn record_profile_sample(
+        &mut self,
+        opcode: u8,
+        frame_owner: &Rc<str>,
+        elapsed: std::time::Duration,
+    ) {
+        if let Some(profiler) = self.profiler.as_mut() {
+            profiler.record(opcode, frame_owner, elapsed);
+        }
+    }
+
+    pub fn profile_report(&self) -> Option<String> {
+        let profiler = self.profiler.as_ref()?;
+        let report = profiler.report();
+        if report.is_empty() {
+            None
+        } else {
+            Some(report)
+        }
+    }
+
+    pub fn take_profile_report(&mut self) -> Option<String> {
+        let profiler = self.profiler.take()?;
+        let report = profiler.report();
+        if report.is_empty() {
+            None
+        } else {
+            Some(report)
+        }
+    }
+
+    pub fn write_profile_report_if_enabled(&mut self) {
+        let Some(report) = self.profile_report() else {
+            return;
+        };
+        self.write_printstream_bytes(true, report.as_bytes());
+    }
+
+    pub(in crate::interpreter) fn record_for_name_sample(
+        &mut self,
+        runtime_name: &str,
+        elapsed: std::time::Duration,
+    ) {
+        if let Some(profiler) = self.profiler.as_mut() {
+            profiler.record_for_name(runtime_name, elapsed);
         }
     }
 
@@ -1306,6 +1636,14 @@ impl Vm {
         method_name: &str,
         descriptor: &str,
     ) -> Option<MethodExecInfo> {
+        let cache_key = (
+            class_name.to_owned(),
+            method_name.to_owned(),
+            descriptor.to_owned(),
+        );
+        if let Some(cached) = self.method_exec_info_cache.get(&cache_key) {
+            return Some(cached.clone());
+        }
         // Find the class that owns the method (following super/interface chain).
         let owner = self.find_method_owner(class_name, method_name, descriptor)?;
         self.ensure_class_ready(&owner);
@@ -1320,17 +1658,31 @@ impl Vm {
         let access_flags = class.methods[method_idx].access_flags;
         let (max_locals, has_code, code, exception_table) =
             if let Some(ca) = class.methods[method_idx].code() {
-                (ca.max_locals as usize, true, ca.code.clone(), ca.exception_table.clone())
+                (
+                    ca.max_locals as usize,
+                    true,
+                    Rc::new(ca.code.clone()),
+                    Rc::new(ca.exception_table.clone()),
+                )
             } else {
-                (0, false, vec![], vec![])
+                (0, false, Rc::new(Vec::new()), Rc::new(Vec::new()))
             };
         let cp = Rc::clone(&class.constant_pool.entries);
         let bootstrap_methods = class.attributes.iter().find_map(|a| {
-            if let Attribute::BootstrapMethods(bms) = a { Some(bms.clone()) } else { None }
-        }).unwrap_or_default();
-        Some(MethodExecInfo {
+            if let Attribute::BootstrapMethods(bms) = a {
+                Some(Rc::new(bms.clone()))
+            } else {
+                None
+            }
+        }).unwrap_or_else(|| Rc::new(Vec::new()));
+        let (param_tokens, _) = Self::parse_method_descriptor_tokens(&descriptor_out);
+        let param_slot_count = param_tokens
+            .iter()
+            .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
+            .sum();
+        let info = MethodExecInfo {
             class_name: class_name_out,
-            descriptor: descriptor_out,
+            descriptor: descriptor_out.clone(),
             access_flags,
             max_locals,
             has_code,
@@ -1338,7 +1690,12 @@ impl Vm {
             exception_table,
             cp,
             bootstrap_methods,
-        })
+            param_tokens: Rc::new(param_tokens),
+            param_slot_count,
+            frame_owner: Rc::<str>::from(format!("{owner}.{method_name}{descriptor_out}")),
+        };
+        self.method_exec_info_cache.insert(cache_key, info.clone());
+        Some(info)
     }
 
     /// Find the name of the class that owns a given method (super-chain walk).
@@ -1411,6 +1768,37 @@ impl Vm {
         self.find_method_owner(class_name, method_name, descriptor).is_some()
     }
 
+    /// Resolve the actual descriptor and access flags for a call site.
+    /// This folds exact-match lookup, relaxed descriptor matching, and flags
+    /// resolution into one cacheable result.
+    pub(in crate::interpreter) fn resolve_method_signature(
+        &mut self,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Option<(String, u16)> {
+        let cache_key = (
+            class_name.to_owned(),
+            method_name.to_owned(),
+            descriptor.to_owned(),
+        );
+        if let Some(cached) = self.method_signature_cache.get(&cache_key) {
+            return Some(cached.clone());
+        }
+
+        let mut resolved_descriptor = descriptor.to_owned();
+        let mut flags = self.find_method_flags(class_name, method_name, descriptor);
+        if flags.is_none() {
+            resolved_descriptor =
+                self.find_method_real_descriptor(class_name, method_name, descriptor)?;
+            flags = self.find_method_flags(class_name, method_name, &resolved_descriptor);
+        }
+        let flags = flags?;
+        let result = (resolved_descriptor, flags);
+        self.method_signature_cache.insert(cache_key, result.clone());
+        Some(result)
+    }
+
     /// Like find_method but with relaxed matching when the compiler emits generic types.
     /// Match priority:
     ///   1. Exact param types match (ignoring return type)
@@ -1471,81 +1859,503 @@ impl Vm {
 
     // ------------------------------------------------------------------
 
+    fn has_class_initializer(&mut self, class_name: &str) -> bool {
+        if let Some(cached) = self.class_initializer_cache.get(class_name) {
+            return *cached;
+        }
+        self.ensure_class_ready(class_name);
+        let has_clinit = self
+            .get_class(class_name)
+            .map(|cf| {
+                cf.methods.iter().any(|m| {
+                    cf.constant_pool.utf8(m.name_index) == "<clinit>"
+                        && cf.constant_pool.utf8(m.descriptor_index) == "()V"
+                })
+            })
+            .unwrap_or(false);
+        self.class_initializer_cache
+            .insert(class_name.to_owned(), has_clinit);
+        has_clinit
+    }
+
+    fn declares_concrete_interface_method(&mut self, class_name: &str) -> bool {
+        if let Some(cached) = self.concrete_interface_method_cache.get(class_name) {
+            return *cached;
+        }
+        self.ensure_class_ready(class_name);
+        let has_concrete_method = self
+            .get_class(class_name)
+            .map(|cf| {
+                cf.methods.iter().any(|m| {
+                    let name = cf.constant_pool.utf8(m.name_index);
+                    name != "<clinit>"
+                        && name != "<init>"
+                        && (m.access_flags & 0x0400) == 0
+                        && (m.access_flags & 0x0008) == 0
+                })
+            })
+            .unwrap_or(false);
+        self.concrete_interface_method_cache
+            .insert(class_name.to_owned(), has_concrete_method);
+        has_concrete_method
+    }
+
+    fn collect_class_init_superinterfaces(
+        &mut self,
+        interface_name: &str,
+        seen: &mut HashSet<String>,
+        ordered: &mut Vec<String>,
+    ) {
+        if !seen.insert(interface_name.to_owned()) {
+            return;
+        }
+        self.ensure_class_ready(interface_name);
+        let Some(class) = self.get_class(interface_name) else {
+            return;
+        };
+        if (class.access_flags & 0x0200) == 0 {
+            return;
+        }
+        let super_ifaces: Vec<String> = class
+            .interfaces
+            .iter()
+            .map(|&idx| class.constant_pool.class_name(idx).to_owned())
+            .collect();
+        for super_iface in super_ifaces {
+            self.collect_class_init_superinterfaces(&super_iface, seen, ordered);
+        }
+        if self.declares_concrete_interface_method(interface_name) {
+            ordered.push(interface_name.to_owned());
+        }
+    }
+
+    /// JVMS §5.5 step 7:
+    /// before initializing a class, initialize direct superinterfaces and their
+    /// superinterfaces in left-to-right recursive order, but only if the
+    /// interface declares at least one non-abstract, non-static method.
+    fn class_init_superinterfaces(&mut self, class_name: &str) -> Vec<String> {
+        if let Some(cached) = self.class_init_superinterface_cache.get(class_name) {
+            return cached.clone();
+        }
+        self.ensure_class_ready(class_name);
+        let Some(class) = self.get_class(class_name) else {
+            return Vec::new();
+        };
+        if (class.access_flags & 0x0200) != 0 {
+            return Vec::new();
+        }
+        let direct_ifaces: Vec<String> = class
+            .interfaces
+            .iter()
+            .map(|&idx| class.constant_pool.class_name(idx).to_owned())
+            .collect();
+        let mut seen = HashSet::new();
+        let mut ordered = Vec::new();
+        for iface in direct_ifaces {
+            self.collect_class_init_superinterfaces(&iface, &mut seen, &mut ordered);
+        }
+        self.class_init_superinterface_cache
+            .insert(class_name.to_owned(), ordered.clone());
+        ordered
+    }
+
+    fn find_static_field_owner(
+        &mut self,
+        class_name: &str,
+        field_name: &str,
+        descriptor: &str,
+    ) -> Option<String> {
+        let cache_key = (
+            class_name.to_owned(),
+            field_name.to_owned(),
+            descriptor.to_owned(),
+        );
+        if let Some(cached) = self.static_field_owner_cache.get(&cache_key) {
+            return cached.clone();
+        }
+        let result = self.find_static_field_owner_uncached(class_name, field_name, descriptor);
+        if result.is_some() {
+            self.static_field_owner_cache
+                .insert(cache_key, result.clone());
+        }
+        result
+    }
+
+    fn find_static_field_owner_uncached(
+        &mut self,
+        class_name: &str,
+        field_name: &str,
+        descriptor: &str,
+    ) -> Option<String> {
+        self.ensure_class_ready(class_name);
+        let class = self.get_class(class_name)?;
+        for field in &class.fields {
+            let name = class.constant_pool.utf8(field.name_index);
+            let desc = class.constant_pool.utf8(field.descriptor_index);
+            if name == field_name && desc == descriptor && (field.access_flags & 0x0008) != 0 {
+                return Some(class.constant_pool.class_name(class.this_class).to_owned());
+            }
+        }
+        let super_name: Option<String> = if class.super_class != 0 {
+            Some(class.constant_pool.class_name(class.super_class).to_owned())
+        } else {
+            None
+        };
+        let iface_names: Vec<String> = class
+            .interfaces
+            .iter()
+            .map(|&idx| class.constant_pool.class_name(idx).to_owned())
+            .collect();
+        for iface_name in iface_names {
+            if let Some(owner) =
+                self.find_static_field_owner(&iface_name, field_name, descriptor)
+            {
+                return Some(owner);
+            }
+        }
+        if let Some(super_name) = super_name {
+            if let Some(owner) =
+                self.find_static_field_owner(&super_name, field_name, descriptor)
+            {
+                return Some(owner);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn mark_class_init_done(&mut self, class_name: &str) {
+        self.clinit_owners.remove(class_name);
+        self.clinit_pending.remove(class_name);
+        self.clinit_running.remove(class_name);
+        self.clinit_failed.remove(class_name);
+        self.clinit_done.insert(class_name.to_owned());
+    }
+
+    pub(crate) fn mark_class_init_failed(&mut self, class_name: &str) {
+        self.clinit_owners.remove(class_name);
+        self.clinit_pending.remove(class_name);
+        self.clinit_running.remove(class_name);
+        self.clinit_done.remove(class_name);
+        self.clinit_failed.insert(class_name.to_owned());
+    }
+
+    fn current_thread_id(&self) -> ThreadId {
+        self.scheduler.current_thread().id
+    }
+
+    fn class_init_owner(&self, class_name: &str) -> Option<ThreadId> {
+        self.clinit_owners.get(class_name).copied()
+    }
+
+    fn begin_class_init(&mut self, class_name: &str) {
+        self.clinit_owners
+            .insert(class_name.to_owned(), self.current_thread_id());
+    }
+
+    pub(crate) fn push_sync_clinit_frame(&mut self, fi: &trampoline::FrameInfo) {
+        if let Some(class_name) = &fi.class_initializer_owner {
+            self.sync_clinit_stack.push(class_name.clone());
+        }
+    }
+
+    pub(crate) fn pop_sync_clinit_frame(&mut self, fi: &trampoline::FrameInfo) {
+        let Some(class_name) = &fi.class_initializer_owner else {
+            return;
+        };
+        if matches!(self.sync_clinit_stack.last(), Some(last) if last == class_name) {
+            self.sync_clinit_stack.pop();
+            return;
+        }
+        if let Some(pos) = self
+            .sync_clinit_stack
+            .iter()
+            .rposition(|active| active == class_name)
+        {
+            self.sync_clinit_stack.remove(pos);
+        }
+    }
+
+    pub(crate) fn register_sync_clinit_frames(&mut self, call_stack: &[trampoline::FrameInfo]) {
+        for fi in call_stack {
+            self.push_sync_clinit_frame(fi);
+        }
+    }
+
+    pub(crate) fn unregister_sync_clinit_frames(&mut self, call_stack: &[trampoline::FrameInfo]) {
+        for fi in call_stack.iter().rev() {
+            self.pop_sync_clinit_frame(fi);
+        }
+    }
+
+    pub(crate) fn push_thread_clinit_frame(&mut self, fi: &trampoline::FrameInfo) {
+        if let Some(class_name) = &fi.class_initializer_owner {
+            self.scheduler
+                .current_thread_mut()
+                .active_clinit_stack
+                .push(class_name.clone());
+        }
+    }
+
+    pub(crate) fn pop_thread_clinit_frame(&mut self, fi: &trampoline::FrameInfo) {
+        let Some(class_name) = &fi.class_initializer_owner else {
+            return;
+        };
+        let stack = &mut self.scheduler.current_thread_mut().active_clinit_stack;
+        if matches!(stack.last(), Some(last) if last == class_name) {
+            stack.pop();
+            return;
+        }
+        if let Some(pos) = stack.iter().rposition(|active| active == class_name) {
+            stack.remove(pos);
+        }
+    }
+
+    pub(crate) fn register_thread_clinit_frames(&mut self, call_stack: &[trampoline::FrameInfo]) {
+        for fi in call_stack {
+            self.push_thread_clinit_frame(fi);
+        }
+    }
+
+    pub(crate) fn unregister_thread_clinit_frames(
+        &mut self,
+        call_stack: &[trampoline::FrameInfo],
+    ) {
+        for fi in call_stack.iter().rev() {
+            self.pop_thread_clinit_frame(fi);
+        }
+    }
+
+    fn is_class_initializer_active_on_current_stack(&self, class_name: &str) -> bool {
+        if self
+            .sync_clinit_stack
+            .iter()
+            .any(|active| active == class_name)
+        {
+            return true;
+        }
+        self.scheduler
+            .current_thread()
+            .active_clinit_stack
+            .iter()
+            .any(|active| active == class_name)
+    }
+
+    fn class_init_prerequisites(&mut self, class_name: &str) -> (Option<String>, Vec<String>) {
+        self.ensure_class_ready(class_name);
+        let Some(class) = self.get_class(class_name) else {
+            return (None, Vec::new());
+        };
+        if (class.access_flags & 0x0200) != 0 {
+            return (None, Vec::new());
+        }
+        let super_name = if class.super_class != 0 {
+            let s = class.constant_pool.class_name(class.super_class).to_owned();
+            (s != "java/lang/Object").then_some(s)
+        } else {
+            None
+        };
+        let iface_names = self.class_init_superinterfaces(class_name);
+        (super_name, iface_names)
+    }
+
+    fn class_init_depends_on(
+        &mut self,
+        class_name: &str,
+        prerequisite: &str,
+        visited: &mut HashSet<String>,
+    ) -> bool {
+        if !visited.insert(class_name.to_owned()) {
+            return false;
+        }
+        let (super_name, iface_names) = self.class_init_prerequisites(class_name);
+        if super_name.as_deref() == Some(prerequisite) {
+            return true;
+        }
+        if iface_names.iter().any(|iface| iface == prerequisite) {
+            return true;
+        }
+        if let Some(super_name) = super_name {
+            if self.class_init_depends_on(&super_name, prerequisite, visited) {
+                return true;
+            }
+        }
+        for iface in iface_names {
+            if self.class_init_depends_on(&iface, prerequisite, visited) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn current_stack_is_in_class_init_prerequisite_of(&mut self, class_name: &str) -> bool {
+        let mut active = self.sync_clinit_stack.clone();
+        active.extend(
+            self.scheduler
+                .current_thread()
+                .active_clinit_stack
+                .iter()
+                .cloned(),
+        );
+        active.into_iter().any(|active_class| {
+            let mut visited = HashSet::new();
+            self.class_init_depends_on(class_name, &active_class, &mut visited)
+        })
+    }
+
     /// Run `<clinit>` for a class if it hasn't been initialized yet.
     /// Per JVMS §5.5: Before a class is initialized, its direct superclass must
     /// be initialized first (recursively), and any superinterfaces that declare
-    /// default methods must also be initialized.
+    /// concrete non-static methods must also be initialized.
     fn ensure_class_init(&mut self, class_name: &str) -> Result<(), String> {
         if self.clinit_done.contains(class_name) {
             return Ok(());
         }
-        // JVMS §5.5: if <clinit> previously failed, the class is in an erroneous state;
-        // subsequent uses must throw NoClassDefFoundError.
         if self.clinit_failed.contains(class_name) {
             self.throw_no_class_def_found(class_name);
             return Err(format!("java/lang/NoClassDefFoundError: {class_name}"));
         }
-        // Mark as initialized before running to prevent recursion.
-        self.clinit_done.insert(class_name.to_owned());
+        let current_thread_id = self.current_thread_id();
+        if let Some(owner) = self.class_init_owner(class_name) {
+            if owner == current_thread_id {
+                return Ok(());
+            }
+            // The synchronous path has no cooperative wait mechanism. In practice
+            // it should only see current-thread re-entry, so treat foreign-thread
+            // ownership as already in progress and avoid double-starting <clinit>.
+            return Ok(());
+        }
+        self.begin_class_init(class_name);
+        self.clinit_pending.insert(class_name.to_owned());
 
-        // Ensure the class is parsed first.
-        self.ensure_class_ready(class_name);
-
-        // Initialize super class first (JVMS §5.5 step 7).
-        let (super_name, iface_names) = if let Some(class) = self.get_class(class_name) {
-            let sup = if class.super_class != 0 {
-                let s = class.constant_pool.class_name(class.super_class).to_owned();
-                if s != "java/lang/Object" { Some(s) } else { None }
-            } else {
-                None
-            };
-            let ifaces: Vec<String> = class.interfaces.iter()
-                .map(|&idx| class.constant_pool.class_name(idx).to_owned())
-                .collect();
-            (sup, ifaces)
-        } else {
-            (None, vec![])
-        };
+        let (super_name, iface_names) = self.class_init_prerequisites(class_name);
         if let Some(s) = super_name {
-            self.ensure_class_init(&s)?;
-        }
-        for iface in iface_names {
-            self.ensure_class_init(&iface)?;
-        }
-
-        // Check if THIS class (not superclasses) has a <clinit> method.
-        // <clinit> is not inherited, so we must not walk the super-chain here —
-        // doing so would re-execute a superclass <clinit> that was already run.
-        self.ensure_class_ready(class_name);
-        let has_clinit = self.get_class(class_name).map(|cf| {
-            cf.methods.iter().any(|m| {
-                cf.constant_pool.utf8(m.name_index) == "<clinit>"
-                    && cf.constant_pool.utf8(m.descriptor_index) == "()V"
-            })
-        }).unwrap_or(false);
-        if has_clinit {
-            // JVMS §5.5: if <clinit> throws, wrap in ExceptionInInitializerError.
-            if let Err(e) = self.invoke_static(class_name, "<clinit>", "()V", vec![]) {
-                // Preserve the original exception object as the "cause" field.
-                let cause = self.pending_exception_mut().take();
-                let eiie = self.new_vm_exception_message("java/lang/ExceptionInInitializerError", e.clone());
-                if let Some(c) = cause {
-                    eiie.borrow_mut().fields.insert("cause".to_owned(), JValue::Ref(Some(c)));
-                }
-                *self.pending_exception_mut() = Some(eiie);
-                // Remove from clinit_done so subsequent uses hit the clinit_failed path.
-                self.clinit_done.remove(class_name);
-                self.clinit_failed.insert(class_name.to_owned());
-                // Return an error string that encodes the wrapped exception type so that
-                // find_exception_handler sees ExceptionInInitializerError, not the original cause.
-                #[cfg(target_arch = "wasm32")]
-                console_error(&format!("[clinit-fail] {class_name}: {e}"));
-                #[cfg(not(target_arch = "wasm32"))]
-                eprintln!("[clinit-fail] {class_name}: {e}");
-                return Err("java/lang/ExceptionInInitializerError".to_owned());
+            if let Err(err) = self.ensure_class_init(&s) {
+                self.mark_class_init_failed(class_name);
+                return Err(err);
             }
         }
+        for iface in iface_names {
+            if let Err(err) = self.ensure_class_init(&iface) {
+                self.mark_class_init_failed(class_name);
+                return Err(err);
+            }
+        }
+
+        if !self.has_class_initializer(class_name) {
+            self.mark_class_init_done(class_name);
+            return Ok(());
+        }
+
+        self.clinit_pending.remove(class_name);
+        self.clinit_running.insert(class_name.to_owned());
+        if let Err(e) = self.invoke_static(class_name, "<clinit>", "()V", vec![]) {
+            let cause = self.pending_exception_mut().take();
+            let eiie = self.new_vm_exception_message("java/lang/ExceptionInInitializerError", e.clone());
+            if let Some(c) = cause {
+                eiie.borrow_mut().fields.insert("cause".to_owned(), JValue::Ref(Some(c)));
+            }
+            *self.pending_exception_mut() = Some(eiie);
+            self.mark_class_init_failed(class_name);
+            return Err("java/lang/ExceptionInInitializerError".to_owned());
+        }
+        self.mark_class_init_done(class_name);
         Ok(())
+    }
+
+    pub(crate) fn ensure_class_init_or_schedule(&mut self, class_name: &str) -> Result<bool, String> {
+        if self.clinit_done.contains(class_name) {
+            return Ok(false);
+        }
+        if self.clinit_failed.contains(class_name) {
+            self.throw_no_class_def_found(class_name);
+            return Err(format!("java/lang/NoClassDefFoundError: {class_name}"));
+        }
+        if self.is_class_initializer_active_on_current_stack(class_name) {
+            return Ok(false);
+        }
+        let current_thread_id = self.current_thread_id();
+        match self.class_init_owner(class_name) {
+            Some(owner) if owner != current_thread_id => return Ok(true),
+            Some(_) => {
+                if self.clinit_running.contains(class_name) {
+                    return Ok(true);
+                }
+            }
+            None => {
+                self.begin_class_init(class_name);
+                self.clinit_pending.insert(class_name.to_owned());
+            }
+        }
+
+        let (super_name, iface_names) = self.class_init_prerequisites(class_name);
+        if let Some(s) = super_name {
+            match self.ensure_class_init_or_schedule(&s) {
+                Ok(should_yield) => {
+                    if should_yield || !self.clinit_done.contains(&s) {
+                        if self.current_stack_is_in_class_init_prerequisite_of(class_name) {
+                            return Ok(false);
+                        }
+                        return Ok(true);
+                    }
+                }
+                Err(err) => {
+                    self.mark_class_init_failed(class_name);
+                    return Err(err);
+                }
+            }
+        }
+        for iface in iface_names {
+            match self.ensure_class_init_or_schedule(&iface) {
+                Ok(should_yield) => {
+                    if should_yield || !self.clinit_done.contains(&iface) {
+                        if self.current_stack_is_in_class_init_prerequisite_of(class_name) {
+                            return Ok(false);
+                        }
+                        return Ok(true);
+                    }
+                }
+                Err(err) => {
+                    self.mark_class_init_failed(class_name);
+                    return Err(err);
+                }
+            }
+        }
+
+        if !self.has_class_initializer(class_name) {
+            self.mark_class_init_done(class_name);
+            return Ok(false);
+        }
+
+        self.clinit_pending.remove(class_name);
+        self.clinit_running.insert(class_name.to_owned());
+        match self.build_static_frame(class_name, "<clinit>", "()V", vec![], false) {
+            Ok(Some(fi)) => {
+                debug_assert!(self.pending_frame_mut().is_none());
+                *self.pending_frame_mut() = Some(fi);
+                Ok(true)
+            }
+            Ok(None) => {
+                if let Err(e) = self.invoke_static(class_name, "<clinit>", "()V", vec![]) {
+                    let cause = self.pending_exception_mut().take();
+                    let eiie = self.new_vm_exception_message(
+                        "java/lang/ExceptionInInitializerError",
+                        e.clone(),
+                    );
+                    if let Some(c) = cause {
+                        eiie.borrow_mut().fields.insert("cause".to_owned(), JValue::Ref(Some(c)));
+                    }
+                    *self.pending_exception_mut() = Some(eiie);
+                    self.mark_class_init_failed(class_name);
+                    return Err("java/lang/ExceptionInInitializerError".to_owned());
+                }
+                self.mark_class_init_done(class_name);
+                Ok(false)
+            }
+            Err(err) => {
+                self.mark_class_init_failed(class_name);
+                Err(err)
+            }
+        }
     }
 
     /// Recursively create a multi-dimensional array for `multianewarray`.
@@ -1576,6 +2386,16 @@ impl Vm {
     /// Check if `runtime_class` is an instance of `target_class` (by name).
     /// Handles array types per JVMS §6.5.instanceof / §6.5.checkcast.
     fn is_instance_of(&mut self, runtime_class: &str, target_class: &str) -> bool {
+        let cache_key = (runtime_class.to_owned(), target_class.to_owned());
+        if let Some(cached) = self.instanceof_cache.get(&cache_key) {
+            return *cached;
+        }
+        let result = self.is_instance_of_uncached(runtime_class, target_class);
+        self.instanceof_cache.insert(cache_key, result);
+        result
+    }
+
+    fn is_instance_of_uncached(&mut self, runtime_class: &str, target_class: &str) -> bool {
         if runtime_class == target_class { return true; }
         if target_class == "java/lang/Object" { return true; }
 

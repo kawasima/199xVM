@@ -29,20 +29,26 @@ fn framed_jars(jars: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// Run a test class from the test JAR via the JAR loader.
-fn run_jar_test_result(
-    class: &str,
-    method: &str,
-    descriptor: &str,
-) -> Result<jvm_core::heap::JValue, String> {
-    let mut vm = jvm_core::interpreter::Vm::new();
-    jvm_core::load_bundle(&mut vm, shim_bundle());
-    vm.load_jar(test_jar()).expect("failed to load test JAR");
-    let result = vm.invoke_static_threaded(class, method, descriptor, vec![]);
-    vm.flush_printstreams();
-    result
+fn pump_process_to_exit(
+    process: &mut jvm_core::JvmProcess,
+    max_iters: usize,
+    pump_rounds: usize,
+) -> jvm_core::ProcessExit {
+    for _ in 0..max_iters {
+        match process.pump(pump_rounds) {
+            jvm_core::ProcessState::Running => {}
+            jvm_core::ProcessState::WaitingForInput => {
+                panic!("process unexpectedly blocked on stdin");
+            }
+            jvm_core::ProcessState::Exited => {
+                return process.exit().cloned().expect("process exit");
+            }
+        }
+    }
+    panic!("process did not exit after {max_iters} iterations with pump_rounds={pump_rounds}");
 }
 
+/// Run a test class from the test JAR via the JAR loader.
 fn run_jar_test(class: &str, method: &str, descriptor: &str) -> String {
     let mut vm = jvm_core::interpreter::Vm::new();
     jvm_core::load_bundle(&mut vm, shim_bundle());
@@ -156,6 +162,16 @@ fn try_catch_npe() {
 }
 
 #[test]
+fn try_catch_checked_exception() {
+    let result = run_jar_test(
+        "TryCatchCheckedExceptionTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "java.io.FileNotFoundException");
+}
+
+#[test]
 fn factorial_long() {
     let result = run_jar_test(
         "Factorial",
@@ -184,25 +200,65 @@ fn arrays_copy_of_int() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn access_controller_shims() {
+fn access_controller_action_overloads() {
     let result = run_jar_test(
         "AccessControllerShimTest",
-        "run",
+        "runActionOverloads",
         "()Ljava/lang/String;",
     );
     assert_eq!(result, "one|two|three|true");
 }
 
 #[test]
-fn access_controller_uncaught_exception_wrapper() {
-    let err = run_jar_test_result(
-        "AccessControllerShimTest",
-        "throwWrappedException",
-        "()Ljava/lang/String;",
+fn access_controller_exception_wrapper_reaches_process_boundary() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "AccessControllerExceptionProcessMain",
+        &[],
+        jvm_core::StdioMode::Ignore,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
     )
-    .expect_err("expected uncaught PrivilegedActionException");
-    assert!(err.starts_with("Exception: java/security/PrivilegedActionException"));
-    assert!(err.contains("java/io/IOException: boom"));
+    .expect("launch classpath main");
+
+    let exit = pump_process_to_exit(&mut process, 4096, 64);
+    let stdout = String::from_utf8(process.take_stdout()).unwrap();
+    let stderr = String::from_utf8(process.take_stderr()).unwrap();
+
+    assert!(stdout.is_empty());
+    assert!(stderr.is_empty());
+    assert_eq!(exit.exit_code, 1);
+    let uncaught = exit
+        .uncaught_exception
+        .expect("expected uncaught PrivilegedActionException at process boundary");
+    assert!(uncaught.contains("java/security/PrivilegedActionException"));
+    assert!(uncaught.contains("java/io/IOException: boom"));
+}
+
+#[test]
+fn system_exit_sets_process_exit_code_without_uncaught_exception() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "SystemExitProcessMain",
+        &[],
+        jvm_core::StdioMode::Ignore,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+    )
+    .expect("launch classpath main");
+
+    let exit = pump_process_to_exit(&mut process, 4096, 64);
+    let stdout = String::from_utf8(process.take_stdout()).unwrap();
+    let stderr = String::from_utf8(process.take_stderr()).unwrap();
+
+    assert!(stdout.is_empty());
+    assert!(stderr.is_empty());
+    assert_eq!(exit.exit_code, 7);
+    assert_eq!(exit.uncaught_exception, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -210,13 +266,33 @@ fn access_controller_uncaught_exception_wrapper() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn random_shims() {
+fn seeded_random_shims() {
     let result = run_jar_test(
         "RandomShimTest",
+        "runSeededRandom",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|true|true|[2, 4, 5, 1, 3]");
+}
+
+#[test]
+fn secure_random_shim_api() {
+    let result = run_jar_test(
+        "RandomShimTest",
+        "runSecureRandomApi",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|true|true");
+}
+
+#[test]
+fn stack_shim_api() {
+    let result = run_jar_test(
+        "StackShimTest",
         "run",
         "()Ljava/lang/String;",
     );
-    assert_eq!(result, "true|true|true|[2, 4, 5, 1, 3]|true|true");
+    assert_eq!(result, "alpha|beta|beta|2|beta|false|alpha|true");
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +307,53 @@ fn parse_number_shims() {
         "()Ljava/lang/String;",
     );
     assert_eq!(result, "3.5|2.25|true|true|true");
+}
+
+#[test]
+fn floating_wrapper_instance_predicates() {
+    let result = run_jar_test(
+        "DoubleInstanceMethodsTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|true|true|true");
+}
+
+#[test]
+fn objects_null_predicates() {
+    let result = run_jar_test(
+        "ObjectsPredicatesTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|false|false|true");
+}
+
+#[test]
+fn integer_bit_intrinsics() {
+    let result = run_jar_test(
+        "IntegerBitIntrinsicsTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(
+        result,
+        "16|27|4|32|1|67305985|32|59|4|256|1|578437695752307201"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// getstatic/putstatic must resolve the declaring owner, not just the symbolic one
+// ---------------------------------------------------------------------------
+
+#[test]
+fn inherited_static_field_uses_declaring_owner() {
+    let result = run_jar_test(
+        "InheritedStaticFieldTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "1|7|7");
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +432,62 @@ fn classloader_missing_class_throws_cnfe() {
     assert_eq!(result, "ClassNotFoundException:com.example.NonExistentClass");
 }
 
+#[test]
+fn classloader_resource_streams_are_independent() {
+    let mut vm = jvm_core::interpreter::Vm::new();
+    jvm_core::load_bundle(&mut vm, shim_bundle());
+    vm.load_jar(jar_loader_test_jar()).expect("load test jar");
+
+    let class_loader = match vm
+        .invoke_static("java/lang/ClassLoader", "getSystemClassLoader", "()Ljava/lang/ClassLoader;", vec![])
+        .expect("getSystemClassLoader")
+    {
+        jvm_core::heap::JValue::Ref(Some(r)) => r,
+        other => panic!("unexpected class loader result: {other:?}"),
+    };
+    let arg = jvm_core::heap::JValue::Ref(Some(vm.intern_string("resource.txt")));
+
+    let left = match vm
+        .invoke_virtual(
+            class_loader.clone(),
+            "java/lang/ClassLoader",
+            "getResourceAsStream",
+            "(Ljava/lang/String;)Ljava/io/InputStream;",
+            vec![arg.clone()],
+        )
+        .expect("left stream")
+    {
+        jvm_core::heap::JValue::Ref(Some(r)) => r,
+        other => panic!("unexpected left stream result: {other:?}"),
+    };
+    let right = match vm
+        .invoke_virtual(
+            class_loader,
+            "java/lang/ClassLoader",
+            "getResourceAsStream",
+            "(Ljava/lang/String;)Ljava/io/InputStream;",
+            vec![arg],
+        )
+        .expect("right stream")
+    {
+        jvm_core::heap::JValue::Ref(Some(r)) => r,
+        other => panic!("unexpected right stream result: {other:?}"),
+    };
+
+    assert!(!std::rc::Rc::ptr_eq(&left, &right));
+    let left_buf = match left.borrow().fields.get("buf") {
+        Some(jvm_core::heap::JValue::Ref(Some(r))) => r.clone(),
+        other => panic!("unexpected left buf: {other:?}"),
+    };
+    let right_buf = match right.borrow().fields.get("buf") {
+        Some(jvm_core::heap::JValue::Ref(Some(r))) => r.clone(),
+        other => panic!("unexpected right buf: {other:?}"),
+    };
+    assert!(std::rc::Rc::ptr_eq(&left_buf, &right_buf));
+    assert_eq!(left.borrow().fields.get("pos").map(|v| v.as_int()), Some(0));
+    assert_eq!(right.borrow().fields.get("pos").map(|v| v.as_int()), Some(0));
+}
+
 // ---------------------------------------------------------------------------
 // JVMS §5.5: ExceptionInInitializerError when <clinit> throws
 // ---------------------------------------------------------------------------
@@ -366,6 +545,20 @@ fn clinit_erroneous_state_throws_ncdfe_on_second_access() {
 }
 
 // ---------------------------------------------------------------------------
+// JVMS §5.5: class init only pulls in superinterfaces with concrete instance methods
+// ---------------------------------------------------------------------------
+
+#[test]
+fn class_init_skips_plain_superinterfaces() {
+    let result = run_jar_test(
+        "InterfaceClassInitSelectionTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "D");
+}
+
+// ---------------------------------------------------------------------------
 // JVMS §6.5: invokeinterface dispatches to interface default method
 // ---------------------------------------------------------------------------
 
@@ -377,6 +570,49 @@ fn interface_default_method_dispatch() {
         "()Ljava/lang/String;",
     );
     assert_eq!(result, "I am Thing");
+}
+
+#[test]
+fn reflection_includes_interface_default_methods() {
+    let result = run_jar_test(
+        "ReflectionInterfaceDefaultMethodTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "iface|true");
+}
+
+#[test]
+fn reflection_method_arrays_are_cached_but_not_aliased() {
+    let result = run_jar_test(
+        "ReflectionMethodArrayIsolationTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|true|true");
+}
+
+#[test]
+fn reflection_invocation_target_exception_exposes_cause() {
+    let result = run_jar_test(
+        "ReflectionInvocationCauseTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(
+        result,
+        "java.lang.reflect.InvocationTargetException|ReflectionInvocationCauseTest$Boom:boom"
+    );
+}
+
+#[test]
+fn reflection_invoke_exception_can_be_unwrapped_and_caught() {
+    let result = run_jar_test(
+        "ReflectionInvocationCatchUnwrapTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ReflectionInvocationCatchUnwrapTest$Cookies:wrapped");
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +627,16 @@ fn thread_start_join_basic() {
         "()Ljava/lang/String;",
     );
     assert_eq!(result, "ABC");
+}
+
+#[test]
+fn thread_get_stack_trace_shim() {
+    let result = run_jar_test(
+        "ThreadStackTraceShimTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "len=0");
 }
 
 #[test]
@@ -642,6 +888,12 @@ fn regex_capture_groups() {
 }
 
 #[test]
+fn regex_find_escaped_parens() {
+    let result = run_jar_test("RegexFindEscapedParensTest", "run", "()Ljava/lang/String;");
+    assert_eq!(result, "true|Wrong number of args (0) passed to: :kw|false");
+}
+
+#[test]
 fn string_replace_char() {
     let result = run_jar_test("StringReplaceTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "clojure.core_proxy__init");
@@ -879,6 +1131,64 @@ fn launcher_process_pipe_write_after_close_is_ignored() {
     assert_eq!(String::from_utf8(process.take_stderr()).unwrap(), "B");
 
     let exit = process.exit().expect("process exit");
+    assert_eq!(exit.exit_code, 0);
+    assert_eq!(exit.uncaught_exception, None);
+}
+
+#[test]
+fn launcher_process_clinit_yields_before_static_side_effects() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "ClinitYieldProcessMain",
+        &[],
+        jvm_core::StdioMode::Ignore,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+    )
+    .expect("launch classpath main");
+
+    let first_state = process.pump(1);
+    assert_eq!(first_state, jvm_core::ProcessState::Running);
+    assert_eq!(String::from_utf8(process.take_stdout()).unwrap(), "");
+    assert_eq!(String::from_utf8(process.take_stderr()).unwrap(), "");
+
+    let exit = pump_process_to_exit(&mut process, 4096, 64);
+    let stdout = String::from_utf8(process.take_stdout()).unwrap();
+    let stderr = String::from_utf8(process.take_stderr()).unwrap();
+
+    assert_eq!(stdout, "Idone");
+    assert!(stderr.is_empty());
+    assert_eq!(exit.exit_code, 0);
+    assert_eq!(exit.uncaught_exception, None);
+}
+
+#[test]
+fn launcher_process_superclass_clinit_chain_yields_before_static_side_effects() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "ClinitChainYieldProcessMain",
+        &[],
+        jvm_core::StdioMode::Ignore,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+    )
+    .expect("launch classpath main");
+
+    let first_state = process.pump(1);
+    assert_eq!(first_state, jvm_core::ProcessState::Running);
+    assert_eq!(String::from_utf8(process.take_stdout()).unwrap(), "");
+    assert_eq!(String::from_utf8(process.take_stderr()).unwrap(), "");
+
+    let exit = pump_process_to_exit(&mut process, 4096, 64);
+    let stdout = String::from_utf8(process.take_stdout()).unwrap();
+    let stderr = String::from_utf8(process.take_stderr()).unwrap();
+
+    assert_eq!(stdout, "BMLbase:mid:leaf");
+    assert!(stderr.is_empty());
     assert_eq!(exit.exit_code, 0);
     assert_eq!(exit.uncaught_exception, None);
 }

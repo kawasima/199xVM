@@ -143,6 +143,10 @@ public class Thread implements Runnable {
 
     public void interrupt() {}
 
+    public StackTraceElement[] getStackTrace() {
+        return new StackTraceElement[0];
+    }
+
     public final boolean isVirtual() {
         return false;
     }

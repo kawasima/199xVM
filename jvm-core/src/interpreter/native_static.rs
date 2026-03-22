@@ -199,6 +199,71 @@ impl super::Vm {
                 }
                 Some(JValue::Int(result))
             }
+            ("java/lang/Integer", "highestOneBit", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                let out = if value == 0 {
+                    0
+                } else {
+                    1u32 << (31 - value.leading_zeros())
+                };
+                Some(JValue::Int(out as i32))
+            }
+            ("java/lang/Integer", "lowestOneBit", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0);
+                Some(JValue::Int(value & value.wrapping_neg()))
+            }
+            ("java/lang/Integer", "numberOfLeadingZeros", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.leading_zeros() as i32))
+            }
+            ("java/lang/Integer", "numberOfTrailingZeros", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.trailing_zeros() as i32))
+            }
+            ("java/lang/Integer", "bitCount", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.count_ones() as i32))
+            }
+            ("java/lang/Integer", "rotateLeft", "(II)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.rotate_left(distance) as i32))
+            }
+            ("java/lang/Integer", "rotateRight", "(II)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.rotate_right(distance) as i32))
+            }
+            ("java/lang/Integer", "reverseBytes", "(I)I") => {
+                let value = _args.first().map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Int(value.swap_bytes() as i32))
+            }
+            ("java/lang/Long", "bitCount", "(J)I") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Int(value.count_ones() as i32))
+            }
+            ("java/lang/Long", "numberOfLeadingZeros", "(J)I") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Int(value.leading_zeros() as i32))
+            }
+            ("java/lang/Long", "numberOfTrailingZeros", "(J)I") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Int(value.trailing_zeros() as i32))
+            }
+            ("java/lang/Long", "rotateLeft", "(JI)J") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Long(value.rotate_left(distance) as i64))
+            }
+            ("java/lang/Long", "rotateRight", "(JI)J") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                let distance = _args.get(1).map(|v| v.as_int()).unwrap_or(0) as u32;
+                Some(JValue::Long(value.rotate_right(distance) as i64))
+            }
+            ("java/lang/Long", "reverseBytes", "(J)J") => {
+                let value = _args.first().map(|v| v.as_long()).unwrap_or(0) as u64;
+                Some(JValue::Long(value.swap_bytes() as i64))
+            }
             ("java/lang/Class", "getPrimitiveClass", "(Ljava/lang/String;)Ljava/lang/Class;") => {
                 let name = match _args
                     .first()
@@ -225,33 +290,46 @@ impl super::Vm {
                         return Some(JValue::Void);
                     }
                 };
+                let profile_started = self.profiler.as_ref().map(|_| std::time::Instant::now());
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
                 // Primitive class names are VM-defined synthetic Class objects.
                 if matches!(
                     internal.as_str(),
                     "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void"
                 ) {
-                    return Some(JValue::Ref(Some(self.class_object(internal))));
+                    let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                    if let Some(started) = profile_started {
+                        self.record_for_name_sample(&runtime_name, started.elapsed());
+                    }
+                    return result;
                 }
                 // Array descriptors (e.g. "[I", "[Ljava/lang/String;") are synthetic types
                 // not backed by a ClassFile entry — return a class object directly.
                 if internal.starts_with('[') {
-                    return Some(JValue::Ref(Some(self.class_object(internal))));
+                    let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                    if let Some(started) = profile_started {
+                        self.record_for_name_sample(&runtime_name, started.elapsed());
+                    }
+                    return result;
                 }
                 self.ensure_class_ready(&internal);
-                match self.classes.get(&internal) {
-                    Some(super::LazyClass::Ready(_)) => {}
+                let result = match self.classes.get(&internal) {
+                    Some(super::LazyClass::Ready(_)) => None,
                     Some(super::LazyClass::ParseError(msg)) => {
                         let msg = msg.clone();
                         self.throw_class_format_error(&msg);
-                        return Some(JValue::Void);
+                        Some(JValue::Void)
                     }
                     _ => {
                         self.throw_class_not_found(&runtime_name);
-                        return Some(JValue::Void);
+                        Some(JValue::Void)
                     }
+                };
+                let result = result.unwrap_or_else(|| JValue::Ref(Some(self.class_object(internal))));
+                if let Some(started) = profile_started {
+                    self.record_for_name_sample(&runtime_name, started.elapsed());
                 }
-                Some(JValue::Ref(Some(self.class_object(internal))))
+                Some(result)
             }
             ("java/lang/Class", "forName1", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;") => {
                 let runtime_name = match _args
@@ -266,25 +344,40 @@ impl super::Vm {
                     }
                 };
                 let initialize = _args.get(1).map(|v| v.as_int() != 0).unwrap_or(true);
+                let profile_key = format!("{runtime_name}|init={initialize}");
+                let profile_started = self.profiler.as_ref().map(|_| std::time::Instant::now());
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
                 self.ensure_class_ready(&internal);
-                match self.classes.get(&internal) {
-                    Some(super::LazyClass::Ready(_)) => {}
+                let result = match self.classes.get(&internal) {
+                    Some(super::LazyClass::Ready(_)) => None,
                     Some(super::LazyClass::ParseError(msg)) => {
                         let msg = msg.clone();
                         self.throw_class_format_error(&msg);
-                        return Some(JValue::Void);
+                        Some(JValue::Void)
                     }
                     _ => {
-                        return Some(JValue::Ref(None)); // not found — caller checks null
+                        Some(JValue::Ref(None)) // not found — caller checks null
                     }
+                };
+                if let Some(result) = result {
+                    if let Some(started) = profile_started {
+                        self.record_for_name_sample(&profile_key, started.elapsed());
+                    }
+                    return Some(result);
                 }
                 if initialize {
                     if self.ensure_class_init(&internal).is_err() {
+                        if let Some(started) = profile_started {
+                            self.record_for_name_sample(&profile_key, started.elapsed());
+                        }
                         return Some(JValue::Void);
                     }
                 }
-                Some(JValue::Ref(Some(self.class_object(internal))))
+                let result = Some(JValue::Ref(Some(self.class_object(internal))));
+                if let Some(started) = profile_started {
+                    self.record_for_name_sample(&profile_key, started.elapsed());
+                }
+                result
             }
             ("java/lang/ClassLoader", "getSystemClassLoader", "()Ljava/lang/ClassLoader;") => {
                 let cl = self.get_or_create_system_classloader();

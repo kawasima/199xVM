@@ -318,16 +318,20 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let normalized = name.strip_prefix('/').unwrap_or(&name);
-                match self.read_resource(normalized) {
-                    Ok(Some(data)) => {
-                        // Create a [B array with the resource bytes
-                        let elems: Vec<JValue> = data.iter().map(|&b| JValue::Int(b as i8 as i32)).collect();
-                        let byte_array = JObject::new_array("[B", elems);
-                        // Create ByteArrayInputStream via its constructor logic
+                match self.resource_byte_array(normalized) {
+                    Ok(Some(byte_array)) => {
+                        let count = {
+                            let array = byte_array.borrow();
+                            match &array.native {
+                                NativePayload::ByteArray(bytes) => bytes.len() as i32,
+                                NativePayload::Array(values) => values.len() as i32,
+                                _ => 0,
+                            }
+                        };
                         let bais = JObject::new("java/io/ByteArrayInputStream");
                         bais.borrow_mut().fields.insert("buf".to_owned(), JValue::Ref(Some(byte_array)));
                         bais.borrow_mut().fields.insert("pos".to_owned(), JValue::Int(0));
-                        bais.borrow_mut().fields.insert("count".to_owned(), JValue::Int(data.len() as i32));
+                        bais.borrow_mut().fields.insert("count".to_owned(), JValue::Int(count));
                         bais.borrow_mut().fields.insert("mark".to_owned(), JValue::Int(0));
                         Some(JValue::Ref(Some(bais)))
                     }
@@ -584,6 +588,83 @@ impl super::Vm {
                 }
                 Some(JValue::Int(if ok { 1 } else { 0 }))
             }
+            ("java/util/regex/Matcher", "find") => {
+                let (regex, input, search_index) = {
+                    let mb = this.borrow();
+                    let pattern_ref = mb.fields.get("pattern")
+                        .or_else(|| mb.fields.get("__pattern"));
+                    let regex = pattern_ref
+                        .and_then(|v| v.as_ref())
+                        .and_then(|p| {
+                            let pb = p.borrow();
+                            pb.fields.get("regex")
+                                .or_else(|| pb.fields.get("__regex"))
+                                .and_then(|v| v.as_ref().cloned())
+                                .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        })
+                        .unwrap_or_default();
+                    let input = mb.fields.get("input")
+                        .or_else(|| mb.fields.get("__input"))
+                        .and_then(|v| v.as_ref())
+                        .and_then(|s| s.borrow().as_java_string().map(|x| x.to_owned()))
+                        .unwrap_or_default();
+                    let search_index = mb.fields.get("searchIndex")
+                        .map(|v| v.as_int().max(0) as usize)
+                        .unwrap_or(0);
+                    (regex, input, search_index)
+                };
+
+                if search_index > input.len() {
+                    this.borrow_mut().fields.remove("__groups");
+                    this.borrow_mut().fields.insert("matchStart".to_owned(), JValue::Int(-1));
+                    this.borrow_mut().fields.insert("matchEnd".to_owned(), JValue::Int(-1));
+                    return Some(JValue::Int(0));
+                }
+
+                let re = regex::Regex::new(&regex).ok();
+                let hay = &input[search_index..];
+                let caps = re.as_ref().and_then(|r| r.captures(hay));
+
+                if let Some(caps) = caps {
+                    let mut groups = Vec::new();
+                    for i in 0..caps.len() {
+                        if let Some(m) = caps.get(i) {
+                            groups.push(JValue::Ref(Some(self.intern_string(m.as_str()))));
+                        } else {
+                            groups.push(JValue::Ref(None));
+                        }
+                    }
+                    let groups_arr = JObject::new_array("[Ljava/lang/String;", groups);
+                    let (ms, me) = caps
+                        .get(0)
+                        .map(|m| ((search_index + m.start()) as i32, (search_index + m.end()) as i32))
+                        .unwrap_or((-1, -1));
+                    let next_search = if ms >= 0 && ms == me {
+                        (me as usize).saturating_add(1)
+                    } else {
+                        me.max(0) as usize
+                    };
+                    let mut mb = this.borrow_mut();
+                    mb.fields.insert("__groups".to_owned(), JValue::Ref(Some(groups_arr)));
+                    mb.fields.insert("matchStart".to_owned(), JValue::Int(ms));
+                    mb.fields.insert("matchEnd".to_owned(), JValue::Int(me));
+                    mb.fields.insert(
+                        "searchIndex".to_owned(),
+                        JValue::Int(next_search.min(input.len().saturating_add(1)) as i32),
+                    );
+                    return Some(JValue::Int(1));
+                }
+
+                let mut mb = this.borrow_mut();
+                mb.fields.remove("__groups");
+                mb.fields.insert("matchStart".to_owned(), JValue::Int(-1));
+                mb.fields.insert("matchEnd".to_owned(), JValue::Int(-1));
+                mb.fields.insert(
+                    "searchIndex".to_owned(),
+                    JValue::Int(input.len().saturating_add(1) as i32),
+                );
+                Some(JValue::Int(0))
+            }
             ("java/util/regex/Matcher", "group") => {
                 // group(int) — return captured group from __groups array
                 let idx = _args.first().map(|v| v.as_int().max(0) as usize).unwrap_or(0);
@@ -810,21 +891,13 @@ impl super::Vm {
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let infos = self.declared_field_infos(&target);
                 let mut out = Vec::new();
-                let mut members: Vec<(String, String, u16)> = Vec::new();
-                self.ensure_class_ready(&target);
-                if let Some(cf) = self.get_class(&target) {
-                    for f in &cf.fields {
-                        if public_only && (f.access_flags & 0x0001) == 0 {
-                            continue;
-                        }
-                        let name = cf.constant_pool.utf8(f.name_index).to_owned();
-                        let desc = cf.constant_pool.utf8(f.descriptor_index).to_owned();
-                        members.push((name, desc, f.access_flags));
+                for info in infos.iter() {
+                    if public_only && (info.access_flags & 0x0001) == 0 {
+                        continue;
                     }
-                }
-                for (name, desc, flags) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_field(&target, &name, &desc, flags))));
+                    out.push(JValue::Ref(Some(self.build_reflect_field_from_info(&target, info))));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
                     "[Ljava/lang/reflect/Field;",
@@ -836,35 +909,13 @@ impl super::Vm {
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let infos = self.declared_method_infos(&target);
                 let mut out = Vec::new();
-                let mut members: Vec<(String, String, u16, Vec<String>)> = Vec::new();
-                self.ensure_class_ready(&target);
-                if let Some(cf) = self.get_class(&target) {
-                    for m in &cf.methods {
-                        if public_only && (m.access_flags & 0x0001) == 0 {
-                            continue;
-                        }
-                        let name = cf.constant_pool.utf8(m.name_index).to_owned();
-                        if name == "<init>" || name == "<clinit>" {
-                            continue;
-                        }
-                        let desc = cf.constant_pool.utf8(m.descriptor_index).to_owned();
-                        let mut ex = Vec::new();
-                        for attr in &m.attributes {
-                            if let Attribute::Exceptions { exception_index_table } = attr {
-                                ex = exception_index_table
-                                    .iter()
-                                    .map(|idx| cf.constant_pool.class_name(*idx).to_owned())
-                                    .collect();
-                            }
-                        }
-                        members.push((name, desc, m.access_flags, ex));
+                for info in infos.iter() {
+                    if public_only && (info.access_flags & 0x0001) == 0 {
+                        continue;
                     }
-                }
-                for (name, desc, flags, ex) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_method(
-                        &target, &name, &desc, flags, ex,
-                    ))));
+                    out.push(JValue::Ref(Some(self.build_reflect_method_from_info(&target, info))));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
                     "[Ljava/lang/reflect/Method;",
@@ -877,34 +928,15 @@ impl super::Vm {
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let infos = self.declared_constructor_infos(&target);
                 let mut out = Vec::new();
-                let mut members: Vec<(String, u16, Vec<String>)> = Vec::new();
-                self.ensure_class_ready(&target);
-                if let Some(cf) = self.get_class(&target) {
-                    for m in &cf.methods {
-                        if public_only && (m.access_flags & 0x0001) == 0 {
-                            continue;
-                        }
-                        let name = cf.constant_pool.utf8(m.name_index).to_owned();
-                        if name != "<init>" {
-                            continue;
-                        }
-                        let desc = cf.constant_pool.utf8(m.descriptor_index).to_owned();
-                        let mut ex = Vec::new();
-                        for attr in &m.attributes {
-                            if let Attribute::Exceptions { exception_index_table } = attr {
-                                ex = exception_index_table
-                                    .iter()
-                                    .map(|idx| cf.constant_pool.class_name(*idx).to_owned())
-                                    .collect();
-                            }
-                        }
-                        members.push((desc, m.access_flags, ex));
+                for info in infos.iter() {
+                    if public_only && (info.access_flags & 0x0001) == 0 {
+                        continue;
                     }
-                }
-                for (desc, flags, ex) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_constructor(
-                        &target, &desc, flags, ex,
+                    out.push(JValue::Ref(Some(self.build_reflect_constructor_from_info(
+                        &target,
+                        info,
                     ))));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(

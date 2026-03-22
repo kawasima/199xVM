@@ -64,6 +64,14 @@ public final class Objects {
         return requireNonNull(supplier.get(), "supplier.get()");
     }
 
+    public static boolean isNull(Object obj) {
+        return obj == null;
+    }
+
+    public static boolean nonNull(Object obj) {
+        return obj != null;
+    }
+
     public static boolean equals(Object a, Object b) {
         return (a == b) || (a != null && a.equals(b));
     }

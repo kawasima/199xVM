@@ -1,6 +1,6 @@
 use crate::heap::{JObject, JValue};
 
-use super::{StdioMode, ThreadState, Vm, TIME_SLICE};
+use super::{StdioMode, ThreadState, Vm};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessExit {
@@ -18,6 +18,13 @@ pub enum ProcessState {
 pub struct JvmProcess {
     vm: Vm,
     exit: Option<ProcessExit>,
+}
+
+fn parse_system_exit(message: &str) -> Option<i32> {
+    let marker = "System.exit(";
+    let start = message.find(marker)? + marker.len();
+    let end = message[start..].find(')')?;
+    message[start..start + end].parse().ok()
 }
 
 impl JvmProcess {
@@ -81,6 +88,7 @@ impl JvmProcess {
         };
 
         if exit.is_some() {
+            vm.write_profile_report_if_enabled();
             vm.flush_printstreams();
         }
 
@@ -105,7 +113,8 @@ impl JvmProcess {
                 ThreadState::Runnable => {
                     let mut call_stack =
                         std::mem::take(&mut self.vm.scheduler.current_thread_mut().call_stack);
-                    let result = self.vm.run_trampoline_steps(&mut call_stack, TIME_SLICE);
+                    let time_slice = self.vm.effective_time_slice();
+                    let result = self.vm.run_trampoline_steps(&mut call_stack, time_slice);
                     self.vm.scheduler.current_thread_mut().call_stack = call_stack;
 
                     match result {
@@ -124,9 +133,17 @@ impl JvmProcess {
                         Err(e) => {
                             self.vm.scheduler.current_thread_mut().state = ThreadState::Terminated;
                             if current_id == 0 {
+                                let err = self.vm.pending_exception_err().unwrap_or(e);
+                                if let Some(code) = parse_system_exit(&err) {
+                                    self.finish(ProcessExit {
+                                        exit_code: code,
+                                        uncaught_exception: None,
+                                    });
+                                    return ProcessState::Exited;
+                                }
                                 self.finish(ProcessExit {
                                     exit_code: 1,
-                                    uncaught_exception: Some(e),
+                                    uncaught_exception: Some(err),
                                 });
                                 return ProcessState::Exited;
                             }
@@ -199,6 +216,14 @@ impl JvmProcess {
         self.vm.take_stderr()
     }
 
+    pub fn profile_report(&self) -> Option<String> {
+        self.vm.profile_report()
+    }
+
+    pub fn take_profile_report(&mut self) -> Option<String> {
+        self.vm.take_profile_report()
+    }
+
     pub fn kill(&mut self) {
         if self.exit.is_none() {
             self.finish(ProcessExit {
@@ -217,6 +242,7 @@ impl JvmProcess {
     }
 
     fn finish(&mut self, exit: ProcessExit) {
+        self.vm.write_profile_report_if_enabled();
         self.vm.flush_printstreams();
         self.vm.scheduler.reset_to_main();
         self.exit = Some(exit);

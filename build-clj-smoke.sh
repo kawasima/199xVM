@@ -30,11 +30,44 @@ selected_upstream_test_namespaces() {
   grep -oE 'clojure\.test-clojure\.[[:alnum:].-]+' "$runner_file" | awk '!seen[$0]++'
 }
 
+diagnostic_upstream_test_namespaces() {
+  cat <<'EOF'
+clojure.test-clojure.control
+clojure.test-clojure.evaluation
+clojure.test-clojure.keywords
+clojure.test-clojure.macros
+clojure.test-clojure.metadata
+clojure.test-clojure.other-functions
+clojure.test-clojure.predicates
+clojure.test-clojure.special
+clojure.test-clojure.string
+clojure.test-clojure.vectors
+EOF
+}
+
+all_upstream_test_namespaces() {
+  local runner_file="$1"
+  {
+    selected_upstream_test_namespaces "$runner_file"
+    diagnostic_upstream_test_namespaces
+  } | awk '!seen[$0]++'
+}
+
+local_upstream_helper_namespaces() {
+  local helper_dir="$1"
+  if [ ! -d "$helper_dir" ]; then
+    return 0
+  fi
+  find "$helper_dir" -type f -name '*.clj' | sort | while IFS= read -r file; do
+    sed -nE 's/^\(ns[[:space:]]+([[:alnum:].-]+).*/\1/p' "$file" | head -n 1
+  done | awk '$1 != "upstream.runner" && !seen[$1]++ { print $1 }'
+}
+
 resolve_upstream_test_source() {
   local upstream_test_dir="$1"
   local ns="$2"
-  local rel="${ns//./\/}"
-  rel="${rel//-/_}"
+  local rel
+  rel="$(printf '%s' "$ns" | tr '.-' '/_')"
   local candidate="$upstream_test_dir/$rel"
   if [ -f "$candidate.clj" ]; then
     printf '%s\n' "$candidate.clj"
@@ -52,21 +85,22 @@ stage_upstream_test_subset() {
   local upstream_test_dir="$2"
   local stage_dir="$3"
   local -a queue=()
+  local staged_file="$stage_dir/.staged-namespaces"
   local ns=""
+  : > "$staged_file"
   while IFS= read -r ns; do
     [ -n "$ns" ] && queue+=("$ns")
-  done < <(selected_upstream_test_namespaces "$runner_file")
+  done < <(all_upstream_test_namespaces "$runner_file")
 
   if [ "${#queue[@]}" -eq 0 ]; then
     echo "No selected upstream test namespaces found in $runner_file" >&2
     exit 1
   fi
 
-  declare -A staged=()
   while [ "${#queue[@]}" -gt 0 ]; do
     ns="${queue[0]}"
     queue=("${queue[@]:1}")
-    if [ -n "${staged[$ns]:-}" ]; then
+    if grep -Fqx "$ns" "$staged_file"; then
       continue
     fi
 
@@ -75,7 +109,7 @@ stage_upstream_test_subset() {
       continue
     fi
 
-    staged["$ns"]=1
+    printf '%s\n' "$ns" >> "$staged_file"
     local rel_path="${src#"$upstream_test_dir"/}"
     mkdir -p "$stage_dir/$(dirname "$rel_path")"
     cp "$src" "$stage_dir/$rel_path"
@@ -83,12 +117,43 @@ stage_upstream_test_subset() {
     local dep=""
     while IFS= read -r dep; do
       [ -n "$dep" ] || continue
-      [ -n "${staged[$dep]:-}" ] && continue
+      if grep -Fqx "$dep" "$staged_file"; then
+        continue
+      fi
       if resolve_upstream_test_source "$upstream_test_dir" "$dep" >/dev/null; then
         queue+=("$dep")
       fi
     done < <(grep -oE 'clojure\.[[:alnum:].-]+' "$src" | awk '!seen[$0]++')
   done
+
+  rm -f "$staged_file"
+}
+
+patch_staged_upstream_sources() {
+  local stage_dir="$1"
+  local fn_file="$stage_dir/clojure/test_clojure/fn.clj"
+  if [ -f "$fn_file" ]; then
+    local tmp_file="$stage_dir/.fn.clj.tmp"
+    awk '
+      $0 == "(ns clojure.test-clojure.fn" { print; in_ns = 1; next }
+      in_ns && $0 == "  (:use clojure.test))" {
+        print "  (:use clojure.test clojure.test-helper))"
+        in_ns = 0
+        next
+      }
+      { print }
+    ' "$fn_file" > "$tmp_file"
+    mv "$tmp_file" "$fn_file"
+  fi
+}
+
+compile_upstream_java_support() {
+  local upstream_test_dir="$1"
+  local stage_dir="$2"
+  local fixture="$upstream_test_dir/java/clojure/test/ReflectorTryCatchFixture.java"
+  if [ -f "$fixture" ]; then
+    javac -d "$stage_dir" "$fixture"
+  fi
 }
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -134,7 +199,7 @@ UPSTREAM_TAG="${CLOJURE_UPSTREAM_TAG:-clojure-$CLOJURE_RUNTIME_VERSION}"
 UPSTREAM_URL="${CLOJURE_UPSTREAM_URL:-https://github.com/clojure/clojure}"
 UPSTREAM_DIR="${CLOJURE_UPSTREAM_DIR:-$UPSTREAM_CACHE_DIR}"
 
-for cmd in clojure java jar; do
+for cmd in clojure java javac jar; do
   require_cmd "$cmd"
 done
 
@@ -204,14 +269,24 @@ echo "Packaging smoke classes into JAR..."
 
 echo "Staging selected upstream Clojure test sources..."
 stage_upstream_test_subset "$UPSTREAM_RUNNER_SRC" "$UPSTREAM_TEST_DIR" "$TMP_UPSTREAM_STAGE_DIR"
+patch_staged_upstream_sources "$TMP_UPSTREAM_STAGE_DIR"
+compile_upstream_java_support "$UPSTREAM_TEST_DIR" "$TMP_UPSTREAM_STAGE_DIR"
 
 UPSTREAM_COMPILE_CLASSPATH="$TMP_UPSTREAM_STAGE_DIR:$CLJ_SRC_DIR:$CLASSPATH"
-echo "AOT-compiling upstream runner..."
-java \
-  -Dclojure.compile.path="$TMP_UPSTREAM_STAGE_DIR" \
-  -cp "$UPSTREAM_COMPILE_CLASSPATH" \
-  clojure.lang.Compile \
-  upstream.runner
+echo "AOT-compiling selected upstream namespaces..."
+while IFS= read -r ns; do
+  [ -n "$ns" ] || continue
+  java \
+    -Dclojure.compile.path="$TMP_UPSTREAM_STAGE_DIR" \
+    -cp "$UPSTREAM_COMPILE_CLASSPATH" \
+    clojure.lang.Compile \
+    "$ns"
+done < <(
+  printf '%s\n' clojure.test-helper
+  all_upstream_test_namespaces "$UPSTREAM_RUNNER_SRC"
+  local_upstream_helper_namespaces "$CLJ_SRC_DIR/upstream"
+  printf '%s\n' upstream.runner
+)
 
 echo "Packaging upstream test resources into JAR..."
 (cd "$TMP_UPSTREAM_STAGE_DIR" && jar cf "$TMP_UPSTREAM_JAR" .)
