@@ -248,7 +248,7 @@ impl super::Vm {
                     return result;
                 }
                 let result = match self.ensure_class_loaded_by_name(&internal) {
-                    Some(class_id) => {
+                    Ok(Some(class_id)) => {
                         if let Err(err) = self.ensure_class_prepared(class_id) {
                             self.throw_class_format_error(&err);
                             Some(JValue::Void)
@@ -258,8 +258,12 @@ impl super::Vm {
                             Some(JValue::Ref(Some(self.class_object_by_id(class_id))))
                         }
                     }
-                    None => {
+                    Ok(None) => {
                         self.throw_class_not_found(&runtime_name);
+                        Some(JValue::Void)
+                    }
+                    Err(err) => {
+                        self.throw_class_format_error(&err);
                         Some(JValue::Void)
                     }
                 };
@@ -292,7 +296,7 @@ impl super::Vm {
                     return result;
                 }
                 let result = match self.ensure_class_loaded_by_name(&internal) {
-                    Some(class_id) => {
+                    Ok(Some(class_id)) => {
                         if let Err(err) = self.ensure_class_prepared(class_id) {
                             self.throw_class_format_error(&err);
                             Some(JValue::Void)
@@ -302,7 +306,11 @@ impl super::Vm {
                             Some(JValue::Ref(Some(self.class_object_by_id(class_id))))
                         }
                     }
-                    None => Some(JValue::Ref(None)),
+                    Ok(None) => Some(JValue::Ref(None)),
+                    Err(err) => {
+                        self.throw_class_format_error(&err);
+                        Some(JValue::Void)
+                    }
                 };
                 if let Some(started) = profile_started {
                     self.record_for_name_sample(&profile_key, started.elapsed());

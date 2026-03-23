@@ -524,6 +524,25 @@ mod tests {
             "missing class must remain unresolved"
         );
     }
+
+    #[test]
+    fn ensure_class_loaded_by_name_reports_parse_failure() {
+        let mut vm = Vm::new();
+        vm.load_lazy("broken/Type".to_owned(), b"not-a-class".to_vec());
+
+        let err = vm
+            .ensure_class_loaded_by_name("broken/Type")
+            .expect_err("invalid class bytes must return Err");
+
+        assert!(
+            !err.is_empty(),
+            "expected non-empty parse/load error"
+        );
+        assert!(matches!(
+            vm.class_source_kind("broken/Type"),
+            Some(ClassSourceKind::ParseError)
+        ));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1148,6 +1167,13 @@ impl Vm {
             ClassSource::Ready(_) => ClassLifecycleState::Loaded,
             ClassSource::ParseError(_) => ClassLifecycleState::Erroneous,
         }
+    }
+
+    fn class_is_loaded(&self, class_id: ClassId) -> bool {
+        matches!(
+            self.class_record(class_id).map(|record| &record.source),
+            Some(ClassSource::Ready(_))
+        )
     }
 
     fn register_class_source(
@@ -1863,10 +1889,12 @@ impl Vm {
     pub(in crate::interpreter) fn ensure_class_loaded_by_name(
         &mut self,
         name: &str,
-    ) -> Option<ClassId> {
-        let class_id = self.tracked_class_id_for_name(name)?;
-        let _ = self.ensure_class_loaded(class_id);
-        Some(class_id)
+    ) -> Result<Option<ClassId>, String> {
+        let Some(class_id) = self.tracked_class_id_for_name(name) else {
+            return Ok(None);
+        };
+        self.ensure_class_loaded(class_id)?;
+        Ok(Some(class_id))
     }
 
     fn ensure_class_prepared(&mut self, class_id: ClassId) -> Result<(), String> {
@@ -1915,7 +1943,7 @@ impl Vm {
 
     /// Backwards-compatible wrapper for paths that only needed lazy parsing before.
     pub(in crate::interpreter) fn ensure_class_ready(&mut self, name: &str) {
-        let Some(class_id) = self.ensure_class_loaded_by_name(name) else {
+        let Ok(Some(class_id)) = self.ensure_class_loaded_by_name(name) else {
             return;
         };
         let _ = self.ensure_class_prepared(class_id);
@@ -1948,7 +1976,10 @@ impl Vm {
 
     /// Ensure class is ready and return a reference to it.
     pub(in crate::interpreter) fn resolve_class(&mut self, name: &str) -> Option<&ClassFile> {
-        self.ensure_class_loaded_by_name(name)?;
+        match self.ensure_class_loaded_by_name(name) {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return None,
+        }
         self.get_class(name)
     }
 

@@ -213,16 +213,16 @@ impl super::Vm {
                 };
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
                 let class_id = match self.ensure_class_loaded_by_name(&internal) {
-                    Some(class_id) => class_id,
-                    None => {
+                    Ok(Some(class_id)) => class_id,
+                    Ok(None) => {
                         self.throw_class_not_found(&name_str);
                         return Some(JValue::Void);
                     }
+                    Err(err) => {
+                        self.throw_class_format_error(&err);
+                        return Some(JValue::Void);
+                    }
                 };
-                if let Some(msg) = self.class_parse_error(&internal).map(str::to_owned) {
-                    self.throw_class_format_error(&msg);
-                    return Some(JValue::Void);
-                }
                 Some(JValue::Ref(Some(self.class_object_by_id(class_id))))
             }
             "findLoadedClass" => {
@@ -232,7 +232,11 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
-                if let Some(class_id) = self.tracked_class_id_for_name(&internal) {
+                // Only parsed/derived classes count as "loaded"; pending lazy entries do not.
+                if let Some(class_id) = self
+                    .tracked_class_id_for_name(&internal)
+                    .filter(|class_id| self.class_is_loaded(*class_id))
+                {
                     Some(JValue::Ref(Some(self.class_object_by_id(class_id))))
                 } else {
                     Some(JValue::Ref(None))
@@ -269,14 +273,17 @@ impl super::Vm {
                     let class_bytes = bytes[off..off + len].to_vec();
                     if let Some(class_name) = crate::class_file::parse_class_name(&class_bytes) {
                         self.load_lazy(class_name.clone(), class_bytes);
-                        let Some(class_id) = self.ensure_class_loaded_by_name(&class_name) else {
-                            self.throw_class_not_found(&class_name);
-                            return Some(JValue::Void);
+                        let class_id = match self.ensure_class_loaded_by_name(&class_name) {
+                            Ok(Some(class_id)) => class_id,
+                            Ok(None) => {
+                                self.throw_class_not_found(&class_name);
+                                return Some(JValue::Void);
+                            }
+                            Err(err) => {
+                                self.throw_class_format_error(&err);
+                                return Some(JValue::Void);
+                            }
                         };
-                        if let Some(msg) = self.class_parse_error(&class_name).map(str::to_owned) {
-                            self.throw_class_format_error(&msg);
-                            return Some(JValue::Void);
-                        }
                         Some(JValue::Ref(Some(self.class_object_by_id(class_id))))
                     } else {
                         self.throw_class_format_error("defineClass: cannot parse class");

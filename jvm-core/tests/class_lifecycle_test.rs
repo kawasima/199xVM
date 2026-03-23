@@ -52,6 +52,12 @@ fn static_access_triggers_class_init_once() {
 }
 
 #[test]
+fn find_loaded_class_requires_actual_loaded_state() {
+    let result = run_jar_test("FindLoadedClassStateTest", "run", "()Ljava/lang/String;");
+    assert_eq!(result, "true|true|true");
+}
+
+#[test]
 fn lifecycle_profile_reports_class_counters() {
     let mut vm = jvm_core::interpreter::Vm::new();
     vm.enable_profiler();
