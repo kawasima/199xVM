@@ -37,8 +37,6 @@ pub(super) struct MethodExecInfo {
     pub parameter_descriptor: Rc<str>,
     /// Number of source-level arguments in the descriptor.
     pub arg_count: usize,
-    /// Whether the method returns void.
-    pub returns_void: bool,
     /// Whether the method is marked ACC_VARARGS.
     pub is_varargs: bool,
     /// `Code.max_stack` (0 if the method has no `Code` attribute).
@@ -75,31 +73,6 @@ pub(super) struct ResolvedMemberRef {
     pub arg_count: usize,
     pub returns_void: bool,
     pub instance_field_slot: Option<usize>,
-}
-
-#[derive(Clone)]
-pub(super) struct ResolvedStaticCallSite {
-    pub method_name: String,
-    pub call_arg_count: usize,
-    pub expected_arg_count: usize,
-    pub push_return: bool,
-    pub empty_varargs: bool,
-    pub method_info: Rc<MethodExecInfo>,
-}
-
-#[derive(Clone)]
-pub(super) struct ResolvedVirtualCallSite {
-    pub dispatch_class: String,
-    pub method_name: String,
-    pub method_info: Rc<MethodExecInfo>,
-}
-
-#[derive(Clone)]
-pub(super) struct ResolvedSpecialCallSite {
-    pub method_name: String,
-    pub push_return: bool,
-    pub no_effect_constructor: bool,
-    pub method_info: Rc<MethodExecInfo>,
 }
 
 #[derive(Clone)]
@@ -884,15 +857,6 @@ pub struct Vm {
     methodref_constant_cache: HashMap<(usize, u16), Rc<ResolvedMemberRef>>,
     /// Cached decoded class refs keyed by `(cp pointer, cp index)`.
     classref_constant_cache: HashMap<(usize, u16), Rc<str>>,
-    /// Cached resolved static call sites keyed by `(cp pointer, cp index)`.
-    static_callsite_cache: HashMap<(usize, u16), Rc<ResolvedStaticCallSite>>,
-    /// Cached resolved invokespecial call sites keyed by `(cp pointer, cp index)`.
-    special_callsite_cache: HashMap<(usize, u16), Rc<ResolvedSpecialCallSite>>,
-    /// Cached detection of constructors whose bytecode has no side effects.
-    no_effect_constructor_cache: HashMap<(String, String), bool>,
-    /// Monomorphic virtual/interface call-site cache keyed by `(cp pointer, cp index)`.
-    /// Each entry remembers the most recently seen dispatch class for that call site.
-    virtual_callsite_cache: HashMap<(usize, u16), Rc<ResolvedVirtualCallSite>>,
     /// Static field owner cache: symbolic owner/name/descriptor → declaring class id.
     /// Mirrors HotSpot's resolved field entries well enough for repeated getstatic/putstatic.
     static_field_owner_cache: HashMap<(ClassId, String, String), Option<ClassId>>,
@@ -956,10 +920,6 @@ impl Vm {
             method_signature_cache: HashMap::default(),
             methodref_constant_cache: HashMap::default(),
             classref_constant_cache: HashMap::default(),
-            static_callsite_cache: HashMap::default(),
-            special_callsite_cache: HashMap::default(),
-            no_effect_constructor_cache: HashMap::default(),
-            virtual_callsite_cache: HashMap::default(),
             static_field_owner_cache: HashMap::default(),
             fieldref_constant_cache: HashMap::default(),
             method_exec_info_cache: HashMap::default(),
@@ -1236,10 +1196,6 @@ impl Vm {
         self.method_signature_cache.clear();
         self.methodref_constant_cache.clear();
         self.classref_constant_cache.clear();
-        self.static_callsite_cache.clear();
-        self.special_callsite_cache.clear();
-        self.no_effect_constructor_cache.clear();
-        self.virtual_callsite_cache.clear();
         self.static_field_owner_cache.clear();
         self.fieldref_constant_cache.clear();
         self.method_exec_info_cache.clear();
@@ -2104,7 +2060,6 @@ impl Vm {
                 descriptor: descriptor.clone(),
                 parameter_descriptor,
                 arg_count: param_tokens.len(),
-                returns_void: descriptor.ends_with(")V"),
                 is_varargs: method_access_flags & 0x0080 != 0,
                 max_stack,
                 access_flags: method_access_flags,
@@ -2538,95 +2493,6 @@ impl Vm {
             }
         }
         None
-    }
-
-    fn no_effect_constructor_target(
-        &mut self,
-        info: &MethodExecInfo,
-    ) -> Option<(String, String)> {
-        if info.exception_table.as_ref().len() != 0 {
-            return None;
-        }
-        let code = info.code.as_ref();
-        let mut pc = 0usize;
-        while pc < code.len() {
-            match code[pc] {
-                0x15..=0x19 => {
-                    pc += 2;
-                }
-                0x1a..=0x1d
-                | 0x1e..=0x21
-                | 0x22..=0x25
-                | 0x26..=0x29
-                | 0x2a..=0x2d => {
-                    pc += 1;
-                }
-                0xc4 => {
-                    if pc + 3 >= code.len() {
-                        return None;
-                    }
-                    match code[pc + 1] {
-                        0x15..=0x19 => pc += 4,
-                        _ => return None,
-                    }
-                }
-                0xb7 => {
-                    if pc + 2 >= code.len() {
-                        return None;
-                    }
-                    let idx = u16::from_be_bytes([code[pc + 1], code[pc + 2]]);
-                    pc += 3;
-                    if pc != code.len() - 1 || code[pc] != 0xb1 {
-                        return None;
-                    }
-                    let member = self.resolve_methodref_cached(info.cp.as_ref(), idx);
-                    if member.member_name != "<init>" {
-                        return None;
-                    }
-                    return Some((member.class_name.clone(), member.descriptor.clone()));
-                }
-                0xb1 if pc + 1 == code.len() => return Some((String::new(), String::new())),
-                _ => return None,
-            }
-        }
-        None
-    }
-
-    pub(super) fn is_no_effect_constructor(
-        &mut self,
-        class_name: &str,
-        descriptor: &str,
-    ) -> bool {
-        let cache_key = (class_name.to_owned(), descriptor.to_owned());
-        if let Some(cached) = self.no_effect_constructor_cache.get(&cache_key) {
-            return *cached;
-        }
-        let mut visited = HashSet::default();
-        let result = self.is_no_effect_constructor_inner(class_name, descriptor, &mut visited);
-        self.no_effect_constructor_cache.insert(cache_key, result);
-        result
-    }
-
-    fn is_no_effect_constructor_inner(
-        &mut self,
-        class_name: &str,
-        descriptor: &str,
-        visited: &mut HashSet<(String, String)>,
-    ) -> bool {
-        let key = (class_name.to_owned(), descriptor.to_owned());
-        if !visited.insert(key) {
-            return false;
-        }
-        let Some(info) = self.resolve_method_exec_info(class_name, "<init>", descriptor) else {
-            return false;
-        };
-        let Some((target_class, target_desc)) = self.no_effect_constructor_target(&info) else {
-            return false;
-        };
-        if target_class.is_empty() && target_desc.is_empty() {
-            return true;
-        }
-        self.is_no_effect_constructor_inner(&target_class, &target_desc, visited)
     }
 
     /// Resolve a method and extract all execution-time data in a single pass.

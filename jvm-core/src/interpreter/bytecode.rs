@@ -1207,30 +1207,13 @@ impl Vm {
                 // invokestatic
                 let opcode_pc = frame.pc - 1;
                 let idx = read_u16(code, &mut frame.pc);
-                let cached_site = self.resolve_static_callsite_cached(cp, idx);
-                let resolved_member = if cached_site.is_none() {
-                    Some(self.resolve_methodref_cached(cp, idx))
-                } else {
-                    None
-                };
-                let class_name = cached_site
-                    .as_ref()
-                    .map(|site| site.method_info.class_name.as_str())
-                    .or_else(|| {
-                        resolved_member
-                            .as_ref()
-                            .map(|member| member.class_name.as_str())
-                    })
-                    .expect("invokestatic target class");
+                let resolved_member = self.resolve_methodref_cached(cp, idx);
+                let class_name = resolved_member.class_name.as_str();
                 if self.ensure_class_init_or_schedule(class_name)? {
                     frame.pc = opcode_pc;
                     return Ok(None);
                 }
-                if let Some(site) = cached_site {
-                    self.dispatch_static_from_site(site.as_ref(), frame)?;
-                } else {
-                    self.dispatch_static(cp, idx, frame)?;
-                }
+                self.dispatch_static(cp, idx, frame)?;
             }
             0xb9 => {
                 // invokeinterface

@@ -287,7 +287,7 @@ pub(super) fn is_reference_descriptor(desc: &str) -> bool {
 // Vm methods for type conversion and descriptor handling
 // ---------------------------------------------------------------------------
 
-use super::{ResolvedMemberRef, ResolvedStaticCallSite, Vm};
+use super::{ResolvedMemberRef, Vm};
 
 impl Vm {
     pub(super) fn resolve_classref_cached(
@@ -354,74 +354,6 @@ impl Vm {
         self.fieldref_constant_cache
             .insert(cache_key, resolved.clone());
         resolved
-    }
-
-    pub(super) fn resolve_static_callsite_cached(
-        &mut self,
-        cp: &[ConstantPoolEntry],
-        idx: u16,
-    ) -> Option<std::rc::Rc<ResolvedStaticCallSite>> {
-        let cache_key = (cp.as_ptr() as usize, idx);
-        if let Some(cached) = self.static_callsite_cache.get(&cache_key) {
-            return Some(cached.clone());
-        }
-        let member = self.resolve_methodref_cached(cp, idx);
-        let (resolved_descriptor, method_flags) = self.resolve_method_signature(
-            &member.class_name,
-            &member.member_name,
-            &member.descriptor,
-        )?;
-        let method_info = std::rc::Rc::new(self.resolve_method_exec_info(
-            &member.class_name,
-            &member.member_name,
-            &resolved_descriptor,
-        )?);
-        let expected_arg_count = method_info.param_tokens.len();
-        let resolved = std::rc::Rc::new(ResolvedStaticCallSite {
-            method_name: member.member_name.clone(),
-            call_arg_count: member.arg_count,
-            expected_arg_count: method_info.arg_count,
-            push_return: !method_info.returns_void,
-            empty_varargs: method_flags & 0x0080 != 0
-                && member.arg_count < expected_arg_count
-                && expected_arg_count - member.arg_count == 1,
-            method_info,
-        });
-        self.static_callsite_cache
-            .insert(cache_key, resolved.clone());
-        Some(resolved)
-    }
-
-    pub(super) fn resolve_special_callsite_cached(
-        &mut self,
-        cp: &[ConstantPoolEntry],
-        idx: u16,
-    ) -> Option<std::rc::Rc<super::ResolvedSpecialCallSite>> {
-        let cache_key = (cp.as_ptr() as usize, idx);
-        if let Some(cached) = self.special_callsite_cache.get(&cache_key) {
-            return Some(cached.clone());
-        }
-        let member = self.resolve_methodref_cached(cp, idx);
-        let (resolved_descriptor, _) = self.resolve_method_signature(
-            &member.class_name,
-            &member.member_name,
-            &member.descriptor,
-        )?;
-        let method_info = std::rc::Rc::new(self.resolve_method_exec_info(
-            &member.class_name,
-            &member.member_name,
-            &resolved_descriptor,
-        )?);
-        let resolved = std::rc::Rc::new(super::ResolvedSpecialCallSite {
-            method_name: member.member_name.clone(),
-            push_return: !method_info.returns_void,
-            no_effect_constructor: member.member_name == "<init>"
-                && self.is_no_effect_constructor(&member.class_name, &resolved_descriptor),
-            method_info,
-        });
-        self.special_callsite_cache
-            .insert(cache_key, resolved.clone());
-        Some(resolved)
     }
 
     pub(super) fn class_internal_name_from_obj(&mut self, class_obj: &JRef) -> Option<String> {
