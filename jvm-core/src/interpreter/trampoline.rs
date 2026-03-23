@@ -14,11 +14,11 @@ use super::Vm;
 /// All data needed to execute or resume a method frame.
 pub(crate) struct FrameInfo {
     pub frame: Frame,
-    pub code: Vec<u8>,
+    pub code: Rc<Vec<u8>>,
     pub cp: Rc<Vec<ConstantPoolEntry>>,
-    pub frame_owner: String,
-    pub bootstrap_methods: Vec<BootstrapMethod>,
-    pub exception_table: Vec<ExceptionTableEntry>,
+    pub frame_owner: Rc<str>,
+    pub bootstrap_methods: Rc<Vec<BootstrapMethod>>,
+    pub exception_table: Rc<Vec<ExceptionTableEntry>>,
     /// Whether to push the return value onto the caller's operand stack.
     pub push_return: bool,
     /// Pending concat recipe state (for StringConcatFactory toString() calls).
@@ -30,6 +30,9 @@ pub(crate) struct FrameInfo {
     /// For ACC_SYNCHRONIZED methods: the monitor object to release on method exit.
     /// Instance methods use `this`, static methods use the class object.
     pub synchronized_monitor: Option<JRef>,
+    /// Owning `ClassId` when this frame is executing a class initializer.
+    /// Used to wrap uncaught failures as ExceptionInInitializerError.
+    pub class_initializer_owner: Option<super::ClassId>,
 }
 
 /// Saved state for a StringConcatFactory recipe interrupted by toString().
@@ -57,13 +60,39 @@ pub(crate) struct ConcatState {
 // ---------------------------------------------------------------------------
 
 impl Vm {
+    fn build_instance_locals(
+        &self,
+        this: JRef,
+        info: &super::MethodExecInfo,
+        args: Vec<JValue>,
+    ) -> Vec<JValue> {
+        let req = 1 + info.param_slot_count;
+        let total = info.max_locals.max(req);
+        let mut locals = vec![JValue::Void; total];
+        locals[0] = JValue::Ref(Some(this));
+        let mut li = 1usize;
+        for ((a, t), step) in args
+            .into_iter()
+            .zip(info.param_tokens.iter())
+            .zip(info.param_slot_steps.iter())
+        {
+            if li >= locals.len() {
+                break;
+            }
+            locals[li] = self.adapt_value_for_descriptor(t, a);
+            li += *step;
+        }
+        locals
+    }
+
     /// Run an explicit call stack using a trampoline loop.
     /// Returns the final return value of the bottom-most frame.
     pub(crate) fn run_trampoline(
         &mut self,
         call_stack: &mut Vec<FrameInfo>,
     ) -> Result<JValue, String> {
-        loop {
+        self.register_sync_clinit_frames(call_stack);
+        let result = (|| loop {
             if call_stack.is_empty() {
                 return Ok(JValue::Void);
             }
@@ -79,19 +108,34 @@ impl Vm {
             }
 
             let opcode_pc = fi.frame.pc;
+            fi.frame.last_opcode_pc = opcode_pc;
             let opcode = fi.code[fi.frame.pc];
             fi.frame.pc += 1;
+            let profile_owner = self.profiler.as_ref().map(|_| Rc::clone(&fi.frame_owner));
+            let profile_started = profile_owner.as_ref().map(|_| std::time::Instant::now());
 
             let result = self.execute_opcode(
-                &mut fi.frame, &fi.code, &fi.cp, &fi.frame_owner,
-                &fi.bootstrap_methods, &fi.exception_table, opcode,
+                &mut fi.frame,
+                &fi.code,
+                &fi.cp,
+                &fi.frame_owner,
+                &fi.bootstrap_methods,
+                &fi.exception_table,
+                opcode,
             );
+            if let (Some(owner), Some(started)) = (profile_owner.as_ref(), profile_started) {
+                self.record_profile_sample(opcode, owner, started.elapsed());
+            }
 
             match result {
                 Ok(Some(ret)) => {
                     // Method returned a value — pop frame.
                     let popped = call_stack.pop().unwrap();
                     self.release_synchronized_monitor(&popped)?;
+                    if let Some(class_id) = popped.class_initializer_owner {
+                        self.mark_class_init_done_id(class_id);
+                    }
+                    self.pop_sync_clinit_frame(&popped);
                     let ret = self.adapt_lambda_return_if_needed(&popped, ret)?;
                     if call_stack.is_empty() {
                         return Ok(ret);
@@ -112,6 +156,7 @@ impl Vm {
                 Ok(None) => {
                     // Check if a new frame was posted by an invoke opcode.
                     if let Some(new_fi) = self.pending_frame_mut().take() {
+                        self.push_sync_clinit_frame(&new_fi);
                         call_stack.push(new_fi);
                     }
                 }
@@ -122,7 +167,9 @@ impl Vm {
                     }
                 }
             }
-        }
+        })();
+        self.unregister_sync_clinit_frames(call_stack);
+        result
     }
 
     /// Execute up to `max_steps` instructions on the given call stack.
@@ -137,71 +184,90 @@ impl Vm {
     ) -> Result<Option<JValue>, String> {
         use super::ThreadState;
 
-        let mut steps = 0;
-        loop {
-            if call_stack.is_empty() {
-                return Ok(Some(JValue::Void));
-            }
-            if steps >= max_steps {
-                return Ok(None); // yield — time slice exhausted
-            }
-            // If the current thread was blocked (e.g., by join() or sleep()),
-            // yield immediately so the scheduler can switch threads.
-            if self.scheduler.current_thread().state != ThreadState::Runnable {
-                return Ok(None);
-            }
+        self.register_thread_clinit_frames(call_stack);
+        let result = (|| {
+            let mut steps = 0;
+            loop {
+                if call_stack.is_empty() {
+                    return Ok(Some(JValue::Void));
+                }
+                if steps >= max_steps {
+                    return Ok(None); // yield — time slice exhausted
+                }
+                // If the current thread was blocked (e.g., by join() or sleep()),
+                // yield immediately so the scheduler can switch threads.
+                if self.scheduler.current_thread().state != ThreadState::Runnable {
+                    return Ok(None);
+                }
 
-            let fi = call_stack.last_mut().unwrap();
-            if fi.frame.pc >= fi.code.len() {
-                return Err(format!(
-                    "Execution fell off the end of method {}",
-                    fi.frame_owner
-                ));
-            }
+                let fi = call_stack.last_mut().unwrap();
+                if fi.frame.pc >= fi.code.len() {
+                    return Err(format!(
+                        "Execution fell off the end of method {}",
+                        fi.frame_owner
+                    ));
+                }
 
-            let opcode_pc = fi.frame.pc;
-            let opcode = fi.code[fi.frame.pc];
-            fi.frame.pc += 1;
-            steps += 1;
+                let opcode_pc = fi.frame.pc;
+                fi.frame.last_opcode_pc = opcode_pc;
+                let opcode = fi.code[fi.frame.pc];
+                fi.frame.pc += 1;
+                steps += 1;
+                let profile_owner = self.profiler.as_ref().map(|_| Rc::clone(&fi.frame_owner));
+                let profile_started = profile_owner.as_ref().map(|_| std::time::Instant::now());
 
-            let result = self.execute_opcode(
-                &mut fi.frame, &fi.code, &fi.cp, &fi.frame_owner,
-                &fi.bootstrap_methods, &fi.exception_table, opcode,
-            );
+                let result = self.execute_opcode(
+                    &mut fi.frame,
+                    &fi.code,
+                    &fi.cp,
+                    &fi.frame_owner,
+                    &fi.bootstrap_methods,
+                    &fi.exception_table,
+                    opcode,
+                );
+                if let (Some(owner), Some(started)) = (profile_owner.as_ref(), profile_started) {
+                    self.record_profile_sample(opcode, owner, started.elapsed());
+                }
 
-            match result {
-                Ok(Some(ret)) => {
-                    let popped = call_stack.pop().unwrap();
-                    self.release_synchronized_monitor(&popped)?;
-                    let ret = self.adapt_lambda_return_if_needed(&popped, ret)?;
-                    if call_stack.is_empty() {
-                        return Ok(Some(ret));
-                    }
-                    let caller = call_stack.last_mut().unwrap();
-                    if popped.push_return && !matches!(ret, JValue::Void) {
-                        if caller.concat_state.is_some() {
-                            feed_concat_return(caller, &ret);
-                            self.try_resume_concat(call_stack)?;
-                        } else {
-                            caller.frame.stack.push(ret);
+                match result {
+                    Ok(Some(ret)) => {
+                        let popped = call_stack.pop().unwrap();
+                        self.release_synchronized_monitor(&popped)?;
+                        if let Some(class_id) = popped.class_initializer_owner {
+                            self.mark_class_init_done_id(class_id);
                         }
-                    } else if caller.concat_state.is_some() {
-                        self.try_resume_concat(call_stack)?;
+                        self.pop_thread_clinit_frame(&popped);
+                        let ret = self.adapt_lambda_return_if_needed(&popped, ret)?;
+                        if call_stack.is_empty() {
+                            return Ok(Some(ret));
+                        }
+                        let caller = call_stack.last_mut().unwrap();
+                        if popped.push_return && !matches!(ret, JValue::Void) {
+                            if caller.concat_state.is_some() {
+                                feed_concat_return(caller, &ret);
+                                self.try_resume_concat(call_stack)?;
+                            } else {
+                                caller.frame.stack.push(ret);
+                            }
+                        } else if caller.concat_state.is_some() {
+                            self.try_resume_concat(call_stack)?;
+                        }
                     }
-                }
-                Ok(None) => {
-                    if let Some(new_fi) = self.pending_frame_mut().take() {
-                        call_stack.push(new_fi);
+                    Ok(None) => {
+                        if let Some(new_fi) = self.pending_frame_mut().take() {
+                            self.push_thread_clinit_frame(&new_fi);
+                            call_stack.push(new_fi);
+                        }
                     }
-                }
-                Err(err_msg) => {
-                    match self.unwind_exception(call_stack, opcode_pc, &err_msg) {
+                    Err(err_msg) => match self.unwind_exception(call_stack, opcode_pc, &err_msg) {
                         Ok(()) => {}
                         Err(e) => return Err(e),
-                    }
+                    },
                 }
             }
-        }
+        })();
+        self.unregister_thread_clinit_frames(call_stack);
+        result
     }
 
     /// Run all green threads to completion using cooperative scheduling.
@@ -209,7 +275,6 @@ impl Vm {
     /// Returns the final return value from the main thread.
     pub(crate) fn run_all_threads(&mut self) -> Result<JValue, String> {
         use super::ThreadState;
-        use super::TIME_SLICE;
 
         let mut iter_count = 0usize;
         loop {
@@ -218,17 +283,21 @@ impl Vm {
             let state = self.scheduler.current_thread().state;
 
             if iter_count > 500_000 {
-                return Err(format!("Scheduler timeout: {} iterations, {}", iter_count, self.scheduler.alive_thread_summary()));
+                return Err(format!(
+                    "Scheduler timeout: {} iterations, {}",
+                    iter_count,
+                    self.scheduler.alive_thread_summary()
+                ));
             }
 
             match state {
                 ThreadState::Runnable => {
                     // Take the call_stack out of ThreadContext for borrowing.
-                    let mut call_stack = std::mem::take(
-                        &mut self.scheduler.current_thread_mut().call_stack
-                    );
+                    let mut call_stack =
+                        std::mem::take(&mut self.scheduler.current_thread_mut().call_stack);
 
-                    let result = self.run_trampoline_steps(&mut call_stack, TIME_SLICE);
+                    let time_slice = self.effective_time_slice();
+                    let result = self.run_trampoline_steps(&mut call_stack, time_slice);
 
                     // Put the call_stack back.
                     self.scheduler.current_thread_mut().call_stack = call_stack;
@@ -266,7 +335,7 @@ impl Vm {
                             // Unhandled exception — terminate thread.
                             self.scheduler.current_thread_mut().state = ThreadState::Terminated;
                             if current_id == 0 {
-                                return Err(e);
+                                return Err(self.pending_exception_err().unwrap_or(e));
                             }
                             // Non-main thread terminated with unhandled exception — silently ignore.
                             // (In a real JVM this would invoke UncaughtExceptionHandler.)
@@ -282,7 +351,8 @@ impl Vm {
                     self.scheduler.current_thread_mut().state = ThreadState::Runnable;
                 }
                 ThreadState::Joining(_)
-                | ThreadState::WaitingOnMonitor(_) | ThreadState::WaitingOnCondition(_) => {
+                | ThreadState::WaitingOnMonitor(_)
+                | ThreadState::WaitingOnCondition(_) => {
                     // Blocked — skip to next thread.
                 }
             }
@@ -308,7 +378,6 @@ impl Vm {
     /// to completion (or timeout).
     fn drain_non_main_threads(&mut self) -> Result<(), String> {
         use super::ThreadState;
-        use super::TIME_SLICE;
 
         // Simple bound to prevent infinite drain.
         let max_iterations = 100_000;
@@ -331,10 +400,10 @@ impl Vm {
                 _ => continue,
             }
 
-            let mut call_stack = std::mem::take(
-                &mut self.scheduler.current_thread_mut().call_stack
-            );
-            let result = self.run_trampoline_steps(&mut call_stack, TIME_SLICE);
+            let mut call_stack =
+                std::mem::take(&mut self.scheduler.current_thread_mut().call_stack);
+            let time_slice = self.effective_time_slice();
+            let result = self.run_trampoline_steps(&mut call_stack, time_slice);
             self.scheduler.current_thread_mut().call_stack = call_stack;
 
             match result {
@@ -347,9 +416,15 @@ impl Vm {
         if !self.scheduler.only_main_alive() {
             let summary = self.scheduler.alive_thread_summary();
             if self.scheduler.runnable_count() == 0 {
-                return Err(format!("Thread drain deadlock: all remaining threads blocked [{}]", summary));
+                return Err(format!(
+                    "Thread drain deadlock: all remaining threads blocked [{}]",
+                    summary
+                ));
             }
-            return Err(format!("Thread drain timeout after {} iterations: [{}]", max_iterations, summary));
+            return Err(format!(
+                "Thread drain timeout after {} iterations: [{}]",
+                max_iterations, summary
+            ));
         }
         Ok(())
     }
@@ -362,29 +437,53 @@ impl Vm {
         err_msg: &str,
     ) -> Result<(), String> {
         let mut first = true;
+        let mut err_head = err_msg.to_owned();
         let mut trace = String::new();
         while let Some(fi) = call_stack.last_mut() {
             fi.concat_state = None;
-            let pc = if first { initial_opcode_pc } else { fi.frame.pc.saturating_sub(1) };
+            let pc = if first {
+                initial_opcode_pc
+            } else {
+                fi.frame.last_opcode_pc
+            };
             first = false;
 
-            if let Some((handler_pc, exc_obj)) = self.find_exception_handler(
-                &fi.frame, &fi.exception_table, &fi.cp, pc, err_msg,
-            ) {
+            if let Some((handler_pc, exc_obj)) =
+                self.find_exception_handler(&fi.frame, &fi.exception_table, &fi.cp, pc, &err_head)
+            {
                 fi.frame.stack.clear();
                 fi.frame.stack.push(exc_obj);
                 fi.frame.pc = handler_pc;
                 return Ok(());
             }
             if trace.is_empty() {
-                trace.push_str(err_msg);
+                trace.push_str(&err_head);
             }
             trace.push_str("\n  at ");
             trace.push_str(&fi.frame_owner);
             let popped = call_stack.pop().unwrap();
             self.release_synchronized_monitor(&popped)?;
+            if let Some(class_id) = popped.class_initializer_owner {
+                let cause = self.pending_exception_mut().take();
+                let wrapped = self.new_vm_exception_message(
+                    "java/lang/ExceptionInInitializerError",
+                    err_head.clone(),
+                );
+                if let Some(c) = cause {
+                    wrapped
+                        .borrow_mut()
+                        .fields
+                        .insert("cause".to_owned(), JValue::Ref(Some(c)));
+                }
+                *self.pending_exception_mut() = Some(wrapped);
+                self.mark_class_init_failed_id(class_id);
+                err_head = "java/lang/ExceptionInInitializerError".to_owned();
+                trace = format!("{err_head}\n  at {}", popped.frame_owner);
+            }
+            self.pop_sync_clinit_frame(&popped);
+            self.pop_thread_clinit_frame(&popped);
         }
-        Err(if trace.is_empty() { err_msg.to_owned() } else { trace })
+        Err(if trace.is_empty() { err_head } else { trace })
     }
 
     /// Release the synchronized monitor when a frame is popped (normal return or exception unwind).
@@ -410,10 +509,7 @@ impl Vm {
     }
 
     /// Continue a StringConcatFactory recipe. May push new frames for toString().
-    fn try_resume_concat(
-        &mut self,
-        call_stack: &mut Vec<FrameInfo>,
-    ) -> Result<(), String> {
+    fn try_resume_concat(&mut self, call_stack: &mut Vec<FrameInfo>) -> Result<(), String> {
         loop {
             // Check if there's a concat state to process.
             {
@@ -446,7 +542,9 @@ impl Vm {
                         if let Some(a) = cs.args.get(cs.arg_idx) {
                             let is_bool = cs.arg_types.get(cs.arg_idx) == Some(&'Z');
                             match a {
-                                JValue::Int(v) if is_bool => cs.result.push_str(if *v != 0 { "true" } else { "false" }),
+                                JValue::Int(v) if is_bool => {
+                                    cs.result.push_str(if *v != 0 { "true" } else { "false" })
+                                }
                                 JValue::Int(v) => cs.result.push_str(&v.to_string()),
                                 JValue::Long(v) => cs.result.push_str(&v.to_string()),
                                 JValue::Float(v) => cs.result.push_str(&v.to_string()),
@@ -455,7 +553,8 @@ impl Vm {
                                     if let Some(s) = r.borrow().as_java_string() {
                                         cs.result.push_str(s);
                                     } else {
-                                        need_tostring = Some((r.clone(), r.borrow().class_name.clone()));
+                                        need_tostring =
+                                            Some((r.clone(), r.borrow().class_name.clone()));
                                     }
                                 }
                                 JValue::Ref(None) => cs.result.push_str("null"),
@@ -484,17 +583,21 @@ impl Vm {
                 Action::NativeToString(r, cn) => {
                     // Try bytecode frame first.
                     let frame_opt = self.build_virtual_frame_inner(
-                        r.clone(), &cn, "toString",
-                        "()Ljava/lang/String;", vec![], true,
+                        r.clone(),
+                        &cn,
+                        "toString",
+                        "()Ljava/lang/String;",
+                        vec![],
+                        true,
                     )?;
                     if let Some(frame_info) = frame_opt {
                         call_stack.push(frame_info);
                         return Ok(());
                     }
                     // Native toString.
-                    let s = if let Some(v) = self.native_virtual(
-                        &r, &cn, "toString", "()Ljava/lang/String;", &[],
-                    ) {
+                    let s = if let Some(v) =
+                        self.native_virtual(&r, &cn, "toString", "()Ljava/lang/String;", &[])
+                    {
                         if let JValue::Ref(Some(sr)) = v {
                             sr.borrow().as_java_string().unwrap_or("").to_owned()
                         } else {
@@ -510,7 +613,9 @@ impl Vm {
                 Action::Finished(result_str) => {
                     let fi = call_stack.last_mut().unwrap();
                     fi.concat_state = None;
-                    fi.frame.stack.push(JValue::Ref(Some(JObject::new_string(result_str))));
+                    fi.frame
+                        .stack
+                        .push(JValue::Ref(Some(JObject::new_string(result_str))));
                     return Ok(());
                 }
             }
@@ -532,28 +637,18 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Option<(String, Vec<JValue>)> {
-        let method_flags = self.find_method_flags(class_name, method_name, descriptor);
-        let resolved_descriptor = if method_flags.is_some() {
-            descriptor.to_owned()
-        } else {
-            self.find_method_real_descriptor(class_name, method_name, descriptor)
-                .unwrap_or_else(|| descriptor.to_owned())
-        };
+        let (resolved_descriptor, method_flags) =
+            self.resolve_method_signature(class_name, method_name, descriptor)?;
         let descriptor_r = resolved_descriptor.as_str();
-        let method_flags = if method_flags.is_none() {
-            self.find_method_flags(class_name, method_name, descriptor_r)
-        } else {
-            method_flags
-        };
-        if method_flags.is_none() {
-            return None;
-        }
 
         let mut args = args;
         let expected = count_args(descriptor_r);
         if args.len() < expected {
-            if method_flags.map(|f| f & 0x0080 != 0).unwrap_or(false) && expected - args.len() == 1 {
-                args.push(JValue::Ref(Some(JObject::new_array("[Ljava/lang/Object;", vec![]))));
+            if method_flags & 0x0080 != 0 && expected - args.len() == 1 {
+                args.push(JValue::Ref(Some(JObject::new_array(
+                    "[Ljava/lang/Object;",
+                    vec![],
+                ))));
             }
         }
         Some((resolved_descriptor, args))
@@ -569,21 +664,41 @@ impl Vm {
         args: Vec<JValue>,
         push_return: bool,
     ) -> Result<Option<FrameInfo>, String> {
-        let info = self.resolve_method_exec_info(class_name, method_name, descriptor)
+        let info = self
+            .resolve_method_exec_info(class_name, method_name, descriptor)
             .ok_or_else(|| format!("Method not found: {class_name}.{method_name}{descriptor}"))?;
-        if !info.has_code { return Ok(None); }
+        if !info.has_code {
+            return Ok(None);
+        }
+        Ok(Some(self.build_static_frame_from_info(
+            &info,
+            args,
+            push_return,
+            method_name == "<clinit>",
+        )))
+    }
 
-        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
-        let req: usize = param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum();
-        let mut locals = vec![JValue::Void; info.max_locals.max(req)];
+    pub(crate) fn build_static_frame_from_info(
+        &mut self,
+        info: &super::MethodExecInfo,
+        args: Vec<JValue>,
+        push_return: bool,
+        is_class_initializer: bool,
+    ) -> FrameInfo {
+        let mut locals = vec![JValue::Void; info.max_locals.max(info.param_slot_count)];
         let mut li = 0usize;
-        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
-            if li >= locals.len() { break; }
+        for ((a, t), step) in args
+            .into_iter()
+            .zip(info.param_tokens.iter())
+            .zip(info.param_slot_steps.iter())
+        {
+            if li >= locals.len() {
+                break;
+            }
             locals[li] = self.adapt_value_for_descriptor(t, a);
-            li += if t == "J" || t == "D" { 2 } else { 1 };
+            li += *step;
         }
 
-        let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
         // ACC_SYNCHRONIZED on static method: lock the class object
         let synchronized_monitor = if info.access_flags & 0x0020 != 0 {
             let class_obj = self.class_object(&info.class_name);
@@ -592,13 +707,24 @@ impl Vm {
         } else {
             None
         };
-        Ok(Some(FrameInfo {
-            frame: Frame { locals, stack: Vec::new(), pc: 0 },
-            code: info.code, cp: info.cp, frame_owner: fo,
-            bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
-            push_return, concat_state: None, lambda_return_adapt: None,
+        FrameInfo {
+            frame: Frame {
+                locals,
+                stack: Vec::with_capacity(info.max_stack),
+                pc: 0,
+                last_opcode_pc: 0,
+            },
+            code: info.code.clone(),
+            cp: info.cp.clone(),
+            frame_owner: info.frame_owner.clone(),
+            bootstrap_methods: info.bootstrap_methods.clone(),
+            exception_table: info.exception_table.clone(),
+            push_return,
+            concat_state: None,
+            lambda_return_adapt: None,
             synchronized_monitor,
-        }))
+            class_initializer_owner: is_class_initializer.then_some(info.class_id),
+        }
     }
 
     /// Inner helper for building a virtual frame (no lambda handling).
@@ -619,33 +745,32 @@ impl Vm {
             if matches!(borrow.native, crate::heap::NativePayload::Lambda(_)) {
                 return Ok(None);
             }
-            is_bytecode_lambda = matches!(borrow.native, crate::heap::NativePayload::BytecodeLambda { .. });
+            is_bytecode_lambda = matches!(
+                borrow.native,
+                crate::heap::NativePayload::BytecodeLambda { .. }
+            );
         }
 
-        let runtime_class = this.borrow().class_name.clone();
         // For bytecode lambdas, resolve on the interface class (class_name) so that
         // default methods are found.  For normal objects, use the runtime class.
         let resolve_class = if is_bytecode_lambda {
             class_name.to_owned()
-        } else if self.classes.contains_key(&runtime_class) {
-            runtime_class.clone()
         } else {
-            class_name.to_owned()
+            self.object_runtime_class_id(&this)
+                .and_then(|class_id| self.class_name(class_id).map(str::to_owned))
+                .unwrap_or_else(|| this.borrow().class_name.clone())
         };
 
-        let resolved = if self.method_exists(&resolve_class, method_name, descriptor) {
-            descriptor.to_owned()
-        } else {
-            self.find_method_real_descriptor(&resolve_class, method_name, descriptor)
-                .unwrap_or_else(|| descriptor.to_owned())
+        let Some((resolved, _)) =
+            self.resolve_method_signature(&resolve_class, method_name, descriptor)
+        else {
+            return Ok(None);
         };
         let desc = resolved.as_str();
 
-        if !self.method_exists(&resolve_class, method_name, desc) {
-            return Ok(None);
-        }
-
-        let info = self.resolve_method_exec_info(&resolve_class, method_name, desc).unwrap();
+        let info = self
+            .resolve_method_exec_info(&resolve_class, method_name, desc)
+            .unwrap();
 
         if info.access_flags & 0x0400 != 0 {
             // For bytecode lambdas, abstract methods (the SAM) should be handled
@@ -659,29 +784,47 @@ impl Vm {
             return Err(format!("java/lang/AbstractMethodError: {ms}"));
         }
 
-        if !info.has_code { return Ok(None); }
-
-        let (param_tokens, _) = Self::parse_method_descriptor_tokens(desc);
-        let req = 1 + param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum::<usize>();
-        let total = info.max_locals.max(req);
-        let mut locals = vec![JValue::Void; total];
-        locals[0] = JValue::Ref(Some(this));
-        let mut li = 1usize;
-        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
-            if li >= locals.len() { break; }
-            locals[li] = self.adapt_value_for_descriptor(t, a);
-            li += if t == "J" || t == "D" { 2 } else { 1 };
+        if !info.has_code {
+            return Ok(None);
         }
 
-        let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-        let synchronized_monitor = self.acquire_instance_synchronized_monitor(info.access_flags, &locals);
-        Ok(Some(FrameInfo {
-            frame: Frame { locals, stack: Vec::new(), pc: 0 },
-            code: info.code, cp: info.cp, frame_owner: fo,
-            bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
-            push_return, concat_state: None, lambda_return_adapt: None,
+        Ok(Some(self.build_virtual_frame_from_info(
+            this,
+            &info,
+            args,
+            push_return,
+        )))
+    }
+
+    pub(crate) fn build_virtual_frame_from_info(
+        &mut self,
+        this: JRef,
+        info: &super::MethodExecInfo,
+        args: Vec<JValue>,
+        push_return: bool,
+    ) -> FrameInfo {
+        let locals = self.build_instance_locals(this, info, args);
+
+        let synchronized_monitor =
+            self.acquire_instance_synchronized_monitor(info.access_flags, &locals);
+        FrameInfo {
+            frame: Frame {
+                locals,
+                stack: Vec::with_capacity(info.max_stack),
+                pc: 0,
+                last_opcode_pc: 0,
+            },
+            code: info.code.clone(),
+            cp: info.cp.clone(),
+            frame_owner: info.frame_owner.clone(),
+            bootstrap_methods: info.bootstrap_methods.clone(),
+            exception_table: info.exception_table.clone(),
+            push_return,
+            concat_state: None,
+            lambda_return_adapt: None,
             synchronized_monitor,
-        }))
+            class_initializer_owner: None,
+        }
     }
 
     /// Inner helper for building an invokespecial frame.
@@ -694,19 +837,16 @@ impl Vm {
         args: Vec<JValue>,
         push_return: bool,
     ) -> Result<Option<FrameInfo>, String> {
-        let resolved = if self.method_exists(class_name, method_name, descriptor) {
-            descriptor.to_owned()
-        } else {
-            self.find_method_real_descriptor(class_name, method_name, descriptor)
-                .unwrap_or_else(|| descriptor.to_owned())
+        let Some((resolved, _)) =
+            self.resolve_method_signature(class_name, method_name, descriptor)
+        else {
+            return Ok(None);
         };
         let desc = resolved.as_str();
 
-        if !self.method_exists(class_name, method_name, desc) {
-            return Ok(None);
-        }
-
-        let info = self.resolve_method_exec_info(class_name, method_name, desc).unwrap();
+        let info = self
+            .resolve_method_exec_info(class_name, method_name, desc)
+            .unwrap();
 
         if info.access_flags & 0x0400 != 0 {
             let ms = format!("{}.{method_name}{}", info.class_name, info.descriptor);
@@ -715,33 +855,39 @@ impl Vm {
             return Err(format!("java/lang/AbstractMethodError: {ms}"));
         }
 
-        if !info.has_code { return Ok(None); }
-
-        let (param_tokens, _) = Self::parse_method_descriptor_tokens(desc);
-        let req = 1 + param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum::<usize>();
-        let total = info.max_locals.max(req);
-        let mut locals = vec![JValue::Void; total];
-        locals[0] = JValue::Ref(Some(this));
-        let mut li = 1usize;
-        for (a, t) in args.into_iter().zip(param_tokens.iter()) {
-            if li >= locals.len() { break; }
-            locals[li] = self.adapt_value_for_descriptor(t, a);
-            li += if t == "J" || t == "D" { 2 } else { 1 };
+        if !info.has_code {
+            return Ok(None);
         }
 
-        let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-        let synchronized_monitor = self.acquire_instance_synchronized_monitor(info.access_flags, &locals);
+        let locals = self.build_instance_locals(this.clone(), &info, args);
+        let synchronized_monitor =
+            self.acquire_instance_synchronized_monitor(info.access_flags, &locals);
         Ok(Some(FrameInfo {
-            frame: Frame { locals, stack: Vec::new(), pc: 0 },
-            code: info.code, cp: info.cp, frame_owner: fo,
-            bootstrap_methods: info.bootstrap_methods, exception_table: info.exception_table,
-            push_return, concat_state: None, lambda_return_adapt: None,
+            frame: Frame {
+                locals,
+                stack: Vec::with_capacity(info.max_stack),
+                pc: 0,
+                last_opcode_pc: 0,
+            },
+            code: info.code,
+            cp: info.cp,
+            frame_owner: info.frame_owner,
+            bootstrap_methods: info.bootstrap_methods,
+            exception_table: info.exception_table,
+            push_return,
+            concat_state: None,
+            lambda_return_adapt: None,
             synchronized_monitor,
+            class_initializer_owner: None,
         }))
     }
 
     /// Acquire a monitor for an ACC_SYNCHRONIZED instance method (locals[0] = `this`).
-    fn acquire_instance_synchronized_monitor(&mut self, access_flags: u16, locals: &[JValue]) -> Option<JRef> {
+    fn acquire_instance_synchronized_monitor(
+        &mut self,
+        access_flags: u16,
+        locals: &[JValue],
+    ) -> Option<JRef> {
         if access_flags & 0x0020 != 0 {
             if let JValue::Ref(Some(ref this_ref)) = locals[0] {
                 let m = this_ref.clone();
@@ -777,7 +923,8 @@ fn expand_concat_const(cs: &mut ConcatState) {
             Some(ConstantPoolEntry::Long(v)) => cs.result.push_str(&v.to_string()),
             Some(ConstantPoolEntry::Float(v)) => {
                 if v.is_infinite() {
-                    cs.result.push_str(if *v > 0.0 { "Infinity" } else { "-Infinity" });
+                    cs.result
+                        .push_str(if *v > 0.0 { "Infinity" } else { "-Infinity" });
                 } else if v.is_nan() {
                     cs.result.push_str("NaN");
                 } else {
@@ -786,7 +933,8 @@ fn expand_concat_const(cs: &mut ConcatState) {
             }
             Some(ConstantPoolEntry::Double(v)) => {
                 if v.is_infinite() {
-                    cs.result.push_str(if *v > 0.0 { "Infinity" } else { "-Infinity" });
+                    cs.result
+                        .push_str(if *v > 0.0 { "Infinity" } else { "-Infinity" });
                 } else if v.is_nan() {
                     cs.result.push_str("NaN");
                 } else {

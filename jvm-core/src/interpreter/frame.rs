@@ -6,12 +6,21 @@ pub(crate) struct Frame {
     pub locals: Vec<JValue>,
     pub stack: Vec<JValue>,
     pub pc: usize,
+    pub last_opcode_pc: usize,
 }
 
 /// Pop `n` arguments from the operand stack, returned in call order.
+#[inline]
 pub(super) fn pop_args(frame: &mut Frame, n: usize) -> Vec<JValue> {
-    let mut args: Vec<JValue> = (0..n).map(|_| frame.stack.pop().unwrap_or(JValue::Void)).collect();
-    args.reverse();
+    if n == 0 {
+        return Vec::new();
+    }
+    if frame.stack.len() >= n {
+        let start = frame.stack.len() - n;
+        return frame.stack.split_off(start);
+    }
+    let mut args = vec![JValue::Void; n - frame.stack.len()];
+    args.extend(frame.stack.drain(..));
     args
 }
 
@@ -23,7 +32,9 @@ pub(super) fn is_category2(v: &JValue) -> bool {
 /// for negative values. Callers must still check upper bounds (use `.get(idx)` on the array).
 pub(super) fn array_index(idx_i: i32) -> Result<usize, String> {
     if idx_i < 0 {
-        Err(format!("java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"))
+        Err(format!(
+            "java/lang/ArrayIndexOutOfBoundsException: Index {idx_i} out of bounds"
+        ))
     } else {
         Ok(idx_i as usize)
     }

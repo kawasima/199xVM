@@ -1,10 +1,119 @@
-
 use crate::heap::{JObject, JRef, JValue, NativePayload};
 
-use super::Vm;
 use super::descriptors::*;
+use super::Vm;
 
 impl Vm {
+    fn static_native_args_from_info(
+        &mut self,
+        info: &super::MethodExecInfo,
+        args: Vec<JValue>,
+    ) -> Vec<JValue> {
+        let mut native_args = Vec::with_capacity(info.param_tokens.len());
+        for (a, t) in args.into_iter().zip(info.param_tokens.iter()) {
+            native_args.push(self.adapt_value_for_descriptor(t, a));
+        }
+        native_args
+    }
+
+    pub(crate) fn invoke_static_native_from_info(
+        &mut self,
+        info: &super::MethodExecInfo,
+        method_name: &str,
+        args: Vec<JValue>,
+    ) -> Result<JValue, String> {
+        let native_args = self.static_native_args_from_info(info, args);
+        if let Some(v) = self.native_static(
+            &info.class_name,
+            method_name,
+            &info.descriptor,
+            &native_args,
+        ) {
+            if let Some(err) = self.pending_exception_err() {
+                return Err(err);
+            }
+            return Ok(v);
+        }
+        Err(format!(
+            "Native stub not found for: {}.{method_name}{}",
+            info.class_name, info.descriptor
+        ))
+    }
+
+    pub(crate) fn resolve_virtual_callsite_monomorphic(
+        &mut self,
+        cache_key: (usize, u16),
+        this: &JRef,
+        class_name: &str,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Option<std::rc::Rc<super::ResolvedVirtualCallSite>> {
+        {
+            let borrow = this.borrow();
+            if matches!(
+                borrow.native,
+                NativePayload::Lambda(_)
+                    | NativePayload::BytecodeLambda { .. }
+                    | NativePayload::RecordMethod { .. }
+            ) {
+                return None;
+            }
+        }
+
+        let dispatch_class = self
+            .object_runtime_class_id(this)
+            .and_then(|class_id| self.class_name(class_id).map(str::to_owned))
+            .unwrap_or_else(|| class_name.to_owned());
+
+        if let Some(cached) = self.virtual_callsite_cache.get(&cache_key) {
+            if cached.dispatch_class == dispatch_class {
+                return Some(cached.clone());
+            }
+        }
+
+        let (resolved_descriptor, _) =
+            self.resolve_method_signature(&dispatch_class, method_name, descriptor)?;
+        let method_info = std::rc::Rc::new(self.resolve_method_exec_info(
+            &dispatch_class,
+            method_name,
+            &resolved_descriptor,
+        )?);
+        if method_info.access_flags & 0x0400 != 0 {
+            return None;
+        }
+        let resolved = std::rc::Rc::new(super::ResolvedVirtualCallSite {
+            dispatch_class,
+            method_name: method_name.to_owned(),
+            method_info,
+        });
+        self.virtual_callsite_cache
+            .insert(cache_key, resolved.clone());
+        Some(resolved)
+    }
+
+    pub(crate) fn invoke_virtual_native_from_info(
+        &mut self,
+        this: &JRef,
+        method_name: &str,
+        info: &super::MethodExecInfo,
+        args: &[JValue],
+    ) -> Result<JValue, String> {
+        if let Some(v) =
+            self.native_virtual(this, &info.class_name, method_name, &info.descriptor, args)
+        {
+            if let Some(err) = self.pending_exception_err() {
+                return Err(err);
+            }
+            return Ok(v);
+        }
+        Err(format!(
+            "Virtual method not found: {}.{method_name}{} (runtime={})",
+            info.class_name,
+            info.descriptor,
+            this.borrow().class_name
+        ))
+    }
+
     /// Execute a static method and return its result.
     /// Uses the trampoline for bytecode methods, falls back to native for stubs.
     pub fn invoke_static(
@@ -17,22 +126,32 @@ impl Vm {
         // Normalize descriptor and args (varargs synthesis) once, shared by
         // both the bytecode (trampoline) and native paths.
         let orig_args = args;
-        let (resolved_desc, args) = match self.prepare_static_args(class_name, method_name, descriptor, orig_args.clone()) {
+        let (resolved_desc, args) = match self.prepare_static_args(
+            class_name,
+            method_name,
+            descriptor,
+            orig_args.clone(),
+        ) {
             Some(pair) => pair,
             None => {
                 // Method flags not found — try native stubs with original args/descriptor.
-                if let Some(v) = self.native_static(class_name, method_name, descriptor, &orig_args) {
-                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                if let Some(v) = self.native_static(class_name, method_name, descriptor, &orig_args)
+                {
+                    if let Some(err) = self.pending_exception_err() {
+                        return Err(err);
+                    }
                     return Ok(v);
                 }
-                return Err(format!("Method not found: {class_name}.{method_name}{descriptor}"));
+                return Err(format!(
+                    "Method not found: {class_name}.{method_name}{descriptor}"
+                ));
             }
         };
         let desc = resolved_desc.as_str();
 
         match self.build_static_frame(class_name, method_name, desc, args.clone(), true)? {
             Some(fi) => {
-                let frame_owner = fi.frame_owner.clone();
+                let frame_owner = fi.frame_owner.to_string();
                 let mut call_stack = vec![fi];
                 self.run_trampoline(&mut call_stack)
                     .map_err(|e| format!("{e}\n  at {frame_owner}"))
@@ -40,37 +159,25 @@ impl Vm {
             None => {
                 // Native fallback — args already have varargs synthesis applied.
                 if let Some(v) = self.native_static(class_name, method_name, desc, &args) {
-                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                    if let Some(err) = self.pending_exception_err() {
+                        return Err(err);
+                    }
                     return Ok(v);
                 }
                 // Try with full locals construction for proper slot mapping.
                 let info = match self.resolve_method_exec_info(class_name, method_name, desc) {
                     Some(info) => info,
-                    None => return Err(format!("Method not found: {class_name}.{method_name}{desc}")),
+                    None => {
+                        return Err(format!(
+                            "Method not found: {class_name}.{method_name}{desc}"
+                        ))
+                    }
                 };
                 if !info.has_code {
-                    let (param_tokens, _) = Self::parse_method_descriptor_tokens(&info.descriptor);
-                    let mut native_args = Vec::with_capacity(param_tokens.len());
-                    let req: usize = param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum();
-                    let mut locals = vec![JValue::Void; info.max_locals.max(req)];
-                    let mut li = 0usize;
-                    for (a, t) in args.into_iter().zip(param_tokens.iter()) {
-                        if li >= locals.len() { break; }
-                        locals[li] = self.adapt_value_for_descriptor(t, a);
-                        li += if t == "J" || t == "D" { 2 } else { 1 };
-                    }
-                    let mut slot = 0usize;
-                    for t in &param_tokens {
-                        if slot < locals.len() { native_args.push(locals[slot].clone()); }
-                        slot += if t == "J" || t == "D" { 2 } else { 1 };
-                    }
-                    if let Some(v) = self.native_static(&info.class_name, method_name, &info.descriptor, &native_args) {
-                        if let Some(err) = self.pending_exception_err() { return Err(err); }
-                        return Ok(v);
-                    }
+                    return self.invoke_static_native_from_info(&info, method_name, args);
                 }
                 Err(format!(
-                    "Native stub not found for: {}.{method_name}{}",
+                    "Method not found: {}.{method_name}{}",
                     info.class_name, info.descriptor
                 ))
             }
@@ -86,27 +193,36 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        match self.build_special_frame_inner(this.clone(), class_name, method_name, descriptor, args.clone(), true)? {
+        match self.build_special_frame_inner(
+            this.clone(),
+            class_name,
+            method_name,
+            descriptor,
+            args.clone(),
+            true,
+        )? {
             Some(fi) => {
-                let frame_owner = fi.frame_owner.clone();
+                let frame_owner = fi.frame_owner.to_string();
                 let mut call_stack = vec![fi];
                 self.run_trampoline(&mut call_stack)
                     .map_err(|e| format!("{e}\n  at {frame_owner}"))
             }
             None => {
                 // Native fallback.
-                let resolved = if self.method_exists(class_name, method_name, descriptor) {
-                    descriptor.to_owned()
-                } else {
-                    self.find_method_real_descriptor(class_name, method_name, descriptor)
-                        .unwrap_or_else(|| descriptor.to_owned())
-                };
+                let resolved = self
+                    .resolve_method_signature(class_name, method_name, descriptor)
+                    .map(|(resolved, _)| resolved)
+                    .unwrap_or_else(|| descriptor.to_owned());
                 let desc = resolved.as_str();
                 if let Some(v) = self.native_virtual(&this, class_name, method_name, desc, &args) {
-                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                    if let Some(err) = self.pending_exception_err() {
+                        return Err(err);
+                    }
                     return Ok(v);
                 }
-                Err(format!("Special method not found: {class_name}.{method_name}{desc}"))
+                Err(format!(
+                    "Special method not found: {class_name}.{method_name}{desc}"
+                ))
             }
         }
     }
@@ -124,9 +240,17 @@ impl Vm {
 
         // RecordMethod dispatch — ObjectMethods bootstrap for toString/equals/hashCode.
         let record_method_info = match &this.borrow().native {
-            NativePayload::RecordMethod { method, class_simple_name, component_names, getters } => {
-                Some((method.clone(), class_simple_name.clone(), component_names.clone(), getters.clone()))
-            }
+            NativePayload::RecordMethod {
+                method,
+                class_simple_name,
+                component_names,
+                getters,
+            } => Some((
+                method.clone(),
+                class_simple_name.clone(),
+                component_names.clone(),
+                getters.clone(),
+            )),
             _ => None,
         };
         if let Some((rm_method, class_simple_name, component_names, getters)) = record_method_info {
@@ -137,15 +261,26 @@ impl Vm {
                         let recv = args.into_iter().next().unwrap_or(JValue::Ref(None));
                         if let JValue::Ref(Some(recv_ref)) = recv {
                             let mut parts = Vec::new();
-                            for ((getter_class, getter_method, getter_desc), comp_name) in getters.iter().zip(component_names.iter()) {
-                                let val = self.invoke_virtual(recv_ref.clone(), getter_class, getter_method, getter_desc, vec![])?;
+                            for ((getter_class, getter_method, getter_desc), comp_name) in
+                                getters.iter().zip(component_names.iter())
+                            {
+                                let val = self.invoke_virtual(
+                                    recv_ref.clone(),
+                                    getter_class,
+                                    getter_method,
+                                    getter_desc,
+                                    vec![],
+                                )?;
                                 let s = self.jvalue_to_string(val)?;
                                 parts.push(format!("{comp_name}={s}"));
                             }
                             let result = format!("{}[{}]", class_simple_name, parts.join(", "));
                             return Ok(JValue::Ref(Some(JObject::new_string(result))));
                         }
-                        return Ok(JValue::Ref(Some(JObject::new_string(format!("{}[]", class_simple_name)))));
+                        return Ok(JValue::Ref(Some(JObject::new_string(format!(
+                            "{}[]",
+                            class_simple_name
+                        )))));
                     }
                     "equals" => {
                         // args[0] = this record, args[1] = other object
@@ -161,8 +296,20 @@ impl Vm {
                             return Ok(JValue::Int(0));
                         }
                         for (getter_class, getter_method, getter_desc) in &getters {
-                            let v1 = self.invoke_virtual(recv_ref.clone(), getter_class, getter_method, getter_desc, vec![])?;
-                            let v2 = self.invoke_virtual(other_ref.clone(), getter_class, getter_method, getter_desc, vec![])?;
+                            let v1 = self.invoke_virtual(
+                                recv_ref.clone(),
+                                getter_class,
+                                getter_method,
+                                getter_desc,
+                                vec![],
+                            )?;
+                            let v2 = self.invoke_virtual(
+                                other_ref.clone(),
+                                getter_class,
+                                getter_method,
+                                getter_desc,
+                                vec![],
+                            )?;
                             if !self.jvalue_equals(&v1, &v2)? {
                                 return Ok(JValue::Int(0));
                             }
@@ -175,7 +322,13 @@ impl Vm {
                         if let JValue::Ref(Some(recv_ref)) = recv {
                             let mut hash: i32 = 0;
                             for (getter_class, getter_method, getter_desc) in &getters {
-                                let val = self.invoke_virtual(recv_ref.clone(), getter_class, getter_method, getter_desc, vec![])?;
+                                let val = self.invoke_virtual(
+                                    recv_ref.clone(),
+                                    getter_class,
+                                    getter_method,
+                                    getter_desc,
+                                    vec![],
+                                )?;
                                 let comp_hash = self.jvalue_hash(&val)?;
                                 hash = hash.wrapping_mul(31).wrapping_add(comp_hash);
                             }
@@ -190,15 +343,38 @@ impl Vm {
 
         // Lambda dispatch — handle inline.
         let lambda_info = match &this.borrow().native {
-            NativePayload::BytecodeLambda { sam_method, sam_desc, impl_class, impl_method, impl_desc, ref_kind, captured } => {
-                Some((sam_method.clone(), sam_desc.clone(), impl_class.clone(), impl_method.clone(), impl_desc.clone(), *ref_kind, captured.clone()))
-            }
+            NativePayload::BytecodeLambda {
+                sam_method,
+                sam_desc,
+                impl_class,
+                impl_method,
+                impl_desc,
+                ref_kind,
+                captured,
+            } => Some((
+                sam_method.clone(),
+                sam_desc.clone(),
+                impl_class.clone(),
+                impl_method.clone(),
+                impl_desc.clone(),
+                *ref_kind,
+                captured.clone(),
+            )),
             NativePayload::Lambda(f) => {
                 return Ok(f(args));
             }
             _ => None,
         };
-        if let Some((sam_method, sam_desc_str, impl_class, impl_method, impl_desc, ref_kind, captured)) = lambda_info {
+        if let Some((
+            sam_method,
+            sam_desc_str,
+            impl_class,
+            impl_method,
+            impl_desc,
+            ref_kind,
+            captured,
+        )) = lambda_info
+        {
             let sam_arg_count = count_args(&sam_desc_str);
             let call_arg_count = count_args(descriptor);
             if method_name == sam_method && call_arg_count == sam_arg_count {
@@ -210,14 +386,24 @@ impl Vm {
                     }
                     let recv = full_args.remove(0);
                     match recv {
-                        JValue::Ref(Some(r)) => self.invoke_virtual(r, &impl_class, &impl_method, &impl_desc, full_args),
-                        _ => Err(format!("Lambda invoke_virtual: expected Ref for this, got {recv:?}")),
+                        JValue::Ref(Some(r)) => {
+                            self.invoke_virtual(r, &impl_class, &impl_method, &impl_desc, full_args)
+                        }
+                        _ => Err(format!(
+                            "Lambda invoke_virtual: expected Ref for this, got {recv:?}"
+                        )),
                     }
                 } else if ref_kind == 8 {
                     // newinvokespecial — constructor reference (e.g. Age::new)
                     self.ensure_class_init(&impl_class)?;
                     let obj = JObject::new(&impl_class);
-                    self.invoke_special(obj.clone(), &impl_class, &impl_method, &impl_desc, full_args)?;
+                    self.invoke_special(
+                        obj.clone(),
+                        &impl_class,
+                        &impl_method,
+                        &impl_desc,
+                        full_args,
+                    )?;
                     Ok(JValue::Ref(Some(obj)))
                 } else {
                     self.invoke_static(&impl_class, &impl_method, &impl_desc, full_args)
@@ -227,29 +413,37 @@ impl Vm {
         }
 
         // Try to build a bytecode frame.
-        match self.build_virtual_frame_inner(this.clone(), class_name, method_name, descriptor, args.clone(), true)? {
+        match self.build_virtual_frame_inner(
+            this.clone(),
+            class_name,
+            method_name,
+            descriptor,
+            args.clone(),
+            true,
+        )? {
             Some(fi) => {
-                let frame_owner = fi.frame_owner.clone();
+                let frame_owner = fi.frame_owner.to_string();
                 let mut call_stack = vec![fi];
                 self.run_trampoline(&mut call_stack)
                     .map_err(|e| format!("{e}\n  at {frame_owner}"))
             }
             None => {
                 // Native fallback.
-                let resolve_class = if self.classes.contains_key(&runtime_class) {
-                    runtime_class.clone()
-                } else {
-                    class_name.to_owned()
-                };
-                let resolved = if self.method_exists(&resolve_class, method_name, descriptor) {
-                    descriptor.to_owned()
-                } else {
-                    self.find_method_real_descriptor(&resolve_class, method_name, descriptor)
-                        .unwrap_or_else(|| descriptor.to_owned())
-                };
+                let resolve_class = self
+                    .object_runtime_class_id(&this)
+                    .and_then(|class_id| self.class_name(class_id).map(str::to_owned))
+                    .unwrap_or_else(|| class_name.to_owned());
+                let resolved = self
+                    .resolve_method_signature(&resolve_class, method_name, descriptor)
+                    .map(|(resolved, _)| resolved)
+                    .unwrap_or_else(|| descriptor.to_owned());
                 let desc = resolved.as_str();
-                if let Some(v) = self.native_virtual(&this, &runtime_class, method_name, desc, &args) {
-                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                if let Some(v) =
+                    self.native_virtual(&this, &runtime_class, method_name, desc, &args)
+                {
+                    if let Some(err) = self.pending_exception_err() {
+                        return Err(err);
+                    }
                     return Ok(v);
                 }
                 Err(format!("Virtual method not found: {resolve_class}.{method_name}{desc} (runtime={runtime_class})"))
@@ -275,16 +469,60 @@ impl Vm {
         self.box_primitive_for_lambda(impl_ret, value)
     }
 
-    fn box_primitive_for_lambda(&mut self, impl_return_desc: &str, value: JValue) -> Result<JValue, String> {
+    fn box_primitive_for_lambda(
+        &mut self,
+        impl_return_desc: &str,
+        value: JValue,
+    ) -> Result<JValue, String> {
         match impl_return_desc {
-            "Z" => self.invoke_static("java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", vec![value]),
-            "B" => self.invoke_static("java/lang/Byte", "valueOf", "(B)Ljava/lang/Byte;", vec![value]),
-            "S" => self.invoke_static("java/lang/Short", "valueOf", "(S)Ljava/lang/Short;", vec![value]),
-            "C" => self.invoke_static("java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", vec![value]),
-            "I" => self.invoke_static("java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", vec![value]),
-            "J" => self.invoke_static("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", vec![value]),
-            "F" => self.invoke_static("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;", vec![value]),
-            "D" => self.invoke_static("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", vec![value]),
+            "Z" => self.invoke_static(
+                "java/lang/Boolean",
+                "valueOf",
+                "(Z)Ljava/lang/Boolean;",
+                vec![value],
+            ),
+            "B" => self.invoke_static(
+                "java/lang/Byte",
+                "valueOf",
+                "(B)Ljava/lang/Byte;",
+                vec![value],
+            ),
+            "S" => self.invoke_static(
+                "java/lang/Short",
+                "valueOf",
+                "(S)Ljava/lang/Short;",
+                vec![value],
+            ),
+            "C" => self.invoke_static(
+                "java/lang/Character",
+                "valueOf",
+                "(C)Ljava/lang/Character;",
+                vec![value],
+            ),
+            "I" => self.invoke_static(
+                "java/lang/Integer",
+                "valueOf",
+                "(I)Ljava/lang/Integer;",
+                vec![value],
+            ),
+            "J" => self.invoke_static(
+                "java/lang/Long",
+                "valueOf",
+                "(J)Ljava/lang/Long;",
+                vec![value],
+            ),
+            "F" => self.invoke_static(
+                "java/lang/Float",
+                "valueOf",
+                "(F)Ljava/lang/Float;",
+                vec![value],
+            ),
+            "D" => self.invoke_static(
+                "java/lang/Double",
+                "valueOf",
+                "(D)Ljava/lang/Double;",
+                vec![value],
+            ),
             _ => Ok(value),
         }
     }
@@ -294,7 +532,10 @@ impl Vm {
     // ------------------------------------------------------------------
 
     /// Convert a JValue to its Java string representation, calling toString() for objects.
-    pub(in crate::interpreter) fn jvalue_to_string(&mut self, val: JValue) -> Result<String, String> {
+    pub(in crate::interpreter) fn jvalue_to_string(
+        &mut self,
+        val: JValue,
+    ) -> Result<String, String> {
         match val {
             JValue::Void => Ok("null".to_owned()),
             JValue::Int(v) => Ok(v.to_string()),
@@ -307,8 +548,16 @@ impl Vm {
                     return Ok(s.to_owned());
                 }
                 let class_name = r.borrow().class_name.clone();
-                match self.invoke_virtual(r, &class_name, "toString", "()Ljava/lang/String;", vec![])? {
-                    JValue::Ref(Some(sr)) => Ok(sr.borrow().as_java_string().unwrap_or("").to_owned()),
+                match self.invoke_virtual(
+                    r,
+                    &class_name,
+                    "toString",
+                    "()Ljava/lang/String;",
+                    vec![],
+                )? {
+                    JValue::Ref(Some(sr)) => {
+                        Ok(sr.borrow().as_java_string().unwrap_or("").to_owned())
+                    }
                     _ => Ok("null".to_owned()),
                 }
             }
@@ -317,7 +566,11 @@ impl Vm {
     }
 
     /// Check structural equality of two JValues (for record equals).
-    pub(in crate::interpreter) fn jvalue_equals(&mut self, a: &JValue, b: &JValue) -> Result<bool, String> {
+    pub(in crate::interpreter) fn jvalue_equals(
+        &mut self,
+        a: &JValue,
+        b: &JValue,
+    ) -> Result<bool, String> {
         match (a, b) {
             (JValue::Int(x), JValue::Int(y)) => Ok(x == y),
             (JValue::Long(x), JValue::Long(y)) => Ok(x == y),
@@ -332,7 +585,13 @@ impl Vm {
                     return Ok(sa == sb);
                 }
                 // Fall back to invoking equals().
-                let result = self.invoke_virtual(ra.clone(), &ra.borrow().class_name.clone(), "equals", "(Ljava/lang/Object;)Z", vec![JValue::Ref(Some(rb.clone()))])?;
+                let result = self.invoke_virtual(
+                    ra.clone(),
+                    &ra.borrow().class_name.clone(),
+                    "equals",
+                    "(Ljava/lang/Object;)Z",
+                    vec![JValue::Ref(Some(rb.clone()))],
+                )?;
                 Ok(matches!(result, JValue::Int(1)))
             }
             _ => Ok(false),
@@ -387,14 +646,24 @@ impl Vm {
         self.monitors.clear();
 
         let orig_args = args;
-        let (resolved_desc, args) = match self.prepare_static_args(class_name, method_name, descriptor, orig_args.clone()) {
+        let (resolved_desc, args) = match self.prepare_static_args(
+            class_name,
+            method_name,
+            descriptor,
+            orig_args.clone(),
+        ) {
             Some(pair) => pair,
             None => {
-                if let Some(v) = self.native_static(class_name, method_name, descriptor, &orig_args) {
-                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                if let Some(v) = self.native_static(class_name, method_name, descriptor, &orig_args)
+                {
+                    if let Some(err) = self.pending_exception_err() {
+                        return Err(err);
+                    }
                     return Ok(v);
                 }
-                return Err(format!("Method not found: {class_name}.{method_name}{descriptor}"));
+                return Err(format!(
+                    "Method not found: {class_name}.{method_name}{descriptor}"
+                ));
             }
         };
         let desc = resolved_desc.as_str();
@@ -408,7 +677,9 @@ impl Vm {
             None => {
                 // Native method — no threading needed.
                 if let Some(v) = self.native_static(class_name, method_name, desc, &args) {
-                    if let Some(err) = self.pending_exception_err() { return Err(err); }
+                    if let Some(err) = self.pending_exception_err() {
+                        return Err(err);
+                    }
                     return Ok(v);
                 }
                 Err(format!(
