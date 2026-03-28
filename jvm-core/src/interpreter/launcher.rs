@@ -20,6 +20,13 @@ pub struct JvmProcess {
     exit: Option<ProcessExit>,
 }
 
+fn parse_system_exit(message: &str) -> Option<i32> {
+    let marker = "System.exit(";
+    let start = message.find(marker)? + marker.len();
+    let end = message[start..].find(')')?;
+    message[start..start + end].parse().ok()
+}
+
 impl JvmProcess {
     pub fn launch_classpath_main(
         shim_bundle: &[u8],
@@ -124,9 +131,17 @@ impl JvmProcess {
                         Err(e) => {
                             self.vm.scheduler.current_thread_mut().state = ThreadState::Terminated;
                             if current_id == 0 {
+                                let err = self.vm.pending_exception_err().unwrap_or(e);
+                                if let Some(code) = parse_system_exit(&err) {
+                                    self.finish(ProcessExit {
+                                        exit_code: code,
+                                        uncaught_exception: None,
+                                    });
+                                    return ProcessState::Exited;
+                                }
                                 self.finish(ProcessExit {
                                     exit_code: 1,
-                                    uncaught_exception: Some(e),
+                                    uncaught_exception: Some(err),
                                 });
                                 return ProcessState::Exited;
                             }
