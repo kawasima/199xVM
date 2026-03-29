@@ -276,9 +276,33 @@ public final class Class<T> implements Type {
             }
             c = c.getSuperclass();
         }
-        Method[] arr = new Method[out.size()];
+        // Deduplicate: keep first occurrence of each (name, descriptor) pair.
+        // A class method overriding an interface default must appear only once.
+        ArrayList<Method> deduped = new ArrayList<>();
         for (int i = 0; i < out.size(); i++) {
-            arr[i] = out.get(i);
+            Method m = out.get(i);
+            boolean seen = false;
+            for (int j = 0; j < deduped.size(); j++) {
+                Method d = deduped.get(j);
+                if (d.getName().equals(m.getName())) {
+                    Class<?>[] dp = d.getParameterTypes();
+                    Class<?>[] mp = m.getParameterTypes();
+                    if (dp.length == mp.length) {
+                        boolean same = true;
+                        for (int k = 0; k < dp.length; k++) {
+                            if (dp[k] != mp[k]) { same = false; break; }
+                        }
+                        if (same) { seen = true; break; }
+                    }
+                }
+            }
+            if (!seen) {
+                deduped.add(m);
+            }
+        }
+        Method[] arr = new Method[deduped.size()];
+        for (int i = 0; i < deduped.size(); i++) {
+            arr[i] = deduped.get(i);
         }
         return arr;
     }
