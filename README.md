@@ -156,8 +156,20 @@ Artifacts produced by `build-clj-smoke.sh`:
 - `clj-smoke/upstream-tests.jar`: selected upstream `clojure/clojure` test namespaces, support helpers, and runner (`ClojureUpstreamTestEntry`)
 - `clj-smoke/clojure-jars.txt`: local copied runtime JARs for Clojure 1.12.0
 
-The upstream runner currently executes a selected subset of `clojure.test-clojure` namespaces:
-`atoms`, `evaluation`, `fn`, `keywords`, `logic`, `macros`, `other-functions`, `special`, and `string`.
+The upstream runner currently stages a selected subset of `clojure.test-clojure` namespaces.
+Execution is split into namespace-scoped ignored Rust tests (`clojure_upstream_*`) so failures
+localize to one namespace instead of one long monolithic run. See
+`test-sources/clojure/src/upstream/runner.clj` and `make clj-upstream-coverage` for the current
+exact selection and milestone numbers.
+
+The default `clojure_upstream_*` gate is intentionally a small representative slice:
+`atoms`, `logic`, and `try-catch`. The slower or currently unsupported upstream namespaces are kept
+as opt-in diagnostics (`clojure_diag_*`). Today that includes the `fn` compiler/spec path plus
+`control`, `evaluation`, `keywords`, `macros`, `metadata`, `other-functions`, `predicates`,
+`special`, `string`, and `vectors`. That keeps the routinely used Clojure lane under the
+one-minute-per-test budget while preserving a dedicated place to investigate compiler/runtime
+performance and semantics gaps. For longer local diagnostics, `clojure_integration_test` also
+accepts `UPSTREAM_MAX_ELAPSED_SECS` and `UPSTREAM_LOG_OUTPUT`.
 
 `make clj-upstream-coverage` reports a simple milestone metric for that subset:
 
@@ -168,7 +180,12 @@ This is a suite-selection metric, not JVM line or branch coverage.
 
 The upstream harness currently applies a local `java.specification.version=1.8` / `java.vm.specification.version=1.8` compatibility override before requiring those namespaces so Clojure 1.12.0 takes its older reflection path. This override is scoped to the harness and does not change the VM's advertised Java 25 identity.
 
-This remains an isolated diagnostic path — it is **not** part of `make test` or the default `cargo test`. The slow-path tests live in a dedicated integration target, `clojure_integration_test.rs`.
+This remains an isolated diagnostic path — it is **not** part of `make test` or the default
+`cargo test`. The slow-path tests live in a dedicated integration target,
+`clojure_integration_test.rs`, with one smoke test plus namespace-scoped upstream diagnostics.
+For routine development, use `make clj-smoke-test` as the main Clojure gate. The namespace-scoped
+`clojure_upstream_*` tests are sequential diagnostic probes with a hard per-test timeout under
+60 seconds, intended to localize slow or broken areas rather than serve as a fast green suite.
 
 This is additional validation signal for JVM capability work; the JLS/JVMS conformance matrix above remains the source of truth for project claims.
 
