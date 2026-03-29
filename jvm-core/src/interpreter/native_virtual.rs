@@ -5,7 +5,6 @@ use std::rc::Rc;
 use crate::class_file::Attribute;
 use crate::heap::{JObject, JRef, JValue, NativePayload};
 
-use super::LazyClass;
 use super::descriptors::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -213,20 +212,18 @@ impl super::Vm {
                     }
                 };
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
-                self.ensure_class_ready(&internal);
-                match self.classes.get(&internal) {
-                    Some(LazyClass::Ready(_)) => {}
-                    Some(LazyClass::ParseError(msg)) => {
-                        let msg = msg.clone();
-                        self.throw_class_format_error(&msg);
-                        return Some(JValue::Void);
-                    }
-                    _ => {
+                let class_id = match self.ensure_class_loaded_by_name(&internal) {
+                    Ok(Some(class_id)) => class_id,
+                    Ok(None) => {
                         self.throw_class_not_found(&name_str);
                         return Some(JValue::Void);
                     }
-                }
-                Some(JValue::Ref(Some(self.class_object(internal))))
+                    Err(err) => {
+                        self.throw_class_format_error(&err);
+                        return Some(JValue::Void);
+                    }
+                };
+                Some(JValue::Ref(Some(self.class_object_by_id(class_id))))
             }
             "findLoadedClass" => {
                 let name_str = args
@@ -235,8 +232,12 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
-                if matches!(self.classes.get(&internal), Some(LazyClass::Ready(_))) {
-                    Some(JValue::Ref(Some(self.class_object(internal))))
+                // Only parsed/derived classes count as "loaded"; pending lazy entries do not.
+                if let Some(class_id) = self
+                    .tracked_class_id_for_name(&internal)
+                    .filter(|class_id| self.class_is_loaded(*class_id))
+                {
+                    Some(JValue::Ref(Some(self.class_object_by_id(class_id))))
                 } else {
                     Some(JValue::Ref(None))
                 }
@@ -272,14 +273,18 @@ impl super::Vm {
                     let class_bytes = bytes[off..off + len].to_vec();
                     if let Some(class_name) = crate::class_file::parse_class_name(&class_bytes) {
                         self.load_lazy(class_name.clone(), class_bytes);
-                        self.ensure_class_ready(&class_name);
-                        // Check if parsing actually succeeded
-                        if let Some(super::LazyClass::ParseError(msg)) = self.classes.get(&class_name) {
-                            let msg = msg.clone();
-                            self.throw_class_format_error(&msg);
-                            return Some(JValue::Void);
-                        }
-                        Some(JValue::Ref(Some(self.class_object(class_name))))
+                        let class_id = match self.ensure_class_loaded_by_name(&class_name) {
+                            Ok(Some(class_id)) => class_id,
+                            Ok(None) => {
+                                self.throw_class_not_found(&class_name);
+                                return Some(JValue::Void);
+                            }
+                            Err(err) => {
+                                self.throw_class_format_error(&err);
+                                return Some(JValue::Void);
+                            }
+                        };
+                        Some(JValue::Ref(Some(self.class_object_by_id(class_id))))
                     } else {
                         self.throw_class_format_error("defineClass: cannot parse class");
                         Some(JValue::Void)
@@ -382,6 +387,9 @@ impl super::Vm {
                 return Some(JValue::Ref(Some(this.clone())));
             }
             "getClass" if _descriptor == "()Ljava/lang/Class;" => {
+                if let Some(class_id) = self.object_runtime_class_id(this) {
+                    return Some(JValue::Ref(Some(self.class_object_by_id(class_id))));
+                }
                 let runtime_class = this.borrow().class_name.clone();
                 return Some(JValue::Ref(Some(self.class_object(runtime_class))));
             }
@@ -465,7 +473,7 @@ impl super::Vm {
         }
         // ----- java.lang.Thread native methods -----
         if this.borrow().class_name == "java/lang/Thread"
-            || self.is_instance_of(&this.borrow().class_name.clone(), "java/lang/Thread")
+            || self.is_instance_of_object(this, "java/lang/Thread")
         {
             match (method_name, _descriptor) {
                 ("start", "()V") => {
@@ -709,57 +717,92 @@ impl super::Vm {
             }
             ("java/lang/Class", "getName") => {
                 let internal = self
-                    .class_internal_name_from_obj(this)
+                    .class_target_from_mirror(this)
+                    .map(|(_, name)| name)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                Some(JValue::Ref(Some(self.intern_string(Self::class_display_name(&internal)))))
+                Some(JValue::Ref(Some(
+                    self.intern_string(Self::class_display_name(&internal)),
+                )))
             }
             ("java/lang/Class", "getModifiers") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                if let Some(target_id) = target_id {
+                    let _ = self.ensure_class_prepared(target_id);
+                    let mods = self
+                        .parsed_class(target_id)
+                        .map(|cf| i32::from(cf.access_flags))
+                        .unwrap_or(0);
+                    return Some(JValue::Int(mods));
+                }
                 self.ensure_class_ready(&target);
-                let mods = self.get_class(&target).map(|cf| i32::from(cf.access_flags)).unwrap_or(0);
+                let mods = self
+                    .get_class(&target)
+                    .map(|cf| i32::from(cf.access_flags))
+                    .unwrap_or(0);
                 Some(JValue::Int(mods))
             }
             ("java/lang/Class", "isInstance") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let obj_class = _args
-                    .first()
-                    .and_then(|v| v.as_ref())
-                    .map(|r| r.borrow().class_name.clone());
-                let result = match obj_class {
-                    Some(rc) => self.is_instance_of(&rc, &target),
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                let result = match _args.first().and_then(|v| v.as_ref()) {
+                    Some(obj) => target_id
+                        .map(|class_id| self.is_instance_of_object_id(obj, class_id))
+                        .unwrap_or_else(|| self.is_instance_of_object(obj, &target)),
                     None => false,
                 };
                 Some(JValue::Int(if result { 1 } else { 0 }))
             }
             ("java/lang/Class", "isAssignableFrom") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let other = _args
-                    .first()
-                    .and_then(|v| v.as_ref())
-                    .and_then(|c| self.class_internal_name_from_obj(c));
-                let result = other
-                    .as_ref()
-                    .map(|o| self.is_instance_of(o, &target))
-                    .unwrap_or(false);
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                let other_class = _args.first().and_then(|v| v.as_ref());
+                let result = if let (Some(target_id), Some(other_class)) = (target_id, other_class) {
+                    self.class_target_from_mirror(other_class)
+                        .and_then(|(other_id, other_name)| {
+                            other_id
+                                .map(|other_id| self.is_instance_of_id(other_id, target_id))
+                                .or_else(|| Some(self.is_instance_of(&other_name, &target)))
+                        })
+                        .unwrap_or_else(|| {
+                            self.class_internal_name_from_obj(other_class)
+                                .map(|other| self.is_instance_of(&other, &target))
+                                .unwrap_or(false)
+                        })
+                } else {
+                    other_class
+                        .and_then(|c| self.class_internal_name_from_obj(c))
+                        .map(|other| self.is_instance_of(&other, &target))
+                        .unwrap_or(false)
+                };
                 Some(JValue::Int(if result { 1 } else { 0 }))
             }
             ("java/lang/Class", "isInterface") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                if let Some(target_id) = target_id {
+                    let _ = self.ensure_class_prepared(target_id);
+                    let is_iface = self
+                        .parsed_class(target_id)
+                        .map(|cf| (cf.access_flags & 0x0200) != 0)
+                        .unwrap_or(false);
+                    return Some(JValue::Int(if is_iface { 1 } else { 0 }));
+                }
                 self.ensure_class_ready(&target);
-                let is_iface = self.get_class(&target).map(|cf| (cf.access_flags & 0x0200) != 0).unwrap_or(false);
+                let is_iface = self
+                    .get_class(&target)
+                    .map(|cf| (cf.access_flags & 0x0200) != 0)
+                    .unwrap_or(false);
                 Some(JValue::Int(if is_iface { 1 } else { 0 }))
             }
             ("java/lang/Class", "getComponentType") => {
                 let target = self
-                    .class_internal_name_from_obj(this)
+                    .class_target_from_mirror(this)
+                    .map(|(_, name)| name)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 if !target.starts_with('[') {
                     return Some(JValue::Ref(None));
@@ -783,9 +826,15 @@ impl super::Vm {
                 Some(JValue::Ref(Some(self.class_object(comp))))
             }
             ("java/lang/Class", "getSuperclass") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                if let Some(target_id) = target_id {
+                    let super_id = self
+                        .class_runtime_metadata_by_id(target_id)
+                        .and_then(|metadata| metadata.super_id);
+                    return Some(JValue::Ref(super_id.map(|id| self.class_object_by_id(id))));
+                }
                 self.ensure_class_ready(&target);
                 let super_name = if target.starts_with('[') {
                     Some("java/lang/Object".to_owned())
@@ -803,9 +852,23 @@ impl super::Vm {
                 Some(JValue::Ref(super_name.map(|s| self.class_object(s))))
             }
             ("java/lang/Class", "getInterfaces") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                if let Some(target_id) = target_id {
+                    let interface_ids = self
+                        .class_runtime_metadata_by_id(target_id)
+                        .map(|metadata| metadata.interface_ids.clone())
+                        .unwrap_or_default();
+                    let vals = interface_ids
+                        .iter()
+                        .map(|&id| JValue::Ref(Some(self.class_object_by_id(id))))
+                        .collect();
+                    return Some(JValue::Ref(Some(JObject::new_array(
+                        "[Ljava/lang/Class;",
+                        vals,
+                    ))));
+                }
                 self.ensure_class_ready(&target);
                 let iface_names: Vec<String> = if target.starts_with('[') {
                     vec!["java/lang/Cloneable".to_owned(), "java/io/Serializable".to_owned()]
@@ -827,11 +890,31 @@ impl super::Vm {
                 ))))
             }
             ("java/lang/Class", "getEnumConstants") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                if let Some(target_id) = target_id {
+                    let _ = self.ensure_class_init(&target);
+                    if let Some(JValue::Ref(Some(arr))) =
+                        self.static_field_value_by_id(target_id, "$VALUES").cloned()
+                    {
+                        let cloned = match self.invoke_virtual(
+                            arr.clone(),
+                            "java/lang/Object",
+                            "clone",
+                            "()Ljava/lang/Object;",
+                            vec![],
+                        ) {
+                            Ok(v) => v,
+                            Err(_) => JValue::Ref(Some(arr)),
+                        };
+                        return Some(cloned);
+                    }
+                    return Some(JValue::Ref(None));
+                }
                 let _ = self.ensure_class_init(&target);
-                if let Some(JValue::Ref(Some(arr))) = self.static_fields.get(&target).and_then(|m| m.get("$VALUES")).cloned() {
+                if let Some(JValue::Ref(Some(arr))) = self.static_field_value(&target, "$VALUES")
+                {
                     let cloned = match self.invoke_virtual(
                         arr.clone(),
                         "java/lang/Object",
@@ -848,26 +931,60 @@ impl super::Vm {
                 }
             }
             ("java/lang/Class", "isRecord") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                if let Some(target_id) = target_id {
+                    let _ = self.ensure_class_prepared(target_id);
+                    let is_record = self
+                        .parsed_class(target_id)
+                        .map(|cf| {
+                            cf.attributes
+                                .iter()
+                                .any(|a| matches!(a, Attribute::Record { .. }))
+                        })
+                        .unwrap_or(false);
+                    return Some(JValue::Int(if is_record { 1 } else { 0 }));
+                }
                 self.ensure_class_ready(&target);
-                let is_record = self.get_class(&target).map(|cf| cf.attributes.iter().any(|a| matches!(a, Attribute::Record { .. }))).unwrap_or(false);
+                let is_record = self
+                    .get_class(&target)
+                    .map(|cf| {
+                        cf.attributes
+                            .iter()
+                            .any(|a| matches!(a, Attribute::Record { .. }))
+                    })
+                    .unwrap_or(false);
                 Some(JValue::Int(if is_record { 1 } else { 0 }))
             }
             ("java/lang/Class", "getRecordComponents") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
                 let mut comps_meta: Vec<(String, String)> = Vec::new();
-                self.ensure_class_ready(&target);
-                if let Some(cf) = self.get_class(&target) {
-                    for attr in &cf.attributes {
-                        if let Attribute::Record { components } = attr {
-                            for c in components {
-                                let name = cf.constant_pool.utf8(c.name_index).to_owned();
-                                let desc = cf.constant_pool.utf8(c.descriptor_index).to_owned();
-                                comps_meta.push((name, desc));
+                if let Some(target_id) = target_id {
+                    let _ = self.ensure_class_prepared(target_id);
+                    if let Some(cf) = self.parsed_class(target_id) {
+                        for attr in &cf.attributes {
+                            if let Attribute::Record { components } = attr {
+                                for c in components {
+                                    let name = cf.constant_pool.utf8(c.name_index).to_owned();
+                                    let desc = cf.constant_pool.utf8(c.descriptor_index).to_owned();
+                                    comps_meta.push((name, desc));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    self.ensure_class_ready(&target);
+                    if let Some(cf) = self.get_class(&target) {
+                        for attr in &cf.attributes {
+                            if let Attribute::Record { components } = attr {
+                                for c in components {
+                                    let name = cf.constant_pool.utf8(c.name_index).to_owned();
+                                    let desc = cf.constant_pool.utf8(c.descriptor_index).to_owned();
+                                    comps_meta.push((name, desc));
+                                }
                             }
                         }
                     }
@@ -885,40 +1002,48 @@ impl super::Vm {
                 ))))
             }
             ("java/lang/Class", "getDeclaredAnnotations") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
-                self.ensure_class_ready(&target);
-                let anns = if let Some(cf) = self.get_class(&target) {
-                    let attrs = cf.attributes.clone();
-                    let cp_entries = cf.constant_pool.entries.clone();
-                    let cp = crate::class_file::ConstantPool { entries: cp_entries };
-                    self.parse_runtime_visible_annotations(&attrs, &cp)
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                let anns = if let Some(target_id) = target_id {
+                    let _ = self.ensure_class_prepared(target_id);
+                    if let Some(cf) = self.parsed_class(target_id) {
+                        let attrs = cf.attributes.clone();
+                        let cp_entries = cf.constant_pool.entries.clone();
+                        let cp = crate::class_file::ConstantPool { entries: cp_entries };
+                        self.parse_runtime_visible_annotations(&attrs, &cp)
+                    } else {
+                        Vec::new()
+                    }
                 } else {
-                    Vec::new()
+                    self.ensure_class_ready(&target);
+                    if let Some(cf) = self.get_class(&target) {
+                        let attrs = cf.attributes.clone();
+                        let cp_entries = cf.constant_pool.entries.clone();
+                        let cp = crate::class_file::ConstantPool { entries: cp_entries };
+                        self.parse_runtime_visible_annotations(&attrs, &cp)
+                    } else {
+                        Vec::new()
+                    }
                 };
                 Some(self.build_annotation_ref_array(anns))
             }
             ("java/lang/Class", "getDeclaredFields0") | ("java/lang/Class", "getDeclaredFields") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                let infos = target_id
+                    .map(|class_id| self.declared_field_infos_id(class_id))
+                    .unwrap_or_else(|| self.declared_field_infos(&target));
                 let mut out = Vec::new();
-                let mut members: Vec<(String, String, u16)> = Vec::new();
-                self.ensure_class_ready(&target);
-                if let Some(cf) = self.get_class(&target) {
-                    for f in &cf.fields {
-                        if public_only && (f.access_flags & 0x0001) == 0 {
-                            continue;
-                        }
-                        let name = cf.constant_pool.utf8(f.name_index).to_owned();
-                        let desc = cf.constant_pool.utf8(f.descriptor_index).to_owned();
-                        members.push((name, desc, f.access_flags));
+                for info in infos.iter() {
+                    if public_only && (info.access_flags & 0x0001) == 0 {
+                        continue;
                     }
-                }
-                for (name, desc, flags) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_field(&target, &name, &desc, flags))));
+                    out.push(JValue::Ref(Some(
+                        self.build_reflect_field_from_info(&target, info),
+                    )));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
                     "[Ljava/lang/reflect/Field;",
@@ -926,39 +1051,21 @@ impl super::Vm {
                 ))))
             }
             ("java/lang/Class", "getDeclaredMethods0") | ("java/lang/Class", "getDeclaredMethods") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                let infos = target_id
+                    .map(|class_id| self.declared_method_infos_id(class_id))
+                    .unwrap_or_else(|| self.declared_method_infos(&target));
                 let mut out = Vec::new();
-                let mut members: Vec<(String, String, u16, Vec<String>)> = Vec::new();
-                self.ensure_class_ready(&target);
-                if let Some(cf) = self.get_class(&target) {
-                    for m in &cf.methods {
-                        if public_only && (m.access_flags & 0x0001) == 0 {
-                            continue;
-                        }
-                        let name = cf.constant_pool.utf8(m.name_index).to_owned();
-                        if name == "<init>" || name == "<clinit>" {
-                            continue;
-                        }
-                        let desc = cf.constant_pool.utf8(m.descriptor_index).to_owned();
-                        let mut ex = Vec::new();
-                        for attr in &m.attributes {
-                            if let Attribute::Exceptions { exception_index_table } = attr {
-                                ex = exception_index_table
-                                    .iter()
-                                    .map(|idx| cf.constant_pool.class_name(*idx).to_owned())
-                                    .collect();
-                            }
-                        }
-                        members.push((name, desc, m.access_flags, ex));
+                for info in infos.iter() {
+                    if public_only && (info.access_flags & 0x0001) == 0 {
+                        continue;
                     }
-                }
-                for (name, desc, flags, ex) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_method(
-                        &target, &name, &desc, flags, ex,
-                    ))));
+                    out.push(JValue::Ref(Some(
+                        self.build_reflect_method_from_info(&target, info),
+                    )));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
                     "[Ljava/lang/reflect/Method;",
@@ -967,39 +1074,21 @@ impl super::Vm {
             }
             ("java/lang/Class", "getDeclaredConstructors0")
             | ("java/lang/Class", "getDeclaredConstructors") => {
-                let target = self
-                    .class_internal_name_from_obj(this)
-                    .unwrap_or_else(|| "java/lang/Object".to_owned());
                 let public_only = _args.first().map(|v| v.as_int() != 0).unwrap_or(false);
+                let (target_id, target) = self
+                    .class_target_from_mirror(this)
+                    .unwrap_or((None, "java/lang/Object".to_owned()));
+                let infos = target_id
+                    .map(|class_id| self.declared_constructor_infos_id(class_id))
+                    .unwrap_or_else(|| self.declared_constructor_infos(&target));
                 let mut out = Vec::new();
-                let mut members: Vec<(String, u16, Vec<String>)> = Vec::new();
-                self.ensure_class_ready(&target);
-                if let Some(cf) = self.get_class(&target) {
-                    for m in &cf.methods {
-                        if public_only && (m.access_flags & 0x0001) == 0 {
-                            continue;
-                        }
-                        let name = cf.constant_pool.utf8(m.name_index).to_owned();
-                        if name != "<init>" {
-                            continue;
-                        }
-                        let desc = cf.constant_pool.utf8(m.descriptor_index).to_owned();
-                        let mut ex = Vec::new();
-                        for attr in &m.attributes {
-                            if let Attribute::Exceptions { exception_index_table } = attr {
-                                ex = exception_index_table
-                                    .iter()
-                                    .map(|idx| cf.constant_pool.class_name(*idx).to_owned())
-                                    .collect();
-                            }
-                        }
-                        members.push((desc, m.access_flags, ex));
+                for info in infos.iter() {
+                    if public_only && (info.access_flags & 0x0001) == 0 {
+                        continue;
                     }
-                }
-                for (desc, flags, ex) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_constructor(
-                        &target, &desc, flags, ex,
-                    ))));
+                    out.push(JValue::Ref(Some(
+                        self.build_reflect_constructor_from_info(&target, info),
+                    )));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
                     "[Ljava/lang/reflect/Constructor;",
@@ -1242,13 +1331,13 @@ impl super::Vm {
                 };
 
                 let raw = if (modifiers & 0x0008) != 0 {
-                    self.static_fields
-                        .get(&owner).and_then(|m| m.get(&name))
-                        .cloned()
+                    self.static_field_value(&owner, &name)
                         .unwrap_or_else(|| default_value_for_descriptor(&desc))
                 } else {
                     match _args.first().and_then(|v| v.as_ref()) {
-                        Some(target) => target.borrow().fields.get(&name).cloned().unwrap_or_else(|| default_value_for_descriptor(&desc)),
+                        Some(target) => self
+                            .get_object_field_value(target, &name)
+                            .unwrap_or_else(|| default_value_for_descriptor(&desc)),
                         None => JValue::Ref(None),
                     }
                 };
@@ -1279,9 +1368,9 @@ impl super::Vm {
                 let val = _args.get(1).cloned().unwrap_or(JValue::Ref(None));
                 let adapted = self.adapt_value_for_descriptor(&desc, val);
                 if (modifiers & 0x0008) != 0 {
-                    self.static_fields.entry(owner).or_default().insert(name, adapted);
+                    self.set_static_field_value(&owner, name, adapted);
                 } else if let Some(target) = _args.first().and_then(|v| v.as_ref()) {
-                    target.borrow_mut().fields.insert(name, adapted);
+                    self.set_object_field_value(target, &name, adapted);
                 }
                 Some(JValue::Void)
             }
@@ -1653,6 +1742,9 @@ impl super::Vm {
                     class_name: src.class_name.clone(),
                     fields,
                     native,
+                    class_id: src.class_id,
+                    represented_class_id: src.represented_class_id,
+                    field_slots: src.field_slots.clone(),
                 }));
                 Some(JValue::Ref(Some(cloned)))
             }
