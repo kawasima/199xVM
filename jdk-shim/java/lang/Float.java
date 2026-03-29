@@ -53,6 +53,8 @@ public final class Float extends Number implements Comparable<Float> {
     @Override public double doubleValue() { return (double) value; }
 
     @Override public String toString() { return toString(value); }
+    public boolean isNaN() { return isNaN(value); }
+    public boolean isInfinite() { return isInfinite(value); }
 
     public static native String toString(float f);
 

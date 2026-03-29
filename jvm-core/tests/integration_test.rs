@@ -29,18 +29,23 @@ fn framed_jars(jars: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// Run a test class from the test JAR via the JAR loader.
-fn run_jar_test_result(
-    class: &str,
-    method: &str,
-    descriptor: &str,
-) -> Result<jvm_core::heap::JValue, String> {
-    let mut vm = jvm_core::interpreter::Vm::new();
-    jvm_core::load_bundle(&mut vm, shim_bundle());
-    vm.load_jar(test_jar()).expect("failed to load test JAR");
-    let result = vm.invoke_static_threaded(class, method, descriptor, vec![]);
-    vm.flush_printstreams();
-    result
+fn pump_process_to_exit(
+    process: &mut jvm_core::JvmProcess,
+    max_iters: usize,
+    pump_rounds: usize,
+) -> jvm_core::ProcessExit {
+    for _ in 0..max_iters {
+        match process.pump(pump_rounds) {
+            jvm_core::ProcessState::Running => {}
+            jvm_core::ProcessState::WaitingForInput => {
+                panic!("process unexpectedly blocked on stdin");
+            }
+            jvm_core::ProcessState::Exited => {
+                return process.exit().cloned().expect("process exit");
+            }
+        }
+    }
+    panic!("process did not exit after {max_iters} iterations with pump_rounds={pump_rounds}");
 }
 
 fn run_jar_test(class: &str, method: &str, descriptor: &str) -> String {
@@ -156,6 +161,16 @@ fn try_catch_npe() {
 }
 
 #[test]
+fn try_catch_checked_exception() {
+    let result = run_jar_test(
+        "TryCatchCheckedExceptionTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "java.io.FileNotFoundException");
+}
+
+#[test]
 fn factorial_long() {
     let result = run_jar_test(
         "Factorial",
@@ -194,15 +209,55 @@ fn access_controller_shims() {
 }
 
 #[test]
-fn access_controller_uncaught_exception_wrapper() {
-    let err = run_jar_test_result(
-        "AccessControllerShimTest",
-        "throwWrappedException",
-        "()Ljava/lang/String;",
+fn access_controller_exception_wrapper_reaches_process_boundary() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "AccessControllerExceptionProcessMain",
+        &[],
+        jvm_core::StdioMode::Ignore,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
     )
-    .expect_err("expected uncaught PrivilegedActionException");
-    assert!(err.starts_with("Exception: java/security/PrivilegedActionException"));
-    assert!(err.contains("java/io/IOException: boom"));
+    .expect("launch classpath main");
+
+    let exit = pump_process_to_exit(&mut process, 4096, 64);
+    let stdout = String::from_utf8(process.take_stdout()).unwrap();
+    let stderr = String::from_utf8(process.take_stderr()).unwrap();
+
+    assert!(stdout.is_empty());
+    assert!(stderr.is_empty());
+    assert_eq!(exit.exit_code, 1);
+    let uncaught = exit
+        .uncaught_exception
+        .expect("expected uncaught PrivilegedActionException at process boundary");
+    assert!(uncaught.contains("java/security/PrivilegedActionException"));
+    assert!(uncaught.contains("java/io/IOException: boom"));
+}
+
+#[test]
+fn system_exit_sets_process_exit_code_without_uncaught_exception() {
+    let jar_data = framed_jars(&[test_jar()]);
+    let mut process = jvm_core::launch_classpath_main_native(
+        shim_bundle(),
+        &jar_data,
+        "SystemExitProcessMain",
+        &[],
+        jvm_core::StdioMode::Ignore,
+        jvm_core::StdioMode::Pipe,
+        jvm_core::StdioMode::Pipe,
+    )
+    .expect("launch classpath main");
+
+    let exit = pump_process_to_exit(&mut process, 4096, 64);
+    let stdout = String::from_utf8(process.take_stdout()).unwrap();
+    let stderr = String::from_utf8(process.take_stderr()).unwrap();
+
+    assert!(stdout.is_empty());
+    assert!(stderr.is_empty());
+    assert_eq!(exit.exit_code, 7);
+    assert_eq!(exit.uncaught_exception, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +286,49 @@ fn parse_number_shims() {
         "()Ljava/lang/String;",
     );
     assert_eq!(result, "3.5|2.25|true|true|true");
+}
+
+#[test]
+fn stack_shim_api() {
+    let result = run_jar_test(
+        "StackShimTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "alpha|beta|beta|2|beta|false|alpha|true");
+}
+
+#[test]
+fn floating_wrapper_instance_predicates() {
+    let result = run_jar_test(
+        "DoubleInstanceMethodsTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|true|true|true");
+}
+
+#[test]
+fn objects_null_predicates() {
+    let result = run_jar_test(
+        "ObjectsPredicatesTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "true|false|false|true");
+}
+
+#[test]
+fn integer_bit_intrinsics() {
+    let result = run_jar_test(
+        "IntegerBitIntrinsicsTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(
+        result,
+        "16|27|4|32|1|67305985|32|59|4|256|1|578437695752307201"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +477,16 @@ fn interface_default_method_dispatch() {
     assert_eq!(result, "I am Thing");
 }
 
+#[test]
+fn reflection_includes_interface_default_methods() {
+    let result = run_jar_test(
+        "ReflectionInterfaceDefaultMethodTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "iface|true");
+}
+
 // ---------------------------------------------------------------------------
 // Green threads: Thread.start() / Thread.join()
 // ---------------------------------------------------------------------------
@@ -391,6 +499,16 @@ fn thread_start_join_basic() {
         "()Ljava/lang/String;",
     );
     assert_eq!(result, "ABC");
+}
+
+#[test]
+fn thread_get_stack_trace_shim() {
+    let result = run_jar_test(
+        "ThreadStackTraceShimTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "len=0");
 }
 
 #[test]
@@ -639,6 +757,12 @@ fn method_handle_shims() {
 fn regex_capture_groups() {
     let result = run_jar_test("RegexGroupsTest", "run", "()Ljava/lang/String;");
     assert_eq!(result, "3|1.12.0|1|12|0");
+}
+
+#[test]
+fn regex_find_escaped_parens() {
+    let result = run_jar_test("RegexFindEscapedParensTest", "run", "()Ljava/lang/String;");
+    assert_eq!(result, "true|Wrong number of args (0) passed to: :kw|false");
 }
 
 #[test]

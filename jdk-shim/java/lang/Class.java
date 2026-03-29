@@ -263,17 +263,46 @@ public final class Class<T> implements Type {
 
     public Method[] getMethods() {
         ArrayList<Method> out = new ArrayList<>();
+        ArrayList<Class<?>> seenInterfaces = new ArrayList<>();
         Class<?> c = this;
         while (c != null) {
             Method[] methods = c.getDeclaredMethods0(true);
             for (int i = 0; i < methods.length; i++) {
                 out.add(methods[i]);
             }
+            Class<?>[] interfaces = c.getInterfaces();
+            for (int i = 0; i < interfaces.length; i++) {
+                collectInterfaceMethods(interfaces[i], out, seenInterfaces);
+            }
             c = c.getSuperclass();
         }
-        Method[] arr = new Method[out.size()];
+        // Deduplicate: keep first occurrence of each (name, descriptor) pair.
+        // A class method overriding an interface default must appear only once.
+        ArrayList<Method> deduped = new ArrayList<>();
         for (int i = 0; i < out.size(); i++) {
-            arr[i] = out.get(i);
+            Method m = out.get(i);
+            boolean seen = false;
+            for (int j = 0; j < deduped.size(); j++) {
+                Method d = deduped.get(j);
+                if (d.getName().equals(m.getName())) {
+                    Class<?>[] dp = d.getParameterTypes();
+                    Class<?>[] mp = m.getParameterTypes();
+                    if (dp.length == mp.length) {
+                        boolean same = true;
+                        for (int k = 0; k < dp.length; k++) {
+                            if (dp[k] != mp[k]) { same = false; break; }
+                        }
+                        if (same) { seen = true; break; }
+                    }
+                }
+            }
+            if (!seen) {
+                deduped.add(m);
+            }
+        }
+        Method[] arr = new Method[deduped.size()];
+        for (int i = 0; i < deduped.size(); i++) {
+            arr[i] = deduped.get(i);
         }
         return arr;
     }
@@ -295,32 +324,45 @@ public final class Class<T> implements Type {
     }
 
     public Method getMethod(String name, Class<?>... parameterTypes) throws NoSuchMethodException {
-        Class<?> c = this;
-        while (c != null) {
-            Method[] methods = c.getDeclaredMethods0(true);
-            for (int i = 0; i < methods.length; i++) {
-                Method m = methods[i];
-                if (!name.equals(m.getName())) {
-                    continue;
-                }
-                Class<?>[] params = m.getParameterTypes();
-                if (params.length != parameterTypes.length) {
-                    continue;
-                }
-                boolean same = true;
-                for (int j = 0; j < params.length; j++) {
-                    if (params[j] != parameterTypes[j]) {
-                        same = false;
-                        break;
-                    }
-                }
-                if (same) {
-                    return m;
+        Method[] methods = getMethods();
+        for (int i = 0; i < methods.length; i++) {
+            Method m = methods[i];
+            if (!name.equals(m.getName())) {
+                continue;
+            }
+            Class<?>[] params = m.getParameterTypes();
+            if (params.length != parameterTypes.length) {
+                continue;
+            }
+            boolean same = true;
+            for (int j = 0; j < params.length; j++) {
+                if (params[j] != parameterTypes[j]) {
+                    same = false;
+                    break;
                 }
             }
-            c = c.getSuperclass();
+            if (same) {
+                return m;
+            }
         }
         throw new NoSuchMethodException(name);
+    }
+
+    private static void collectInterfaceMethods(Class<?> iface, ArrayList<Method> out, ArrayList<Class<?>> seenInterfaces) {
+        for (int i = 0; i < seenInterfaces.size(); i++) {
+            if (seenInterfaces.get(i) == iface) {
+                return;
+            }
+        }
+        seenInterfaces.add(iface);
+        Method[] methods = iface.getDeclaredMethods0(true);
+        for (int i = 0; i < methods.length; i++) {
+            out.add(methods[i]);
+        }
+        Class<?>[] superInterfaces = iface.getInterfaces();
+        for (int i = 0; i < superInterfaces.length; i++) {
+            collectInterfaceMethods(superInterfaces[i], out, seenInterfaces);
+        }
     }
 
     @SuppressWarnings("unchecked")
