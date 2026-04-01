@@ -82,8 +82,8 @@ pub(super) fn resolve_class_name_ref<'a>(cp: &'a [ConstantPoolEntry], idx: u16) 
 
 #[allow(dead_code)]
 pub(super) fn resolve_methodref(cp: &[ConstantPoolEntry], idx: u16) -> (String, String, String) {
-    let (a, b, c) = resolve_methodref_ref(cp, idx);
-    (a.to_owned(), b.to_owned(), c.to_owned())
+    let (class_name, name, desc) = resolve_methodref_ref(cp, idx);
+    (class_name.to_owned(), name.to_owned(), desc.to_owned())
 }
 
 pub(super) fn resolve_methodref_ref<'a>(cp: &'a [ConstantPoolEntry], idx: u16) -> (&'a str, &'a str, &'a str) {

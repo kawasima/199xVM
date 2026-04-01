@@ -54,8 +54,8 @@ impl Vm {
                 return Some((entry.handler_pc as usize, exc_obj));
             }
             // Resolve catch_type to class name and check if exception is instance.
-            let catch_class = resolve_class_name(cp, entry.catch_type);
-            if exc_class == catch_class || self.is_instance_of(exc_class, &catch_class) {
+            let catch_class = resolve_class_name_ref(cp, entry.catch_type);
+            if exc_class == catch_class || self.is_instance_of(exc_class, catch_class) {
                 let exc_obj = self.take_or_create_exception(exc_class, err_msg);
                 return Some((entry.handler_pc as usize, exc_obj));
             }
@@ -802,20 +802,20 @@ impl Vm {
                 // ---- Object creation ----
                 0xbb => { // new
                     let idx = read_u16(code, &mut frame.pc);
-                    let new_class = resolve_class_name(cp, idx);
+                    let new_class = resolve_class_name_ref(cp, idx);
                     // Run <clinit> for the class being instantiated.
-                    self.ensure_class_init(&new_class)?;
+                    self.ensure_class_init(new_class)?;
                     // A ParseError entry means the class was registered but malformed —
                     // surface consistently as ClassFormatError (same as Class.forName0 path).
-                    if matches!(self.classes.get(&new_class), Some(super::LazyClass::ParseError(_))) {
-                        self.throw_class_format_error(&new_class);
+                    if matches!(self.classes.get(new_class), Some(super::LazyClass::ParseError(_))) {
+                        self.throw_class_format_error(new_class);
                         return Err(format!("java/lang/ClassFormatError: malformed class file for {new_class}"));
                     }
-                    let obj = if self.get_class(&new_class).is_some() {
+                    let obj = if self.get_class(new_class).is_some() {
                         // Class is loaded (bytecode available) — use plain object.
                         JObject::new(new_class)
                     } else {
-                        match new_class.as_str() {
+                        match new_class {
                             // JDK collection types backed by Array payload (no shim loaded).
                             "java/util/ArrayList" | "java/util/LinkedList" =>
                                 JObject::new_array(new_class, vec![]),
@@ -846,7 +846,7 @@ impl Vm {
                 }
                 0xbd => { // anewarray
                     let idx = read_u16(code, &mut frame.pc);
-                    let elem_class = resolve_class_name(cp, idx);
+                    let elem_class = resolve_class_name_ref(cp, idx);
                     let count_int = frame.stack.pop().unwrap().as_int();
                     if count_int < 0 {
                         return Err(format!("java/lang/NegativeArraySizeException: {count_int}"));
@@ -862,7 +862,7 @@ impl Vm {
                     let idx = read_u16(code, &mut frame.pc);
                     let dimensions = code[frame.pc] as usize;
                     frame.pc += 1;
-                    let class_name_str = resolve_class_name(cp, idx);
+                    let class_name_str = resolve_class_name_ref(cp, idx);
                     let mut dim_sizes = Vec::with_capacity(dimensions);
                     for _ in 0..dimensions {
                         let n = frame.stack.pop().unwrap().as_int();
@@ -872,7 +872,7 @@ impl Vm {
                         dim_sizes.push(n as usize);
                     }
                     dim_sizes.reverse();
-                    let arr = self.create_multi_array(&class_name_str, &dim_sizes, 0);
+                    let arr = self.create_multi_array(class_name_str, &dim_sizes, 0);
                     frame.stack.push(JValue::Ref(Some(arr)));
                 }
                 0xbe => { // arraylength
@@ -893,7 +893,7 @@ impl Vm {
                 // ---- instanceof / checkcast ----
                 0xc0 => { // checkcast — per JVMS §6.5.checkcast
                     let idx = read_u16(code, &mut frame.pc);
-                    let target_class = resolve_class_name(cp, idx);
+                    let target_class = resolve_class_name_ref(cp, idx);
                     // Peek at top of stack (don't pop — value stays if check passes).
                     let obj = frame.stack.last()
                         .ok_or_else(|| "checkcast: empty stack".to_owned())?;
@@ -901,7 +901,7 @@ impl Vm {
                         None => {} // null passes checkcast
                         Some(r) => {
                             let cn = r.borrow().class_name.clone();
-                            if !self.is_instance_of(&cn, &target_class) {
+                            if !self.is_instance_of(&cn, target_class) {
                                 return Err(format!(
                                     "ClassCastException: {} cannot be cast to {}",
                                     cn.replace('/', "."),
@@ -913,13 +913,13 @@ impl Vm {
                 }
                 0xc1 => { // instanceof
                     let idx = read_u16(code, &mut frame.pc);
-                    let target_class = resolve_class_name(cp, idx);
+                    let target_class = resolve_class_name_ref(cp, idx);
                     let obj = frame.stack.pop().unwrap();
                     let is_instance = match obj.as_ref() {
                         None => false,
                         Some(r) => {
                             let cn = r.borrow().class_name.clone();
-                            self.is_instance_of(&cn, &target_class)
+                            self.is_instance_of(&cn, target_class)
                         }
                     };
                     frame.stack.push(JValue::Int(is_instance as i32));
@@ -1030,8 +1030,8 @@ impl Vm {
             }
             ConstantPoolEntry::Class { name_index } => {
                 let name = match &cp[*name_index as usize] {
-                    ConstantPoolEntry::Utf8(s) => s.clone(),
-                    _ => String::new(),
+                    ConstantPoolEntry::Utf8(s) => s.as_str(),
+                    _ => "",
                 };
                 let obj = self.class_object(name);
                 frame.stack.push(JValue::Ref(Some(obj)));

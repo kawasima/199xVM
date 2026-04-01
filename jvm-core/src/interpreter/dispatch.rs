@@ -245,7 +245,7 @@ impl Vm {
         match this_val {
             JValue::Ref(Some(r)) => {
                 let push_return = !descriptor.ends_with(")V");
-                self.dispatch_virtual_on_ref(r, &class_name, &method_name, &descriptor, args, push_return, frame)
+                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame)
             }
             JValue::Ref(None) => Err(format!("NullPointerException: invokevirtual {class_name}.{method_name}{descriptor}")),
             other => Err(format!(
@@ -378,18 +378,18 @@ impl Vm {
         let n_args = count_args(descriptor);
         let args = pop_args(frame, n_args);
 
-        let is_static = self.find_method_flags(&class_name, &method_name, &descriptor)
+        let is_static = self.find_method_flags(class_name, method_name, descriptor)
             .map(|flags| flags & 0x0008 != 0)
             .unwrap_or(false);
         if is_static {
             let push_return = !descriptor.ends_with(")V");
-            match self.build_static_frame(&class_name, &method_name, &descriptor, args.clone(), push_return)? {
+            match self.build_static_frame(class_name, method_name, descriptor, args.clone(), push_return)? {
                 Some(fi) => {
                     *self.pending_frame_mut() = Some(fi);
                     return Ok(None);
                 }
                 None => {
-                    let result = self.invoke_static(&class_name, &method_name, &descriptor, args)?;
+                    let result = self.invoke_static(class_name, method_name, descriptor, args)?;
                     if !matches!(result, JValue::Void) {
                         frame.stack.push(result);
                     }
@@ -402,7 +402,7 @@ impl Vm {
         match this_val {
             JValue::Ref(Some(r)) => {
                 let push_return = !descriptor.ends_with(")V");
-                self.dispatch_virtual_on_ref(r, &class_name, &method_name, &descriptor, args, push_return, frame)
+                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame)
             }
             JValue::Ref(None) => Err(format!("NullPointerException: invokeinterface {class_name}.{method_name}{descriptor}")),
             other => Err(format!(
