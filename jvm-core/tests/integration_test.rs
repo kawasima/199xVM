@@ -457,6 +457,36 @@ fn classloader_missing_class_throws_cnfe() {
     assert_eq!(result, "ClassNotFoundException:com.example.NonExistentClass");
 }
 
+#[test]
+fn classloader_define_class_name_mismatch_throws_ncdfe() {
+    let result = run_jar_test(
+        "ClassLoaderDefineClassNameMismatchTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "NoClassDefFoundError");
+}
+
+#[test]
+fn classloader_define_class_duplicate_throws_linkage_error() {
+    let result = run_jar_test(
+        "ClassLoaderDefineClassDuplicateTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "LinkageError");
+}
+
+#[test]
+fn classloader_define_class_loader_identity() {
+    let result = run_jar_test(
+        "ClassLoaderDefineClassLoaderIdentityTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ok");
+}
+
 // ---------------------------------------------------------------------------
 // JVMS §5.5: ExceptionInInitializerError when <clinit> throws
 // ---------------------------------------------------------------------------

@@ -335,7 +335,8 @@ impl super::Vm {
 
     /// Handle ClassLoader instance methods that must dispatch by resolved owner, not runtime class.
     /// Returns `Some(value)` if the method was handled, `None` to fall through.
-    fn native_classloader(&mut self, method_name: &str, args: &[JValue]) -> Option<JValue> {
+    fn native_classloader(&mut self, this: &JRef, method_name: &str, args: &[JValue]) -> Option<JValue> {
+        let loader_id = Rc::as_ptr(this) as *const () as usize;
         match method_name {
             "loadClass" | "findClass" => {
                 // A null or missing name argument must surface as NullPointerException.
@@ -352,6 +353,9 @@ impl super::Vm {
                     }
                 };
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
+                if let Some(class_obj) = self.loader_defined_classes.get(&(loader_id, internal.clone())) {
+                    return Some(JValue::Ref(Some(Rc::clone(class_obj))));
+                }
                 self.ensure_class_ready(&internal);
                 match self.classes.get(&internal) {
                     Some(LazyClass::Ready(_)) => {}
@@ -374,6 +378,13 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
+                let class_obj = self
+                    .loader_defined_classes
+                    .get(&(loader_id, internal.clone()))
+                    .map(Rc::clone);
+                if class_obj.is_some() {
+                    return Some(JValue::Ref(class_obj));
+                }
                 if matches!(self.classes.get(&internal), Some(LazyClass::Ready(_))) {
                     Some(JValue::Ref(Some(self.class_object(internal))))
                 } else {
@@ -398,6 +409,10 @@ impl super::Vm {
                     });
                 let off_raw = args.get(2).map(|v| v.as_int()).unwrap_or(0);
                 let len_raw = args.get(3).map(|v| v.as_int()).unwrap_or(0);
+                let explicit_name = args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()));
 
                 if let Some(bytes) = byte_array {
                     if off_raw < 0 || len_raw < 0 || (off_raw as usize) + (len_raw as usize) > bytes.len() {
@@ -410,6 +425,26 @@ impl super::Vm {
                     let len = len_raw as usize;
                     let class_bytes = bytes[off..off + len].to_vec();
                     if let Some(class_name) = crate::class_file::parse_class_name(&class_bytes) {
+                        if let Some(explicit_name) = explicit_name {
+                            let explicit_internal =
+                                Self::class_internal_name_from_runtime_name(&explicit_name);
+                            if explicit_internal != class_name {
+                                self.throw_no_class_def_found(&explicit_internal);
+                                return Some(JValue::Void);
+                            }
+                        }
+                        if self
+                            .loader_defined_classes
+                            .contains_key(&(loader_id, class_name.clone()))
+                        {
+                            let detail = format!(
+                                "loader attempted duplicate class definition: {}",
+                                class_name.replace('/', ".")
+                            );
+                            let exc = self.new_vm_exception_message("java/lang/LinkageError", detail);
+                            *self.pending_exception_mut() = Some(exc);
+                            return Some(JValue::Void);
+                        }
                         self.load_lazy(class_name.clone(), class_bytes);
                         self.ensure_class_ready(&class_name);
                         // Check if parsing actually succeeded
@@ -418,7 +453,7 @@ impl super::Vm {
                             self.throw_class_format_error(&msg);
                             return Some(JValue::Void);
                         }
-                        Some(JValue::Ref(Some(self.class_object(class_name))))
+                        Some(JValue::Ref(Some(self.class_object_for_loader(&class_name, this))))
                     } else {
                         self.throw_class_format_error("defineClass: cannot parse class");
                         Some(JValue::Void)
@@ -636,7 +671,7 @@ impl super::Vm {
         if matches!(method_name, "loadClass" | "findClass" | "findLoadedClass" | "defineClass" | "getResource" | "getResourceAsStream" | "findResource" | "findResources")
             && self.is_classloader_subtype(_class_name)
         {
-            if let Some(v) = self.native_classloader(method_name, _args) {
+            if let Some(v) = self.native_classloader(this, method_name, _args) {
                 return Some(v);
             }
         }
@@ -915,6 +950,15 @@ impl super::Vm {
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 Some(JValue::Ref(Some(self.intern_string(Self::class_display_name(&internal)))))
             }
+            ("java/lang/Class", "getClassLoader") => {
+                let loader = this
+                    .borrow()
+                    .fields
+                    .get("__defining_loader")
+                    .and_then(|v| v.as_ref())
+                    .cloned();
+                Some(JValue::Ref(loader))
+            }
             ("java/lang/Class", "getModifiers") => {
                 let target = self
                     .class_internal_name_from_obj(this)
@@ -941,10 +985,29 @@ impl super::Vm {
                 let target = self
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
-                let other = _args
-                    .first()
-                    .and_then(|v| v.as_ref())
-                    .and_then(|c| self.class_internal_name_from_obj(c));
+                let other_class = _args.first().and_then(|v| v.as_ref());
+                let other = other_class.and_then(|c| self.class_internal_name_from_obj(c));
+                if let (Some(other_class), Some(other_name)) = (other_class, other.as_ref()) {
+                    if other_name == &target {
+                        let target_loader_id = this
+                            .borrow()
+                            .fields
+                            .get("__defining_loader")
+                            .and_then(|v| v.as_ref())
+                            .map(|r| Rc::as_ptr(r) as *const () as usize)
+                            .unwrap_or(0);
+                        let other_loader_id = other_class
+                            .borrow()
+                            .fields
+                            .get("__defining_loader")
+                            .and_then(|v| v.as_ref())
+                            .map(|r| Rc::as_ptr(r) as *const () as usize)
+                            .unwrap_or(0);
+                        if target_loader_id != other_loader_id {
+                            return Some(JValue::Int(0));
+                        }
+                    }
+                }
                 let result = other
                     .as_ref()
                     .map(|o| self.is_instance_of(o, &target))

@@ -528,6 +528,8 @@ pub struct Vm {
     pub(in crate::interpreter) clinit_failed: HashSet<String>,
     /// Canonical Class objects keyed by internal class name or descriptor.
     pub(in crate::interpreter) class_pool: HashMap<String, JRef>,
+    /// Class objects defined via ClassLoader#defineClass, keyed by (defining loader id, internal class name).
+    pub(in crate::interpreter) loader_defined_classes: HashMap<(usize, String), JRef>,
     /// Buffered `System.out.print` content until newline/println.
     pub(in crate::interpreter) stdout_buffer: String,
     /// Buffered `System.err.print` content until newline/println.
@@ -577,6 +579,7 @@ impl Vm {
             clinit_done: HashSet::new(),
             clinit_failed: HashSet::new(),
             class_pool: HashMap::new(),
+            loader_defined_classes: HashMap::new(),
             stdout_buffer: String::new(),
             stderr_buffer: String::new(),
             stdin_mode: StdioMode::Pipe,
@@ -1339,17 +1342,41 @@ impl Vm {
         *self.pending_exception_mut() = Some(exc);
     }
 
+    fn new_class_object(&mut self, internal_name: &str, defining_loader: Option<JRef>) -> JRef {
+        let obj = JObject::new("java/lang/Class");
+        let mut borrow = obj.borrow_mut();
+        borrow.fields.insert(
+            "__name_internal".to_owned(),
+            JValue::Ref(Some(self.intern_string(internal_name.to_owned()))),
+        );
+        borrow
+            .fields
+            .insert("__defining_loader".to_owned(), JValue::Ref(defining_loader));
+        drop(borrow);
+        obj
+    }
+
     fn class_object(&mut self, internal_name: impl Into<String>) -> JRef {
         let internal_name = internal_name.into();
         if let Some(r) = self.class_pool.get(&internal_name) {
             return Rc::clone(r);
         }
-        let obj = JObject::new("java/lang/Class");
-        obj.borrow_mut().fields.insert(
-            "__name_internal".to_owned(),
-            JValue::Ref(Some(self.intern_string(internal_name.clone()))),
-        );
+        let obj = self.new_class_object(&internal_name, None);
         self.class_pool.insert(internal_name, Rc::clone(&obj));
+        obj
+    }
+
+    pub(in crate::interpreter) fn class_object_for_loader(
+        &mut self,
+        internal_name: &str,
+        defining_loader: &JRef,
+    ) -> JRef {
+        let key = (Self::object_id(defining_loader), internal_name.to_owned());
+        if let Some(existing) = self.loader_defined_classes.get(&key) {
+            return Rc::clone(existing);
+        }
+        let obj = self.new_class_object(internal_name, Some(Rc::clone(defining_loader)));
+        self.loader_defined_classes.insert(key, Rc::clone(&obj));
         obj
     }
 
