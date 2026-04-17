@@ -9,7 +9,9 @@
 //! - Native stubs for `java.lang.*` and `java.util.*`
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Instant;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -358,6 +360,8 @@ pub(crate) struct ThreadContext {
     pub instruction_count: usize,
     /// Saved monitor reentrant count for Object.wait() — restored after notify.
     pub saved_monitor_count: usize,
+    /// Wake-up deadline for `Thread.sleep` in host monotonic time.
+    pub sleep_until: Option<Instant>,
 }
 
 impl ThreadContext {
@@ -371,6 +375,7 @@ impl ThreadContext {
             thread_object: None,
             instruction_count: 0,
             saved_monitor_count: 0,
+            sleep_until: None,
         }
     }
 }
@@ -384,7 +389,10 @@ pub(crate) struct Scheduler {
 }
 
 /// Maximum instructions per thread before yielding to the next runnable thread.
-const TIME_SLICE: usize = 1000;
+///
+/// A larger slice reduces scheduler churn when many runnable green threads are
+/// CPU-bound (for example, test harnesses that spawn many short-lived futures).
+const TIME_SLICE: usize = 10_000;
 
 impl Scheduler {
     pub(in crate::interpreter) fn new() -> Self {
@@ -469,6 +477,27 @@ impl Scheduler {
         }
     }
 
+    /// Wake sleeping threads whose deadlines have elapsed.
+    pub fn wake_sleepers(&mut self) {
+        let now = Instant::now();
+        for t in &mut self.threads {
+            if t.state != ThreadState::Sleeping {
+                continue;
+            }
+            if let Some(deadline) = t.sleep_until {
+                if now >= deadline {
+                    t.sleep_until = None;
+                    t.state = ThreadState::Runnable;
+                }
+            }
+        }
+    }
+
+    /// Returns true when at least one thread is currently sleeping.
+    pub fn has_sleeping_threads(&self) -> bool {
+        self.threads.iter().any(|t| t.state == ThreadState::Sleeping)
+    }
+
     /// Return the number of runnable threads.
     pub fn runnable_count(&self) -> usize {
         self.threads.iter().filter(|t| t.state == ThreadState::Runnable).count()
@@ -528,6 +557,9 @@ pub struct Vm {
     pub(in crate::interpreter) clinit_failed: HashSet<String>,
     /// Canonical Class objects keyed by internal class name or descriptor.
     pub(in crate::interpreter) class_pool: HashMap<String, JRef>,
+    /// Class names defined through ClassLoader#defineClass in this VM session.
+    /// Used to scope per-instance class snapshots to dynamic/redefinable classes.
+    pub(in crate::interpreter) dynamically_defined_classes: HashSet<String>,
     /// Buffered `System.out.print` content until newline/println.
     pub(in crate::interpreter) stdout_buffer: String,
     /// Buffered `System.err.print` content until newline/println.
@@ -550,6 +582,19 @@ pub struct Vm {
     pub(in crate::interpreter) system_stdin: Option<JRef>,
     /// Singleton system ClassLoader instance (created on first access).
     pub(in crate::interpreter) system_classloader: Option<JRef>,
+    /// ClassLoader object registry by object identity.
+    pub(in crate::interpreter) loader_objects: HashMap<usize, JRef>,
+    /// Per-loader class registry: (loader identity, binary internal name) -> class lookup key.
+    /// Needed because class identity is loader-scoped even when VM-internal storage is keyed differently.
+    pub(in crate::interpreter) loader_defined_classes: HashMap<(usize, String), String>,
+    /// Defining loader identity by class lookup key.
+    pub(in crate::interpreter) class_defining_loader_ids: HashMap<String, usize>,
+    /// Binary internal class name by VM lookup key.
+    pub(in crate::interpreter) class_binary_names: HashMap<String, String>,
+    /// Snapshot class lookup key by object identity.
+    pub(in crate::interpreter) snapshot_lookup_keys: HashMap<usize, String>,
+    /// Monotonic counter for dynamic class lookup keys.
+    pub(in crate::interpreter) next_dynamic_lookup_id: u64,
     /// Green thread scheduler.
     pub(in crate::interpreter) scheduler: Scheduler,
     /// Object monitors keyed by object identity (Rc pointer address).
@@ -559,15 +604,57 @@ pub struct Vm {
     method_owner_cache: HashMap<(String, String, String), Option<String>>,
     /// Bounded LRU cache for compiled host-side regular expressions.
     regex_cache: RegexCache,
+    /// Assignability cache: (runtime_class, target_class) -> result.
+    /// Speeds up repeated `instanceof` / `Class.isAssignableFrom` checks.
+    instanceof_cache: HashMap<(String, String), bool>,
     /// Materialized non-class resources from loaded JARs, keyed by path.
     pub resources: HashMap<String, Vec<u8>>,
     /// Non-class resources that still point at compressed JAR entries.
     pending_resources: HashMap<String, JarEntryRef>,
+    /// Host filesystem roots checked when a resource is not present in loaded JARs.
+    filesystem_resource_roots: Vec<PathBuf>,
     /// Parsed ZIP archives kept alive so lazy entry reads do not re-scan the central directory.
     jar_archives: Vec<OwnedJarArchive>,
 }
 
 impl Vm {
+    fn ensure_clojure_compiler_loader_root(&mut self) {
+        let loader_var = self
+            .static_fields
+            .get("clojure/lang/Compiler")
+            .and_then(|m| m.get("LOADER"))
+            .and_then(|v| v.as_ref())
+            .cloned();
+        let Some(loader_var) = loader_var else {
+            return;
+        };
+        let is_unbound = loader_var
+            .borrow()
+            .fields
+            .get("root")
+            .and_then(|v| v.as_ref())
+            .map(|r| r.borrow().class_name == "clojure/lang/Var$Unbound")
+            .unwrap_or(false);
+        if !is_unbound {
+            return;
+        }
+        let Ok(loader) = self.invoke_static(
+            "clojure/lang/RT",
+            "makeClassLoader",
+            "()Ljava/lang/ClassLoader;",
+            vec![],
+        ) else {
+            return;
+        };
+        let _ = self.invoke_virtual(
+            loader_var,
+            "clojure/lang/Var",
+            "bindRoot",
+            "(Ljava/lang/Object;)V",
+            vec![loader],
+        );
+    }
+
     /// Create an empty VM with a main thread.
     pub fn new() -> Self {
         Vm {
@@ -577,6 +664,7 @@ impl Vm {
             clinit_done: HashSet::new(),
             clinit_failed: HashSet::new(),
             class_pool: HashMap::new(),
+            dynamically_defined_classes: HashSet::new(),
             stdout_buffer: String::new(),
             stderr_buffer: String::new(),
             stdin_mode: StdioMode::Pipe,
@@ -588,12 +676,21 @@ impl Vm {
             stdin_closed: false,
             system_stdin: None,
             system_classloader: None,
+            loader_objects: HashMap::new(),
+            loader_defined_classes: HashMap::new(),
+            class_defining_loader_ids: HashMap::new(),
+            class_binary_names: HashMap::new(),
+            snapshot_lookup_keys: HashMap::new(),
+            next_dynamic_lookup_id: 1,
             scheduler: Scheduler::new(),
             monitors: HashMap::new(),
             method_owner_cache: HashMap::new(),
             regex_cache: RegexCache::new(64),
+            instanceof_cache: HashMap::new(),
+            regex_cache: RegexCache::new(64),
             resources: HashMap::new(),
             pending_resources: HashMap::new(),
+            filesystem_resource_roots: vec![PathBuf::from("."), PathBuf::from("test")],
             jar_archives: Vec::new(),
         }
     }
@@ -704,12 +801,13 @@ impl Vm {
         // Set the woken thread to Runnable (outside the monitor borrow).
         if let Some(wid) = wake_thread {
             // Check if the woken thread needs saved_monitor_count restored.
-            let restore_count = self.scheduler.thread(wid).and_then(|t| {
-                if matches!(t.state, ThreadState::WaitingOnCondition(_)) && t.saved_monitor_count > 0 {
+            let restore_count = self.scheduler.thread(wid).and_then(|t| match t.state {
+                ThreadState::WaitingOnCondition(wait_obj_id)
+                    if wait_obj_id == id && t.saved_monitor_count > 0 =>
+                {
                     Some(t.saved_monitor_count)
-                } else {
-                    None
                 }
+                _ => None,
             });
             if let Some(count) = restore_count {
                 if let Some(m) = self.monitors.get_mut(&id) {
@@ -1027,6 +1125,8 @@ impl Vm {
         }
         self.jar_archives.push(archive);
         for (class_name, entry) in class_entries {
+            self.pending_resources
+                .insert(format!("{class_name}.class"), entry.clone());
             self.load_lazy_jar_entry(class_name, entry);
         }
         for (name, entry) in resource_entries {
@@ -1049,10 +1149,16 @@ impl Vm {
             return;
         }
         let pending = self.classes.remove(name);
+        let mut class_bytes: Option<Vec<u8>> = None;
         let result = match pending {
-            Some(LazyClass::PendingBytes(bytes)) => class_file::parse(&bytes).map_err(|e| e.to_string()),
+            Some(LazyClass::PendingBytes(bytes)) => {
+                class_bytes = Some(bytes.clone());
+                class_file::parse(&bytes).map_err(|e| e.to_string())
+            }
             Some(LazyClass::PendingJarEntry(entry)) => match self.read_jar_entry(&entry) {
-                Ok(bytes) => match class_file::parse(&bytes) {
+                Ok(bytes) => {
+                    class_bytes = Some(bytes.clone());
+                    match class_file::parse(&bytes) {
                     Ok(cf) => {
                         let actual_name = cf.constant_pool.class_name(cf.this_class);
                         if actual_name == name {
@@ -1068,7 +1174,8 @@ impl Vm {
                         }
                     }
                     Err(e) => Err(e.to_string()),
-                },
+                }
+                }
                 Err(e) => Err(e),
             },
             Some(other) => {
@@ -1078,7 +1185,14 @@ impl Vm {
             None => return,
         };
         match result {
-            Ok(cf) => { self.classes.insert(name.to_owned(), LazyClass::Ready(cf)); }
+            Ok(cf) => {
+                if let Some(bytes) = class_bytes {
+                    self.resources
+                        .entry(format!("{name}.class"))
+                        .or_insert(bytes);
+                }
+                self.classes.insert(name.to_owned(), LazyClass::Ready(cf));
+            }
             Err(e) => {
                 eprintln!("Warning: failed to parse class '{name}': {e}");
                 self.classes.insert(name.to_owned(), LazyClass::ParseError(e));
@@ -1086,9 +1200,42 @@ impl Vm {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read_resource_from_filesystem(&self, normalized: &str) -> Result<Option<Vec<u8>>, String> {
+        use std::io::ErrorKind;
+        use std::path::Path;
+
+        let relative = Path::new(normalized);
+        for root in &self.filesystem_resource_roots {
+            let candidate = root.join(relative);
+            match std::fs::read(&candidate) {
+                Ok(bytes) => return Ok(Some(bytes)),
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                Err(err) => {
+                    return Err(format!(
+                        "filesystem resource read failed for {}: {err}",
+                        candidate.display()
+                    ));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn read_resource_from_filesystem(&self, _normalized: &str) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
+
     pub fn has_resource(&self, name: &str) -> bool {
         let normalized = name.strip_prefix('/').unwrap_or(name);
-        self.resources.contains_key(normalized) || self.pending_resources.contains_key(normalized)
+        self.resources.contains_key(normalized)
+            || self.pending_resources.contains_key(normalized)
+            || self
+                .read_resource_from_filesystem(normalized)
+                .ok()
+                .flatten()
+                .is_some()
     }
 
     pub fn read_resource(&mut self, name: &str) -> Result<Option<Vec<u8>>, String> {
@@ -1096,13 +1243,16 @@ impl Vm {
         if let Some(data) = self.resources.get(normalized) {
             return Ok(Some(data.clone()));
         }
-        let Some(entry) = self.pending_resources.get(normalized).cloned() else {
-            return Ok(None);
-        };
-        let data = self.read_jar_entry(&entry)?;
-        self.pending_resources.remove(normalized);
-        self.resources.insert(normalized.to_owned(), data.clone());
-        Ok(Some(data))
+        if let Some(entry) = self.pending_resources.get(normalized).cloned() {
+            let data = self.read_jar_entry(&entry)?;
+            self.pending_resources.remove(normalized);
+            self.resources.insert(normalized.to_owned(), data.clone());
+            return Ok(Some(data));
+        }
+        if let Some(bytes) = self.read_resource_from_filesystem(normalized)? {
+            return Ok(Some(bytes));
+        }
+        Ok(None)
     }
 
     /// Return a reference to a parsed class.
@@ -1340,18 +1490,174 @@ impl Vm {
     }
 
     fn class_object(&mut self, internal_name: impl Into<String>) -> JRef {
-        let internal_name = internal_name.into();
-        if let Some(r) = self.class_pool.get(&internal_name) {
+        let lookup_name = internal_name.into();
+        if let Some(r) = self.class_pool.get(&lookup_name) {
             return Rc::clone(r);
         }
+        let binary_name = self
+            .class_binary_names
+            .get(&lookup_name)
+            .cloned()
+            .unwrap_or_else(|| lookup_name.clone());
+        self.class_binary_names
+            .entry(lookup_name.clone())
+            .or_insert_with(|| binary_name.clone());
         let obj = JObject::new("java/lang/Class");
-        obj.borrow_mut().fields.insert(
-            "__name_internal".to_owned(),
-            JValue::Ref(Some(self.intern_string(internal_name.clone()))),
-        );
-        self.class_pool.insert(internal_name, Rc::clone(&obj));
+        let display_name = Self::class_display_name(&binary_name);
+        let defining_loader = self
+            .class_defining_loader_ids
+            .get(&lookup_name)
+            .and_then(|id| self.loader_objects.get(id))
+            .cloned();
+        {
+            let mut b = obj.borrow_mut();
+            b.fields.insert(
+                "__name_internal".to_owned(),
+                JValue::Ref(Some(self.intern_string(binary_name.clone()))),
+            );
+            b.fields.insert(
+                "__name_display".to_owned(),
+                JValue::Ref(Some(self.intern_string(display_name))),
+            );
+            if lookup_name != binary_name {
+                b.fields.insert(
+                    "__lookup_internal".to_owned(),
+                    JValue::Ref(Some(self.intern_string(lookup_name.clone()))),
+                );
+            }
+            b.fields
+                .insert("__defining_loader".to_owned(), JValue::Ref(defining_loader));
+        }
+        self.class_pool.insert(lookup_name, Rc::clone(&obj));
         obj
     }
+
+    pub(in crate::interpreter) fn class_object_with_lookup(
+        &mut self,
+        lookup_internal: &str,
+        display_internal: &str,
+    ) -> JRef {
+        self.class_binary_names
+            .insert(lookup_internal.to_owned(), display_internal.to_owned());
+        let class_obj = self.class_object(lookup_internal.to_owned());
+        if let Some(loader_ref) = self
+            .class_defining_loader_ids
+            .get(lookup_internal)
+            .and_then(|id| self.loader_objects.get(id))
+            .cloned()
+        {
+            class_obj
+                .borrow_mut()
+                .fields
+                .insert("__defining_loader".to_owned(), JValue::Ref(Some(loader_ref)));
+        }
+        class_obj
+    }
+
+    pub(in crate::interpreter) fn loader_lookup_internal_name(
+        &self,
+        loader_id: usize,
+        class_internal: &str,
+    ) -> Option<String> {
+        self.loader_defined_classes
+            .get(&(loader_id, class_internal.to_owned()))
+            .cloned()
+    }
+
+    pub(in crate::interpreter) fn has_loader_specific_definition(
+        &self,
+        class_internal: &str,
+    ) -> bool {
+        self.loader_defined_classes
+            .keys()
+            .any(|(_, defined)| defined == class_internal)
+    }
+
+    pub(in crate::interpreter) fn remap_declared_class_for_context(
+        &mut self,
+        context_class: &str,
+        declared_class: &str,
+    ) -> String {
+        let context_lookup_name = if let Some(desc_start) = context_class.find('(') {
+            if let Some(method_sep) = context_class[..desc_start].rfind('.') {
+                &context_class[..method_sep]
+            } else {
+                context_class
+            }
+        } else {
+            context_class
+        };
+        let Some(loader_id) = self.class_defining_loader_ids.get(context_lookup_name).copied() else {
+            return declared_class.to_owned();
+        };
+        if let Some(mapped) = self.loader_lookup_internal_name(loader_id, declared_class) {
+            return mapped;
+        }
+        if !self.has_loader_specific_definition(declared_class) {
+            return declared_class.to_owned();
+        }
+        let Some(loader_ref) = self.loader_objects.get(&loader_id).cloned() else {
+            return declared_class.to_owned();
+        };
+        let loader_class = loader_ref.borrow().class_name.clone();
+        let runtime_name = Self::class_display_name(declared_class);
+        let runtime_name_ref = self.intern_string(runtime_name);
+        let load_result = self.invoke_virtual(
+            loader_ref,
+            &loader_class,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            vec![JValue::Ref(Some(runtime_name_ref))],
+        );
+        match load_result {
+            Ok(JValue::Ref(Some(class_ref))) => self
+                .class_internal_name_from_obj(&class_ref)
+                .unwrap_or_else(|| declared_class.to_owned()),
+            _ => declared_class.to_owned(),
+        }
+    }
+
+    pub(in crate::interpreter) fn class_binary_name_for_lookup(&self, class_name: &str) -> String {
+        self.class_binary_names
+            .get(class_name)
+            .cloned()
+            .unwrap_or_else(|| class_name.to_owned())
+    }
+
+    pub(in crate::interpreter) fn next_dynamic_lookup_key(&mut self) -> String {
+        let id = self.next_dynamic_lookup_id;
+        self.next_dynamic_lookup_id = self.next_dynamic_lookup_id.saturating_add(1);
+        format!("__199xvm/dyn/{id}")
+    }
+
+    pub(in crate::interpreter) fn ensure_snapshot_lookup_class(
+        &mut self,
+        obj: &JRef,
+        runtime_class: &str,
+        snapshot: &ClassFile,
+    ) -> String {
+        let object_id = Rc::as_ptr(obj) as usize;
+        if let Some(key) = self.snapshot_lookup_keys.get(&object_id) {
+            if !matches!(self.classes.get(key), Some(LazyClass::Ready(_))) {
+                self.classes
+                    .insert(key.clone(), LazyClass::Ready(snapshot.clone()));
+            }
+            return key.clone();
+        }
+        let lookup_key = self.next_dynamic_lookup_key();
+        let binary_name = self.class_binary_name_for_lookup(runtime_class);
+        self.class_binary_names
+            .insert(lookup_key.clone(), binary_name);
+        if let Some(loader_id) = self.class_defining_loader_ids.get(runtime_class).copied() {
+            self.class_defining_loader_ids
+                .insert(lookup_key.clone(), loader_id);
+        }
+        self.classes
+            .insert(lookup_key.clone(), LazyClass::Ready(snapshot.clone()));
+        self.snapshot_lookup_keys.insert(object_id, lookup_key.clone());
+        lookup_key
+    }
+
 
     /// Look up a loaded class by internal name (triggers lazy parse if needed).
     pub fn class(&mut self, name: &str) -> Option<&ClassFile> {
@@ -1421,7 +1727,7 @@ impl Vm {
             class.constant_pool.utf8(m.name_index) == method_name
                 && class.constant_pool.utf8(m.descriptor_index) == descriptor
         })?;
-        let class_name_out = class.constant_pool.class_name(class.this_class).to_owned();
+        let class_name_out = owner.clone();
         let descriptor_out = class.constant_pool.utf8(class.methods[method_idx].descriptor_index).to_owned();
         let access_flags = class.methods[method_idx].access_flags;
         let (max_locals, has_code, code, exception_table) =
@@ -1482,7 +1788,7 @@ impl Vm {
             let n = class.constant_pool.utf8(m.name_index);
             let d = class.constant_pool.utf8(m.descriptor_index);
             if n == method_name && d == descriptor {
-                return Some(class.constant_pool.class_name(class.this_class).to_owned());
+                return Some(class_name.to_owned());
             }
         }
         // Resolve names while holding the borrow; allocation is skipped on the fast path.
@@ -1653,6 +1959,9 @@ impl Vm {
                 return Err("java/lang/ExceptionInInitializerError".to_owned());
             }
         }
+        if class_name == "clojure/lang/Compiler" {
+            self.ensure_clojure_compiler_loader_root();
+        }
         Ok(())
     }
 
@@ -1684,11 +1993,41 @@ impl Vm {
     /// Check if `runtime_class` is an instance of `target_class` (by name).
     /// Handles array types per JVMS §6.5.instanceof / §6.5.checkcast.
     fn is_instance_of(&mut self, runtime_class: &str, target_class: &str) -> bool {
-        if runtime_class == target_class { return true; }
-        if target_class == "java/lang/Object" { return true; }
+        let cache_key = (runtime_class.to_owned(), target_class.to_owned());
+        if let Some(cached) = self.instanceof_cache.get(&cache_key) {
+            return *cached;
+        }
+        let mut visited = std::collections::HashSet::new();
+        let result = self.is_instance_of_inner(runtime_class, target_class, &mut visited);
+        self.instanceof_cache.insert(cache_key, result);
+        result
+    }
+
+    fn is_instance_of_inner(
+        &mut self,
+        runtime_class: &str,
+        target_class: &str,
+        visited: &mut std::collections::HashSet<(String, String)>,
+    ) -> bool {
+        let cache_key = (runtime_class.to_owned(), target_class.to_owned());
+        if let Some(cached) = self.instanceof_cache.get(&cache_key) {
+            return *cached;
+        }
+        if !visited.insert(cache_key.clone()) {
+            return false;
+        }
+        if runtime_class == target_class {
+            self.instanceof_cache.insert(cache_key, true);
+            return true;
+        }
+        if target_class == "java/lang/Object" {
+            self.instanceof_cache.insert(cache_key, true);
+            return true;
+        }
 
         if runtime_class.starts_with('[') {
             if target_class == "java/lang/Cloneable" || target_class == "java/io/Serializable" {
+                self.instanceof_cache.insert(cache_key, true);
                 return true;
             }
             if target_class.starts_with('[') {
@@ -1697,10 +2036,14 @@ impl Vm {
                 let rc_class = descriptor_to_class_name(rc);
                 let tc_class = descriptor_to_class_name(tc);
                 if let (Some(r), Some(t)) = (rc_class, tc_class) {
-                    return self.is_instance_of(&r, &t);
+                    let result = self.is_instance_of_inner(&r, &t, visited);
+                    self.instanceof_cache.insert(cache_key, result);
+                    return result;
                 }
+                self.instanceof_cache.insert(cache_key, false);
                 return false;
             }
+            self.instanceof_cache.insert(cache_key, false);
             return false;
         }
 
@@ -1716,16 +2059,22 @@ impl Vm {
             };
             (ifaces, sup)
         } else {
+            self.instanceof_cache.insert(cache_key, false);
             return false;
         };
         for iface_name in &iface_names {
-            if self.is_instance_of(iface_name, target_class) { return true; }
-        }
-        if let Some(super_name) = super_name {
-            if self.is_instance_of(&super_name, target_class) {
+            if self.is_instance_of_inner(iface_name, target_class, visited) {
+                self.instanceof_cache.insert(cache_key, true);
                 return true;
             }
         }
+        if let Some(super_name) = super_name {
+            if self.is_instance_of_inner(&super_name, target_class, visited) {
+                self.instanceof_cache.insert(cache_key, true);
+                return true;
+            }
+        }
+        self.instanceof_cache.insert(cache_key, false);
         false
     }
 }

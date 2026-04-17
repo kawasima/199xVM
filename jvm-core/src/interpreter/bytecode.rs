@@ -1,5 +1,5 @@
 
-use crate::class_file::{BootstrapMethod, ConstantPoolEntry, ExceptionTableEntry};
+use crate::class_file::{Attribute, BootstrapMethod, ConstantPoolEntry, ExceptionTableEntry};
 use crate::heap::{JObject, JValue, NativePayload};
 
 use super::Vm;
@@ -8,6 +8,65 @@ use super::descriptors::*;
 use super::frame::*;
 
 impl Vm {
+    fn normalize_exception_class_head<'a>(raw: &'a str) -> &'a str {
+        let head = raw
+            .split(" | ")
+            .next()
+            .unwrap_or(raw)
+            .trim();
+        head
+            .split(": ")
+            .next()
+            .unwrap_or(head)
+            .split(" at ")
+            .next()
+            .unwrap_or(head)
+            .trim()
+    }
+
+    fn exception_class_from_err_msg<'a>(err_msg: &'a str) -> &'a str {
+        if err_msg.starts_with("java/") || err_msg.starts_with("javax/") {
+            return Self::normalize_exception_class_head(err_msg);
+        }
+        if let Some(rest) = err_msg.strip_prefix("Exception: ") {
+            return Self::normalize_exception_class_head(rest);
+        }
+        if err_msg.starts_with("NullPointerException") {
+            return "java/lang/NullPointerException";
+        }
+        if err_msg.starts_with("ClassCastException") {
+            return "java/lang/ClassCastException";
+        }
+        if err_msg.contains("ArithmeticException") {
+            return "java/lang/ArithmeticException";
+        }
+        if err_msg.contains("StackOverflowError") {
+            return "java/lang/StackOverflowError";
+        }
+        if err_msg.starts_with("UnsupportedOperationException") {
+            return "java/lang/UnsupportedOperationException";
+        }
+        if err_msg.contains("IndexOutOfBoundsException") {
+            return "java/lang/IndexOutOfBoundsException";
+        }
+        // Last resort: keep execution flowing through catch(Exception).
+        "java/lang/RuntimeException"
+    }
+
+    pub(super) fn ensure_pending_exception_from_err(&mut self, err_msg: &str) {
+        if self.scheduler.current_thread().pending_exception.is_some() {
+            return;
+        }
+        let exc_class = Self::exception_class_from_err_msg(err_msg);
+        // Strip "Exception: <class>: " prefix when present.
+        let msg_str = err_msg
+            .strip_prefix("Exception: ")
+            .and_then(|s| s.find(": ").map(|i| &s[i + 2..]))
+            .unwrap_or(err_msg);
+        let exc = self.new_vm_exception(exc_class, Some(JObject::new_string(msg_str)));
+        *self.pending_exception_mut() = Some(exc);
+    }
+
     /// Search exception_table for a matching handler.
     /// Returns (handler_pc, exception_object) if found.
     pub(crate) fn find_exception_handler(
@@ -20,27 +79,7 @@ impl Vm {
     ) -> Option<(usize, JValue)> {
         // Extract exception class name from error message.
         // Preferred format: "java/lang/SomeException: message" — extract the class name directly.
-        let exc_class = if err_msg.starts_with("java/") || err_msg.starts_with("javax/") {
-            err_msg.split(':').next().unwrap_or(err_msg).trim()
-        } else if let Some(rest) = err_msg.strip_prefix("Exception: ") {
-            rest.split(':').next().unwrap_or(rest).trim()
-        } else if err_msg.starts_with("NullPointerException") {
-            "java/lang/NullPointerException"
-        } else if err_msg.starts_with("ClassCastException") {
-            "java/lang/ClassCastException"
-        } else if err_msg.contains("ArithmeticException") {
-            "java/lang/ArithmeticException"
-        } else if err_msg.contains("StackOverflowError") {
-            "java/lang/StackOverflowError"
-        } else if err_msg.starts_with("UnsupportedOperationException") {
-            "java/lang/UnsupportedOperationException"
-        } else if err_msg.contains("IndexOutOfBoundsException") {
-            "java/lang/IndexOutOfBoundsException"
-        } else {
-            // Last resort: treat any error as java/lang/RuntimeException so
-            // catch(Exception e) / catch-all can still handle it.
-            "java/lang/RuntimeException"
-        };
+        let exc_class = Self::exception_class_from_err_msg(err_msg);
 
         for entry in exception_table {
             let start = entry.start_pc as usize;
@@ -50,13 +89,13 @@ impl Vm {
             }
             // catch_type == 0 means catch-all (finally).
             if entry.catch_type == 0 {
-                let exc_obj = self.take_or_create_exception(exc_class, err_msg);
+                let exc_obj = self.take_or_create_exception(err_msg);
                 return Some((entry.handler_pc as usize, exc_obj));
             }
             // Resolve catch_type to class name and check if exception is instance.
             let catch_class = resolve_class_name_ref(cp, entry.catch_type);
             if exc_class == catch_class || self.is_instance_of(exc_class, catch_class) {
-                let exc_obj = self.take_or_create_exception(exc_class, err_msg);
+                let exc_obj = self.take_or_create_exception(err_msg);
                 return Some((entry.handler_pc as usize, exc_obj));
             }
         }
@@ -66,21 +105,12 @@ impl Vm {
     }
 
     /// Take the pending exception object if set, or create a new one.
-    fn take_or_create_exception(&mut self, exc_class: &str, err_msg: &str) -> JValue {
+    fn take_or_create_exception(&mut self, err_msg: &str) -> JValue {
         if let Some(r) = self.pending_exception_mut().take() {
             JValue::Ref(Some(r))
         } else {
-            // Store the error message in a "detailMessage" field (matches JDK Throwable).
-            // Strip the "Exception: classname" prefix to get just the meaningful message.
-            let msg_str = err_msg.strip_prefix("Exception: ")
-                .and_then(|s| {
-                    // After stripping "Exception: ", the remainder is class name.
-                    // If there's a ": " after the class name, extract the actual message.
-                    s.find(": ").map(|i| &s[i + 2..])
-                })
-                .unwrap_or(err_msg);
-            let exc = self.new_vm_exception(exc_class, Some(JObject::new_string(msg_str)));
-            JValue::Ref(Some(exc))
+            self.ensure_pending_exception_from_err(err_msg);
+            JValue::Ref(self.pending_exception_mut().take())
         }
     }
 
@@ -158,10 +188,17 @@ impl Vm {
                     let arr_ref = frame.stack.pop().unwrap();
                     let idx = array_index(idx_i)?;
                     if let Some(r) = arr_ref.as_ref() {
-                        let elem = match &r.borrow().native {
-                            NativePayload::Array(v) => v.get(idx).cloned()
+                        let arr = r.borrow();
+                        if !arr.class_name.starts_with('[') {
+                            return Err("java/lang/ArrayStoreException: aaload on non-array".to_owned());
+                        }
+                        let elem = match &arr.native {
+                            NativePayload::Array(v) => v.get(idx)
+                                .cloned()
                                 .ok_or_else(|| array_oob(idx_i))?,
-                            _ => JValue::Ref(None),
+                            _ => {
+                                return Err("java/lang/ArrayStoreException: aaload on non-reference array".to_owned());
+                            }
                         };
                         frame.stack.push(elem);
                     } else {
@@ -177,9 +214,11 @@ impl Vm {
                             NativePayload::ByteArray(v) => JValue::Int(
                                 *v.get(idx).ok_or_else(|| array_oob(idx_i))? as i32
                             ),
-                            NativePayload::Array(v) => JValue::Int(
-                                v.get(idx).ok_or_else(|| array_oob(idx_i))?.as_int() as i8 as i32
-                            ),
+                            NativePayload::Array(v) => {
+                                let raw = v.get(idx).ok_or_else(|| array_oob(idx_i))?.clone();
+                                let narrowed = self.adapt_value_for_descriptor("B", raw).as_int() as i8 as i32;
+                                JValue::Int(narrowed)
+                            }
                             _ => JValue::Int(0),
                         };
                         frame.stack.push(elem);
@@ -249,6 +288,61 @@ impl Vm {
                     match arr_ref.as_ref() {
                         None => return Err("NullPointerException: aastore".to_owned()),
                         Some(r) => {
+                            let (arr_class, arr_len, is_ref_array) = {
+                                let arr = r.borrow();
+                                let class_name = arr.class_name.clone();
+                                match &arr.native {
+                                    NativePayload::Array(v) => (class_name, v.len(), true),
+                                    NativePayload::ByteArray(v) => (class_name, v.len(), false),
+                                    NativePayload::IntArray(v) => (class_name, v.len(), false),
+                                    NativePayload::LongArray(v) => (class_name, v.len(), false),
+                                    _ => (class_name, 0usize, false),
+                                }
+                            };
+                            if !arr_class.starts_with('[') {
+                                return Err("java/lang/ArrayStoreException: aastore on non-array".to_owned());
+                            }
+                            if !is_ref_array {
+                                return Err("java/lang/ArrayStoreException: aastore on primitive array".to_owned());
+                            }
+                            if idx >= arr_len {
+                                return Err(array_oob(idx_i));
+                            }
+
+                            // Reference arrays require runtime assignability checks.
+                            let component_class = if arr_class.starts_with("[L") {
+                                Some(
+                                    arr_class
+                                        .strip_prefix("[L")
+                                        .and_then(|s| s.strip_suffix(';'))
+                                        .unwrap_or("java/lang/Object")
+                                        .to_owned(),
+                                )
+                            } else if arr_class.starts_with("[[") {
+                                // Component is itself an array descriptor (e.g. [Ljava/lang/String;).
+                                descriptor_to_class_name(&arr_class[1..])
+                            } else {
+                                None
+                            };
+                            if let Some(component) = component_class {
+                                match &val {
+                                    JValue::Ref(None) => {}
+                                    JValue::Ref(Some(obj)) => {
+                                        let runtime = obj.borrow().class_name.clone();
+                                        if !self.is_instance_of(&runtime, &component) {
+                                            return Err(format!(
+                                                "java/lang/ArrayStoreException: {} into {}",
+                                                runtime.replace('/', "."),
+                                                component.replace('/', ".")
+                                            ));
+                                        }
+                                    }
+                                    _ => {
+                                        return Err("java/lang/ArrayStoreException: primitive into reference array".to_owned());
+                                    }
+                                }
+                            }
+
                             if let NativePayload::Array(ref mut v) = r.borrow_mut().native {
                                 *v.get_mut(idx).ok_or_else(|| array_oob(idx_i))? = val;
                             }
@@ -677,29 +771,39 @@ impl Vm {
                 // ---- Field access ----
                 0xb2 => { // getstatic
                     let idx = read_u16(code, &mut frame.pc);
-                    // Fast path: check cpCache for resolved field.
-                    let cached_val = {
+                    // Fast path: check cpCache for resolved field metadata.
+                    let cached_field = {
                         let cb = cache.borrow();
                         if let Some(Some(CpCacheEntry::Field(e))) = cb.get(idx as usize) {
-                            let v = self.static_fields.get(&e.owner_class)
-                                .and_then(|m| m.get(&e.field_name))
-                                .cloned()
-                                .unwrap_or_else(|| default_value_for_descriptor(&e.field_descriptor));
-                            Some(v)
+                            Some((e.owner_class.clone(), e.field_name.clone()))
                         } else {
                             None
                         }
                     };
-                    if let Some(v) = cached_val {
-                        frame.stack.push(v);
+                    if let Some((owner, field)) = cached_field {
+                        // getstatic triggers class initialization (JVMS §5.5),
+                        // even when the field reference is already cached.
+                        self.ensure_class_init(&owner)?;
+                        if let Some(v) = self.static_fields.get(&owner).and_then(|m| m.get(&field)).cloned() {
+                            frame.stack.push(v);
+                        } else {
+                            // Cached metadata can exist before a value is materialized
+                            // (for example during initialization edge cases); resolve
+                            // through the slow path instead of returning descriptor default.
+                            let v = self.resolve_static_field(cp, idx, class_name)?;
+                            frame.stack.push(v);
+                        }
                     } else {
                         // Slow path: resolve, push, then populate cache.
-                        let v = self.resolve_static_field(cp, idx)?;
+                        let v = self.resolve_static_field(cp, idx, class_name)?;
                         frame.stack.push(v.clone());
                         // Populate cache with the resolved field owner.
-                        let (cn, fn_, fd) = resolve_fieldref_ref(cp, idx);
-                        let owner = self.find_static_field_owner_class(cn, fn_)
-                            .unwrap_or_else(|| cn.to_owned());
+                        let (declared_owner, fn_, fd) = resolve_fieldref_ref(cp, idx);
+                        let mapped_owner =
+                            self.remap_static_owner_for_field_access(class_name, declared_owner);
+                        let owner = self
+                            .find_static_field_owner_class(&mapped_owner, fn_)
+                            .unwrap_or(mapped_owner);
                         cache.borrow_mut()[idx as usize] = Some(CpCacheEntry::Field(
                             ResolvedFieldEntry {
                                 owner_class: owner,
@@ -723,16 +827,35 @@ impl Vm {
                         }
                     };
                     if let Some((owner, field)) = cached {
+                        self.check_final_static_field_write(&owner, &field, None, class_name)?;
+                        // putstatic also triggers initialization of the declaring class.
+                        self.ensure_class_init(&owner)?;
                         self.static_fields.entry(owner).or_default().insert(field, val);
                     } else {
                         // Slow path.
-                        let (cls, fld, fd) = resolve_fieldref_ref(cp, idx);
-                        self.ensure_class_init(cls)?;
-                        self.static_fields.entry(cls.to_owned()).or_default().insert(fld.to_owned(), val);
+                        let (declared_owner, fld, fd) = resolve_fieldref_ref(cp, idx);
+                        let mapped_owner =
+                            self.remap_static_owner_for_field_access(class_name, declared_owner);
+                        let resolved =
+                            self.find_static_field_info(&mapped_owner, fld, Some(fd));
+                        let owner = resolved
+                            .as_ref()
+                            .map(|(owner, _)| owner.clone())
+                            .unwrap_or(mapped_owner);
+                        if let Some((resolved_owner, access_flags)) = resolved.as_ref() {
+                            self.check_final_static_field_write_resolved(
+                                resolved_owner,
+                                fld,
+                                *access_flags,
+                                class_name,
+                            )?;
+                        }
+                        self.ensure_class_init(&owner)?;
+                        self.static_fields.entry(owner.clone()).or_default().insert(fld.to_owned(), val);
                         // Populate cache.
                         cache.borrow_mut()[idx as usize] = Some(CpCacheEntry::Field(
                             ResolvedFieldEntry {
-                                owner_class: cls.to_owned(),
+                                owner_class: owner,
                                 field_name: fld.to_owned(),
                                 field_descriptor: fd.to_owned(),
                             }
@@ -749,7 +872,7 @@ impl Vm {
                             "getfield {gf_field_name}: expected Ref on stack, got Void in {class_name}"
                         ));
                     }
-                    let v = self.resolve_instance_field(cp, idx, &obj_ref)?;
+                    let v = self.resolve_instance_field(cp, cache, idx, &obj_ref)?;
                     frame.stack.push(v);
                 }
                 0xb5 => { // putfield
@@ -762,7 +885,7 @@ impl Vm {
                             "putfield {pf_field_name}: expected Ref on stack, got Void in {class_name}"
                         ));
                     }
-                    self.set_instance_field(cp, idx, &obj_ref, val)?;
+                    self.set_instance_field(cp, cache, idx, &obj_ref, val)?;
                 }
 
                 // ---- Method invocation ----
@@ -771,7 +894,7 @@ impl Vm {
                 //   (b) execute native inline and push the result onto frame.stack.
                 0xb6 => { // invokevirtual
                     let idx = read_u16(code, &mut frame.pc);
-                    self.dispatch_virtual(cp, idx, frame).map_err(|e| {
+                    self.dispatch_virtual(cp, cache, idx, frame).map_err(|e| {
                         if e.starts_with("NullPointerException") { format!("{e} in {class_name}") } else { e }
                     })?;
                 }
@@ -783,12 +906,12 @@ impl Vm {
                 }
                 0xb8 => { // invokestatic
                     let idx = read_u16(code, &mut frame.pc);
-                    self.dispatch_static(cp, cache, idx, frame)?;
+                    self.dispatch_static(cp, cache, idx, class_name, frame)?;
                 }
                 0xb9 => { // invokeinterface
                     let idx = read_u16(code, &mut frame.pc);
                     frame.pc += 2; // count + 0
-                    self.dispatch_interface(cp, idx, frame).map_err(|e| {
+                    self.dispatch_interface(cp, cache, idx, frame).map_err(|e| {
                         if e.starts_with("NullPointerException") { format!("{e} in {class_name}") } else { e }
                     })?;
                 }
@@ -802,26 +925,37 @@ impl Vm {
                 // ---- Object creation ----
                 0xbb => { // new
                     let idx = read_u16(code, &mut frame.pc);
-                    let new_class = resolve_class_name_ref(cp, idx);
+                    let declared_class = resolve_class_name_ref(cp, idx);
+                    let mapped_new_class = self.remap_declared_class_for_context(class_name, declared_class);
                     // Run <clinit> for the class being instantiated.
-                    self.ensure_class_init(new_class)?;
+                    self.ensure_class_init(&mapped_new_class)?;
                     // A ParseError entry means the class was registered but malformed —
                     // surface consistently as ClassFormatError (same as Class.forName0 path).
-                    if matches!(self.classes.get(new_class), Some(super::LazyClass::ParseError(_))) {
-                        self.throw_class_format_error(new_class);
-                        return Err(format!("java/lang/ClassFormatError: malformed class file for {new_class}"));
+                    if matches!(self.classes.get(&mapped_new_class), Some(super::LazyClass::ParseError(_))) {
+                        self.throw_class_format_error(&mapped_new_class);
+                        return Err(format!(
+                            "java/lang/ClassFormatError: malformed class file for {mapped_new_class}"
+                        ));
                     }
-                    let obj = if self.get_class(new_class).is_some() {
+                    let obj = if self.get_class(&mapped_new_class).is_some() {
                         // Class is loaded (bytecode available) — use plain object.
-                        JObject::new(new_class)
+                        JObject::new(mapped_new_class.clone())
                     } else {
-                        match new_class {
+                        match mapped_new_class.as_str() {
                             // JDK collection types backed by Array payload (no shim loaded).
                             "java/util/ArrayList" | "java/util/LinkedList" =>
-                                JObject::new_array(new_class, vec![]),
-                            _ => JObject::new(new_class),
+                                JObject::new_array(mapped_new_class.clone(), vec![]),
+                            _ => JObject::new(mapped_new_class.clone()),
                         }
                     };
+                    if self.dynamically_defined_classes.contains(&mapped_new_class) {
+                        if let Some(mut class_file) = self.get_class(&mapped_new_class).cloned() {
+                            class_file.constant_pool.cache = std::rc::Rc::new(std::cell::RefCell::new(
+                                vec![None; class_file.constant_pool.entries.len()],
+                            ));
+                            obj.borrow_mut().class_snapshot = Some(class_file);
+                        }
+                    }
                     frame.stack.push(JValue::Ref(Some(obj)));
                 }
                 0xbc => { // newarray
@@ -893,7 +1027,9 @@ impl Vm {
                 // ---- instanceof / checkcast ----
                 0xc0 => { // checkcast — per JVMS §6.5.checkcast
                     let idx = read_u16(code, &mut frame.pc);
-                    let target_class = resolve_class_name_ref(cp, idx);
+                    let declared_target = resolve_class_name_ref(cp, idx);
+                    let target_class =
+                        self.remap_declared_class_for_context(class_name, declared_target);
                     // Peek at top of stack (don't pop — value stays if check passes).
                     let obj = frame.stack.last()
                         .ok_or_else(|| "checkcast: empty stack".to_owned())?;
@@ -901,7 +1037,7 @@ impl Vm {
                         None => {} // null passes checkcast
                         Some(r) => {
                             let cn = r.borrow().class_name.clone();
-                            if !self.is_instance_of(&cn, target_class) {
+                            if !self.is_instance_of(&cn, &target_class) {
                                 return Err(format!(
                                     "ClassCastException: {} cannot be cast to {}",
                                     cn.replace('/', "."),
@@ -913,13 +1049,15 @@ impl Vm {
                 }
                 0xc1 => { // instanceof
                     let idx = read_u16(code, &mut frame.pc);
-                    let target_class = resolve_class_name_ref(cp, idx);
+                    let declared_target = resolve_class_name_ref(cp, idx);
+                    let target_class =
+                        self.remap_declared_class_for_context(class_name, declared_target);
                     let obj = frame.stack.pop().unwrap();
                     let is_instance = match obj.as_ref() {
                         None => false,
                         Some(r) => {
                             let cn = r.borrow().class_name.clone();
-                            self.is_instance_of(&cn, target_class)
+                            self.is_instance_of(&cn, &target_class)
                         }
                     };
                     frame.stack.push(JValue::Int(is_instance as i32));
@@ -1047,12 +1185,20 @@ impl Vm {
         &mut self,
         cp: &[ConstantPoolEntry],
         idx: u16,
+        frame_owner: &str,
     ) -> Result<JValue, String> {
-        let (class_name, field_name, descriptor) = resolve_fieldref_ref(cp, idx);
+        let (declared_class_name, field_name, descriptor) = resolve_fieldref_ref(cp, idx);
+        let class_name_owned =
+            self.remap_static_owner_for_field_access(frame_owner, declared_class_name);
+        let class_name = class_name_owned.as_str();
         // Run <clinit> if not yet done (initialises static fields via putstatic).
         self.ensure_class_init(class_name)?;
         // Search this class and its super-class chain for the static field (JVMS §5.4.3.2).
         if let Some(v) = self.resolve_static_field_in_hierarchy(class_name, field_name) {
+            return Ok(v);
+        }
+        // Some static finals are materialized via ConstantValue rather than <clinit>.
+        if let Some(v) = self.resolve_constant_value_static_field(class_name, field_name) {
             return Ok(v);
         }
         // Well-known JDK static fields that cannot be initialised via <clinit>
@@ -1091,8 +1237,97 @@ impl Vm {
         }
     }
 
+    fn remap_static_owner_for_field_access(
+        &self,
+        frame_owner: &str,
+        declared_class_name: &str,
+    ) -> String {
+        let Some(current_class) = Self::parse_frame_owner_for_field_access(frame_owner) else {
+            return declared_class_name.to_owned();
+        };
+        if self.class_binary_name_for_lookup(current_class) == declared_class_name {
+            return current_class.to_owned();
+        }
+        declared_class_name.to_owned()
+    }
+
+    pub(in crate::interpreter) fn resolve_constant_value_static_field(&mut self, class_name: &str, field_name: &str) -> Option<JValue> {
+        self.ensure_class_ready(class_name);
+        let (constant_idx, cp_entries, super_name, iface_names) = if let Some(class) = self.get_class(class_name) {
+            let constant_idx = class.fields.iter().find_map(|field| {
+                if (field.access_flags & 0x0008) == 0 {
+                    return None;
+                }
+                let name = class.constant_pool.utf8(field.name_index);
+                if name != field_name {
+                    return None;
+                }
+                field.attributes.iter().find_map(|attr| {
+                    if let Attribute::ConstantValue { constantvalue_index } = attr {
+                        Some(*constantvalue_index)
+                    } else {
+                        None
+                    }
+                })
+            });
+            let cp_entries = Some(class.constant_pool.entries.clone());
+            let sup = if class.super_class != 0 {
+                Some(class.constant_pool.class_name(class.super_class).to_owned())
+            } else {
+                None
+            };
+            let ifaces = class
+                .interfaces
+                .iter()
+                .map(|&idx| class.constant_pool.class_name(idx).to_owned())
+                .collect::<Vec<_>>();
+            (constant_idx, cp_entries, sup, ifaces)
+        } else {
+            (None, None, None, vec![])
+        };
+        let constant = match (cp_entries.as_deref(), constant_idx) {
+            (Some(cp), Some(idx)) => self.constant_value_to_jvalue(cp, idx),
+            _ => None,
+        };
+        if let Some(value) = constant {
+            self.static_fields
+                .entry(class_name.to_owned())
+                .or_default()
+                .insert(field_name.to_owned(), value.clone());
+            return Some(value);
+        }
+        if let Some(super_name) = super_name {
+            if let Some(v) = self.resolve_constant_value_static_field(&super_name, field_name) {
+                return Some(v);
+            }
+        }
+        for iface_name in iface_names {
+            if let Some(v) = self.resolve_constant_value_static_field(&iface_name, field_name) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    fn constant_value_to_jvalue(&mut self, cp: &[ConstantPoolEntry], idx: u16) -> Option<JValue> {
+        match cp.get(idx as usize)? {
+            ConstantPoolEntry::Integer(v) => Some(JValue::Int(*v)),
+            ConstantPoolEntry::Long(v) => Some(JValue::Long(*v)),
+            ConstantPoolEntry::Float(v) => Some(JValue::Float(*v)),
+            ConstantPoolEntry::Double(v) => Some(JValue::Double(*v)),
+            ConstantPoolEntry::String { string_index } => {
+                let s = match cp.get(*string_index as usize)? {
+                    ConstantPoolEntry::Utf8(s) => s.as_str(),
+                    _ => return None,
+                };
+                Some(JValue::Ref(Some(self.intern_string(s))))
+            }
+            _ => None,
+        }
+    }
+
     /// Walk the class hierarchy to find a static field value.
-    fn resolve_static_field_in_hierarchy(&mut self, class_name: &str, field_name: &str) -> Option<JValue> {
+    pub(in crate::interpreter) fn resolve_static_field_in_hierarchy(&mut self, class_name: &str, field_name: &str) -> Option<JValue> {
         // Check this class first.
         if let Some(v) = self.static_fields.get(class_name).and_then(|m| m.get(field_name)) {
             return Some(v.clone());
@@ -1157,33 +1392,182 @@ impl Vm {
         None
     }
 
+    fn check_final_static_field_write(
+        &mut self,
+        owner: &str,
+        field_name: &str,
+        descriptor: Option<&str>,
+        current_frame_owner: &str,
+    ) -> Result<(), String> {
+        let Some((resolved_owner, access_flags)) =
+            self.find_static_field_info(owner, field_name, descriptor)
+        else {
+            return Ok(());
+        };
+        self.check_final_static_field_write_resolved(
+            &resolved_owner,
+            field_name,
+            access_flags,
+            current_frame_owner,
+        )
+    }
+
+    fn check_final_static_field_write_resolved(
+        &self,
+        resolved_owner: &str,
+        field_name: &str,
+        access_flags: u16,
+        current_frame_owner: &str,
+    ) -> Result<(), String> {
+        if (access_flags & 0x0010) == 0 {
+            return Ok(());
+        }
+        let illegal_access = || {
+            format!(
+                "java/lang/IllegalAccessError: Update to static final field {resolved_owner}.{field_name} attempted from {current_frame_owner}"
+            )
+        };
+        let Some(current_class) = Self::parse_frame_owner_for_field_access(current_frame_owner) else {
+            return Err(illegal_access());
+        };
+        if current_class == resolved_owner {
+            return Ok(());
+        }
+        Err(illegal_access())
+    }
+
+    fn find_static_field_info(
+        &mut self,
+        class_name: &str,
+        field_name: &str,
+        descriptor: Option<&str>,
+    ) -> Option<(String, u16)> {
+        self.ensure_class_ready(class_name);
+        let (found, super_name, iface_names) = if let Some(class) = self.get_class(class_name) {
+            let found = class.fields.iter().find_map(|field| {
+                if (field.access_flags & 0x0008) == 0 {
+                    return None;
+                }
+                let name = class.constant_pool.utf8(field.name_index);
+                let desc = class.constant_pool.utf8(field.descriptor_index);
+                if name == field_name && descriptor.map(|expected| expected == desc).unwrap_or(true) {
+                    Some((class_name.to_owned(), field.access_flags))
+                } else {
+                    None
+                }
+            });
+            let sup = if class.super_class != 0 {
+                Some(class.constant_pool.class_name(class.super_class).to_owned())
+            } else {
+                None
+            };
+            let ifaces = class
+                .interfaces
+                .iter()
+                .map(|&idx| class.constant_pool.class_name(idx).to_owned())
+                .collect::<Vec<_>>();
+            (found, sup, ifaces)
+        } else {
+            (None, None, vec![])
+        };
+        if found.is_some() {
+            return found;
+        }
+        if let Some(super_name) = super_name {
+            if let Some(info) = self.find_static_field_info(&super_name, field_name, descriptor) {
+                return Some(info);
+            }
+        }
+        for iface_name in iface_names {
+            if let Some(info) = self.find_static_field_info(&iface_name, field_name, descriptor) {
+                return Some(info);
+            }
+        }
+        None
+    }
+
+    fn parse_frame_owner_for_field_access(frame_owner: &str) -> Option<&str> {
+        let descriptor_start = frame_owner.find('(')?;
+        let method_sep = frame_owner[..descriptor_start].rfind('.')?;
+        Some(&frame_owner[..method_sep])
+    }
+
     fn resolve_instance_field(
         &mut self,
         cp: &[ConstantPoolEntry],
+        cache: &CpCache,
         idx: u16,
         obj_ref: &JValue,
     ) -> Result<JValue, String> {
-        let (_, field_name, field_desc) = resolve_fieldref_ref(cp, idx);
         match obj_ref.as_ref() {
             Some(r) => {
+                {
+                    let cb = cache.borrow();
+                    if let Some(Some(CpCacheEntry::Field(e))) = cb.get(idx as usize) {
+                        let default = default_value_for_descriptor(&e.field_descriptor);
+                        return Ok(r.borrow().fields.get(e.field_name.as_str()).cloned().unwrap_or(default));
+                    }
+                }
+                let (class_name, field_name, field_desc) = resolve_fieldref_ref(cp, idx);
+                cache.borrow_mut()[idx as usize] = Some(CpCacheEntry::Field(
+                    ResolvedFieldEntry {
+                        owner_class: class_name.to_owned(),
+                        field_name: field_name.to_owned(),
+                        field_descriptor: field_desc.to_owned(),
+                    }
+                ));
                 let default = default_value_for_descriptor(field_desc);
                 Ok(r.borrow().fields.get(field_name).cloned().unwrap_or(default))
             }
-            None => Err(format!("NullPointerException: getfield {field_name}")),
+            None => {
+                let (_, field_name, _) = resolve_fieldref_ref(cp, idx);
+                Err(format!("NullPointerException: getfield {field_name}"))
+            }
         }
     }
 
     fn set_instance_field(
         &mut self,
         cp: &[ConstantPoolEntry],
+        cache: &CpCache,
         idx: u16,
         obj_ref: &JValue,
         val: JValue,
     ) -> Result<(), String> {
-        let (_, field_name, _) = resolve_fieldref_ref(cp, idx);
         match obj_ref.as_ref() {
-            Some(r) => { r.borrow_mut().fields.insert(field_name.to_owned(), val); Ok(()) }
-            None => Err(format!("NullPointerException: putfield {field_name}")),
+            Some(r) => {
+                {
+                    let cb = cache.borrow();
+                    if let Some(Some(CpCacheEntry::Field(e))) = cb.get(idx as usize) {
+                        let mut obj = r.borrow_mut();
+                        if let Some(slot) = obj.fields.get_mut(e.field_name.as_str()) {
+                            *slot = val;
+                        } else {
+                            obj.fields.insert(e.field_name.clone(), val);
+                        }
+                        return Ok(());
+                    }
+                }
+                let (class_name, field_name, field_desc) = resolve_fieldref_ref(cp, idx);
+                cache.borrow_mut()[idx as usize] = Some(CpCacheEntry::Field(
+                    ResolvedFieldEntry {
+                        owner_class: class_name.to_owned(),
+                        field_name: field_name.to_owned(),
+                        field_descriptor: field_desc.to_owned(),
+                    }
+                ));
+                let mut obj = r.borrow_mut();
+                if let Some(slot) = obj.fields.get_mut(field_name) {
+                    *slot = val;
+                } else {
+                    obj.fields.insert(field_name.to_owned(), val);
+                }
+                Ok(())
+            }
+            None => {
+                let (_, field_name, _) = resolve_fieldref_ref(cp, idx);
+                Err(format!("NullPointerException: putfield {field_name}"))
+            }
         }
     }
 
