@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
-use crate::class_file::{Attribute, BootstrapMethod, ConstantPoolEntry, ExceptionTableEntry};
-use crate::heap::{JObject, JRef, JValue, NativePayload};
+use crate::class_file::{BootstrapMethod, ConstantPoolEntry, ExceptionTableEntry};
+use crate::heap::{JObject, JRef, JValue};
 
 use super::cp_cache::CpCache;
 use super::descriptors::*;
@@ -33,14 +33,6 @@ pub(crate) struct FrameInfo {
     /// For ACC_SYNCHRONIZED methods: the monitor object to release on method exit.
     /// Instance methods use `this`, static methods use the class object.
     pub synchronized_monitor: Option<JRef>,
-}
-
-#[derive(Clone)]
-struct StackTraceFrame {
-    class_name: String,
-    method_name: String,
-    file_name: Option<String>,
-    line_number: i32,
 }
 
 /// Saved state for a StringConcatFactory recipe interrupted by toString().
@@ -129,10 +121,7 @@ impl Vm {
                 Err(err_msg) => {
                     match self.unwind_exception(call_stack, opcode_pc, &err_msg) {
                         Ok(()) => {} // handler found
-                        Err(e) => {
-                            self.ensure_pending_exception_from_err(&e);
-                            return Err(e);
-                        }
+                        Err(e) => return Err(e),
                     }
                 }
             }
@@ -211,10 +200,7 @@ impl Vm {
                 Err(err_msg) => {
                     match self.unwind_exception(call_stack, opcode_pc, &err_msg) {
                         Ok(()) => {}
-                        Err(e) => {
-                            self.ensure_pending_exception_from_err(&e);
-                            return Err(e);
-                        }
+                        Err(e) => return Err(e),
                     }
                 }
             }
@@ -267,11 +253,16 @@ impl Vm {
                             }
                         }
                         Ok(None) => {
-                            // Time slice exhausted or voluntary yield.
-                            // `Sleeping` is resumed by Scheduler::wake_sleepers.
+                            // Time slice exhausted or voluntary yield/sleep.
+                            // Normalize Yielded/Sleeping back to Runnable so
+                            // this thread can be scheduled again after other
+                            // threads get a turn.
                             let thread = self.scheduler.current_thread_mut();
-                            if thread.state == ThreadState::Yielded {
-                                thread.state = ThreadState::Runnable;
+                            match thread.state {
+                                ThreadState::Yielded | ThreadState::Sleeping => {
+                                    thread.state = ThreadState::Runnable;
+                                }
+                                _ => {}
                             }
                         }
                         Err(e) => {
@@ -288,12 +279,11 @@ impl Vm {
                 ThreadState::Terminated => {
                     // Skip terminated threads.
                 }
-                ThreadState::Yielded => {
+                ThreadState::Yielded | ThreadState::Sleeping => {
                     // Voluntary yield — set back to Runnable so this thread
                     // can be scheduled again after other threads get a turn.
                     self.scheduler.current_thread_mut().state = ThreadState::Runnable;
                 }
-                ThreadState::Sleeping => {}
                 ThreadState::Joining(_)
                 | ThreadState::WaitingOnMonitor(_) | ThreadState::WaitingOnCondition(_) => {
                     // Blocked — skip to next thread.
@@ -302,17 +292,12 @@ impl Vm {
 
             // Wake joiners/sleeping threads before trying to advance.
             self.scheduler.wake_joiners();
-            self.scheduler.wake_sleepers();
 
             // Advance to next runnable thread.
             if !self.scheduler.advance() {
                 // No runnable threads — check for deadlock or all terminated.
                 if self.scheduler.all_terminated() {
                     return Ok(JValue::Void);
-                }
-                if self.scheduler.has_sleeping_threads() {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    continue;
                 }
                 // Check if only blocked threads remain (potential deadlock).
                 if self.scheduler.runnable_count() == 0 {
@@ -335,22 +320,16 @@ impl Vm {
         while !self.scheduler.only_main_alive() && iterations < max_iterations {
             iterations += 1;
             self.scheduler.wake_joiners();
-            self.scheduler.wake_sleepers();
 
             if !self.scheduler.advance() {
-                if self.scheduler.has_sleeping_threads() {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    continue;
-                }
                 break;
             }
 
             let state = self.scheduler.current_thread().state;
             match state {
-                ThreadState::Yielded => {
+                ThreadState::Yielded | ThreadState::Sleeping => {
                     self.scheduler.current_thread_mut().state = ThreadState::Runnable;
                 }
-                ThreadState::Sleeping => continue,
                 ThreadState::Runnable => {}
                 _ => continue,
             }
@@ -387,19 +366,11 @@ impl Vm {
     ) -> Result<(), String> {
         let mut first = true;
         let mut trace = String::new();
-        while !call_stack.is_empty() {
-            let pc = if first {
-                initial_opcode_pc
-            } else {
-                call_stack.last().unwrap().frame.pc.saturating_sub(1)
-            };
+        while let Some(fi) = call_stack.last_mut() {
+            fi.concat_state = None;
+            let pc = if first { initial_opcode_pc } else { fi.frame.pc.saturating_sub(1) };
             first = false;
 
-            self.ensure_pending_exception_from_err(err_msg);
-            self.populate_pending_exception_stack_trace(call_stack, initial_opcode_pc);
-
-            let fi = call_stack.last_mut().unwrap();
-            fi.concat_state = None;
             if let Some((handler_pc, exc_obj)) = self.find_exception_handler(
                 &fi.frame, &fi.exception_table, &fi.cp, pc, err_msg,
             ) {
@@ -417,133 +388,6 @@ impl Vm {
             self.release_synchronized_monitor(&popped)?;
         }
         Err(if trace.is_empty() { err_msg.to_owned() } else { trace })
-    }
-
-    fn populate_pending_exception_stack_trace(
-        &mut self,
-        call_stack: &[FrameInfo],
-        initial_opcode_pc: usize,
-    ) {
-        let Some(exc) = self.scheduler.current_thread().pending_exception.clone() else {
-            return;
-        };
-        if !Self::should_populate_stack_trace(&exc) {
-            return;
-        }
-
-        let frames = self.capture_stack_trace_frames(call_stack, initial_opcode_pc);
-        if frames.is_empty() {
-            return;
-        }
-
-        let elements = frames
-            .into_iter()
-            .map(|frame| {
-                let ste = JObject::new("java/lang/StackTraceElement");
-                {
-                    let mut obj = ste.borrow_mut();
-                    obj.fields.insert(
-                        "declaringClass".to_owned(),
-                        JValue::Ref(Some(JObject::new_string(frame.class_name))),
-                    );
-                    obj.fields.insert(
-                        "methodName".to_owned(),
-                        JValue::Ref(Some(JObject::new_string(frame.method_name))),
-                    );
-                    obj.fields.insert(
-                        "fileName".to_owned(),
-                        JValue::Ref(frame.file_name.map(JObject::new_string)),
-                    );
-                    obj.fields
-                        .insert("lineNumber".to_owned(), JValue::Int(frame.line_number));
-                }
-                JValue::Ref(Some(ste))
-            })
-            .collect();
-        let stack_trace = JObject::new_array("[Ljava/lang/StackTraceElement;", elements);
-        exc.borrow_mut()
-            .fields
-            .insert("stackTrace".to_owned(), JValue::Ref(Some(stack_trace)));
-    }
-
-    fn should_populate_stack_trace(exc: &JRef) -> bool {
-        match exc.borrow().fields.get("stackTrace") {
-            Some(JValue::Ref(Some(stack_trace))) => {
-                matches!(&stack_trace.borrow().native, NativePayload::Array(elements) if elements.is_empty())
-            }
-            Some(JValue::Ref(None)) | None => true,
-            _ => false,
-        }
-    }
-
-    fn capture_stack_trace_frames(
-        &mut self,
-        call_stack: &[FrameInfo],
-        initial_opcode_pc: usize,
-    ) -> Vec<StackTraceFrame> {
-        let mut out = Vec::with_capacity(call_stack.len());
-        let mut first = true;
-        for fi in call_stack.iter().rev() {
-            let pc = if first {
-                initial_opcode_pc
-            } else {
-                fi.frame.pc.saturating_sub(1)
-            };
-            first = false;
-            if let Some(frame) = self.stack_trace_frame(fi, pc) {
-                out.push(frame);
-            }
-        }
-        out
-    }
-
-    fn stack_trace_frame(&mut self, fi: &FrameInfo, pc: usize) -> Option<StackTraceFrame> {
-        let (owner, method_name, descriptor) = Self::parse_frame_owner(&fi.frame_owner)?;
-        self.ensure_class_ready(owner);
-        let class = self.get_class(owner)?;
-        let source_file = class.attributes.iter().find_map(|attr| {
-            if let Attribute::SourceFile { sourcefile_index } = attr {
-                Some(class.constant_pool.utf8(*sourcefile_index).to_owned())
-            } else {
-                None
-            }
-        });
-        let method = class.methods.iter().find(|method| {
-            class.constant_pool.utf8(method.name_index) == method_name
-                && class.constant_pool.utf8(method.descriptor_index) == descriptor
-        })?;
-        let line_number = method
-            .code()
-            .and_then(|code| {
-                code.attributes.iter().find_map(|attr| {
-                    if let Attribute::LineNumberTable(entries) = attr {
-                        entries
-                            .iter()
-                            .take_while(|entry| usize::from(entry.start_pc) <= pc)
-                            .last()
-                            .map(|entry| i32::from(entry.line_number))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or(-1);
-        Some(StackTraceFrame {
-            class_name: owner.replace('/', "."),
-            method_name: method_name.to_owned(),
-            file_name: source_file,
-            line_number,
-        })
-    }
-
-    fn parse_frame_owner(frame_owner: &str) -> Option<(&str, &str, &str)> {
-        let descriptor_start = frame_owner.find('(')?;
-        let method_sep = frame_owner[..descriptor_start].rfind('.')?;
-        Some((
-            &frame_owner[..method_sep],
-            &frame_owner[method_sep + 1..descriptor_start],
-            &frame_owner[descriptor_start..],
-        ))
     }
 
     /// Release the synchronized monitor when a frame is popped (normal return or exception unwind).
@@ -773,62 +617,12 @@ impl Vm {
     ) -> Result<Option<FrameInfo>, String> {
         // Pure Rust lambda closures are handled inline — not via frames.
         let is_bytecode_lambda;
-        let class_snapshot;
         {
             let borrow = this.borrow();
             if matches!(borrow.native, crate::heap::NativePayload::Lambda(_)) {
                 return Ok(None);
             }
             is_bytecode_lambda = matches!(borrow.native, crate::heap::NativePayload::BytecodeLambda { .. });
-            class_snapshot = borrow.class_snapshot.clone();
-        }
-
-        if !is_bytecode_lambda {
-            if let Some(snapshot) = class_snapshot.as_ref() {
-                let runtime_class = this.borrow().class_name.clone();
-                let mut isolated_snapshot = snapshot.clone();
-                isolated_snapshot.constant_pool.cache = Rc::new(std::cell::RefCell::new(
-                    vec![None; isolated_snapshot.constant_pool.entries.len()],
-                ));
-                let snapshot_key =
-                    self.ensure_snapshot_lookup_class(&this, &runtime_class, &isolated_snapshot);
-                if let Some(info) = self.resolve_method_exec_info(&snapshot_key, method_name, descriptor) {
-                    if info.access_flags & 0x0400 != 0 {
-                        let ms = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-                        let exc = self.new_vm_exception_message("java/lang/AbstractMethodError", ms.clone());
-                        *self.pending_exception_mut() = Some(exc);
-                        return Err(format!("java/lang/AbstractMethodError: {ms}"));
-                    }
-                    if info.has_code {
-                        let (param_tokens, _) = Self::parse_method_descriptor_tokens(&info.descriptor);
-                        let req = 1 + param_tokens.iter().map(|t| if t == "J" || t == "D" { 2 } else { 1 }).sum::<usize>();
-                        let total = info.max_locals.max(req);
-                        let mut locals = vec![JValue::Void; total];
-                        locals[0] = JValue::Ref(Some(this.clone()));
-                        let mut li = 1usize;
-                        for (a, t) in args.clone().into_iter().zip(param_tokens.iter()) {
-                            if li >= locals.len() { break; }
-                            locals[li] = self.adapt_value_for_descriptor(t, a);
-                            li += if t == "J" || t == "D" { 2 } else { 1 };
-                        }
-                        let fo = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-                        let synchronized_monitor = self.acquire_instance_synchronized_monitor(info.access_flags, &locals);
-                        return Ok(Some(FrameInfo {
-                            frame: Frame { locals, stack: Vec::new(), pc: 0 },
-                            code: info.code,
-                            cp: info.cp,
-                            cache: info.cache,
-                            frame_owner: fo,
-                            bootstrap_methods: info.bootstrap_methods,
-                            exception_table: info.exception_table,
-                            push_return,
-                            concat_state: None,
-                            lambda_return_adapt: None,
-                            synchronized_monitor,
-                        }));
-                    }
-                }
-            }
         }
 
         let runtime_class = this.borrow().class_name.clone();

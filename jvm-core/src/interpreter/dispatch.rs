@@ -181,49 +181,6 @@ impl Vm {
         }
     }
 
-    /// Build a FrameInfo for an instance method from a cached ResolvedMethodEntry.
-    fn build_instance_frame_from_cache(
-        &mut self,
-        entry: &ResolvedMethodEntry,
-        this: JRef,
-        args: Vec<JValue>,
-        push_return: bool,
-    ) -> FrameInfo {
-        let req = 1 + entry.param_tokens.iter()
-            .map(|t| if t == "J" || t == "D" { 2 } else { 1 })
-            .sum::<usize>();
-        let mut locals = vec![JValue::Void; entry.max_locals.max(req)];
-        locals[0] = JValue::Ref(Some(this.clone()));
-        let mut li = 1usize;
-        for (a, t) in args.into_iter().zip(entry.param_tokens.iter()) {
-            if li >= locals.len() {
-                break;
-            }
-            locals[li] = self.adapt_value_for_descriptor(t, a);
-            li += if t == "J" || t == "D" { 2 } else { 1 };
-        }
-        let fo = format!("{}.{}{}", entry.owner_class, entry.method_name, entry.descriptor);
-        let synchronized_monitor = if entry.access_flags & 0x0020 != 0 {
-            self.monitor_enter(&this);
-            Some(this)
-        } else {
-            None
-        };
-        FrameInfo {
-            frame: Frame { locals, stack: Vec::new(), pc: 0 },
-            code: (*entry.code).clone(),
-            cp: Rc::clone(&entry.cp),
-            cache: Rc::clone(&entry.cache),
-            frame_owner: fo,
-            bootstrap_methods: (*entry.bootstrap_methods).to_vec(),
-            exception_table: (*entry.exception_table).to_vec(),
-            push_return,
-            concat_state: None,
-            lambda_return_adapt: None,
-            synchronized_monitor,
-        }
-    }
-
     /// Populate the cpCache with a resolved bytecode method entry.
     fn populate_static_method_cache(
         &self,
@@ -235,7 +192,6 @@ impl Vm {
     ) {
         let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
         let entry = ResolvedMethodEntry {
-            receiver_class: None,
             owner_class: info.class_name.clone(),
             code: Rc::new(info.code.clone()),
             exception_table: Rc::new(info.exception_table.clone()),
@@ -266,70 +222,7 @@ impl Vm {
     ) {
         let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
         let entry = ResolvedMethodEntry {
-            receiver_class: None,
             owner_class: class_name.to_owned(),
-            code: Rc::new(Vec::new()),
-            exception_table: Rc::new(Vec::new()),
-            max_locals: 0,
-            arg_slot_count: count_args(descriptor),
-            access_flags: 0,
-            has_code: false,
-            cp: Rc::new(Vec::new()),
-            cache: Rc::new(RefCell::new(Vec::new())),
-            bootstrap_methods: Rc::new(Vec::new()),
-            descriptor: descriptor.to_owned(),
-            param_tokens,
-            is_void: descriptor.ends_with(")V"),
-            is_varargs: false,
-            method_name: method_name.to_owned(),
-        };
-        cache.borrow_mut()[idx as usize] = Some(CpCacheEntry::Method(entry));
-    }
-
-    fn populate_virtual_method_cache(
-        &self,
-        cache: &CpCache,
-        idx: u16,
-        receiver_class: &str,
-        method_name: &str,
-        descriptor: &str,
-        info: &super::MethodExecInfo,
-    ) {
-        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
-        let entry = ResolvedMethodEntry {
-            receiver_class: Some(receiver_class.to_owned()),
-            owner_class: info.class_name.clone(),
-            code: Rc::new(info.code.clone()),
-            exception_table: Rc::new(info.exception_table.clone()),
-            max_locals: info.max_locals,
-            arg_slot_count: count_args(descriptor),
-            access_flags: info.access_flags,
-            has_code: info.has_code,
-            cp: Rc::clone(&info.cp),
-            cache: Rc::clone(&info.cache),
-            bootstrap_methods: Rc::new(info.bootstrap_methods.clone()),
-            descriptor: descriptor.to_owned(),
-            param_tokens,
-            is_void: descriptor.ends_with(")V"),
-            is_varargs: info.access_flags & 0x0080 != 0,
-            method_name: method_name.to_owned(),
-        };
-        cache.borrow_mut()[idx as usize] = Some(CpCacheEntry::Method(entry));
-    }
-
-    fn populate_virtual_native_cache(
-        &self,
-        cache: &CpCache,
-        idx: u16,
-        receiver_class: &str,
-        owner_class: &str,
-        method_name: &str,
-        descriptor: &str,
-    ) {
-        let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
-        let entry = ResolvedMethodEntry {
-            receiver_class: Some(receiver_class.to_owned()),
-            owner_class: owner_class.to_owned(),
             code: Rc::new(Vec::new()),
             exception_table: Rc::new(Vec::new()),
             max_locals: 0,
@@ -351,7 +244,6 @@ impl Vm {
     pub(super) fn dispatch_virtual(
         &mut self,
         cp: &[ConstantPoolEntry],
-        cache: &CpCache,
         idx: u16,
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
@@ -362,7 +254,7 @@ impl Vm {
         match this_val {
             JValue::Ref(Some(r)) => {
                 let push_return = !descriptor.ends_with(")V");
-                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame, cache, idx)
+                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame)
             }
             JValue::Ref(None) => Err(format!("NullPointerException: invokevirtual {class_name}.{method_name}{descriptor}")),
             other => Err(format!(
@@ -381,8 +273,6 @@ impl Vm {
         args: Vec<JValue>,
         push_return: bool,
         frame: &mut Frame,
-        cache: &CpCache,
-        idx: u16,
     ) -> Result<Option<JValue>, String> {
         // Fast-path: intercept Object.wait/notify/notifyAll directly to avoid
         // re-entering invoke_virtual's recursive path, which doesn't check
@@ -414,201 +304,32 @@ impl Vm {
             _ => {}
         }
 
-        let (is_rust_lambda, is_bytecode_lambda, has_class_snapshot, runtime_class) = {
-            let borrow = r.borrow();
-            (
-                matches!(borrow.native, NativePayload::Lambda(_)),
-                matches!(borrow.native, NativePayload::BytecodeLambda { .. }),
-                borrow.class_snapshot.is_some(),
-                borrow.class_name.clone(),
-            )
-        };
-
-        // Force-native fast path for Thread.threadLocal* helpers.
-        // These methods have Java bytecode in newer JDKs, but running through
-        // HashMap-heavy Java paths is prohibitively expensive for Clojure's
-        // high-contention delay tests.
-        if matches!(
-            (method_name, descriptor),
-            ("threadLocalGet", "(Ljava/lang/ThreadLocal;)Ljava/lang/Object;")
-                | ("threadLocalContains", "(Ljava/lang/ThreadLocal;)Z")
-                | ("threadLocalSet", "(Ljava/lang/ThreadLocal;Ljava/lang/Object;)V")
-                | ("threadLocalRemove", "(Ljava/lang/ThreadLocal;)V")
-        ) && (runtime_class == "java/lang/Thread"
-            || self.is_instance_of(&runtime_class, "java/lang/Thread"))
-        {
-            if let Some(result) = self.native_virtual(
-                &r,
-                "java/lang/Thread",
-                method_name,
-                descriptor,
-                &args,
-            ) {
-                if let Some(err) = self.pending_exception_err() {
-                    return Err(err);
-                }
-                if push_return && !matches!(result, JValue::Void) {
-                    frame.stack.push(result);
-                }
-                return Ok(None);
+        match self.build_virtual_frame_inner(r.clone(), class_name, method_name, descriptor, args.clone(), push_return)? {
+            Some(fi) => {
+                *self.pending_frame_mut() = Some(fi);
+                Ok(None)
             }
-        }
-
-        // Lightweight annotation-object dispatch:
-        // runtime-visible annotation payloads are represented as plain objects
-        // carrying `__ann_*` fields parsed from class attributes.
-        if args.is_empty() {
-            let ann_slot = if method_name == "annotationType" && descriptor == "()Ljava/lang/Class;" {
-                Some("__ann_annotationType".to_owned())
-            } else if descriptor.starts_with("()") {
-                Some(format!("__ann_{method_name}"))
-            } else {
-                None
-            };
-            if let Some(slot) = ann_slot {
-                if let Some(v) = r.borrow().fields.get(&slot).cloned() {
-                    if push_return && !matches!(v, JValue::Void) {
-                        frame.stack.push(v);
-                    }
-                    return Ok(None);
-                }
-            }
-        }
-
-        if !is_rust_lambda {
-            if has_class_snapshot && !is_bytecode_lambda {
-                if let Some(fi) = self.build_virtual_frame_inner(
-                    r.clone(),
-                    class_name,
-                    method_name,
-                    descriptor,
-                    args.clone(),
-                    push_return,
-                )? {
+            None => {
+                // Try to handle BytecodeLambda SAM dispatch via the trampoline
+                // (instead of the recursive invoke_virtual path which uses
+                // run_trampoline — the non-time-sliced variant that ignores
+                // thread state changes like WaitingOnCondition).
+                if let Some(fi) = self.try_build_lambda_sam_frame(&r, method_name, descriptor, args.clone(), push_return)? {
                     *self.pending_frame_mut() = Some(fi);
                     return Ok(None);
                 }
+                // Native, NativePayload::Lambda (Rust closure), or unresolved —
+                // fall back to recursive invoke_virtual. This runs outside the
+                // time-sliced trampoline, so thread state changes (e.g.
+                // WaitingOnCondition) won't cause a yield. This is acceptable
+                // because Rust closures don't call Java wait/notify.
                 let result = self.invoke_virtual(r, class_name, method_name, descriptor, args)?;
                 if !matches!(result, JValue::Void) {
                     frame.stack.push(result);
                 }
-                return Ok(None);
-            }
-
-            let cached_entry = {
-                let cb = cache.borrow();
-                match cb.get(idx as usize) {
-                    Some(Some(CpCacheEntry::Method(entry)))
-                        if entry.receiver_class.as_deref() == Some(runtime_class.as_str()) =>
-                    {
-                        Some(entry.clone())
-                    }
-                    _ => None,
-                }
-            };
-            if let Some(entry) = cached_entry {
-                if entry.has_code {
-                    let fi = self.build_instance_frame_from_cache(&entry, r.clone(), args.clone(), push_return);
-                    *self.pending_frame_mut() = Some(fi);
-                    return Ok(None);
-                }
-                let result = self.native_virtual(&r, &entry.owner_class, &entry.method_name, &entry.descriptor, &args);
-                if let Some(err) = self.pending_exception_err() {
-                    return Err(err);
-                }
-                if let Some(result) = result {
-                    if !entry.is_void {
-                        frame.stack.push(result);
-                    }
-                    return Ok(None);
-                }
-            }
-
-            let resolve_class = if is_bytecode_lambda {
-                class_name.to_owned()
-            } else if self.classes.contains_key(&runtime_class) {
-                runtime_class.clone()
-            } else {
-                class_name.to_owned()
-            };
-
-            let resolved = if self.method_exists(&resolve_class, method_name, descriptor) {
-                descriptor.to_owned()
-            } else {
-                self.find_method_real_descriptor(&resolve_class, method_name, descriptor)
-                    .unwrap_or_else(|| descriptor.to_owned())
-            };
-            let desc = resolved.as_str();
-
-            let has_method = self.method_exists(&resolve_class, method_name, desc);
-            if has_method {
-                let info = self.resolve_method_exec_info(&resolve_class, method_name, desc).unwrap();
-                if info.access_flags & 0x0400 != 0 {
-                    if is_bytecode_lambda {
-                        if let Some(fi) = self.try_build_lambda_sam_frame(&r, method_name, descriptor, args.clone(), push_return)? {
-                            *self.pending_frame_mut() = Some(fi);
-                            return Ok(None);
-                        }
-                    } else {
-                        let ms = format!("{}.{method_name}{}", info.class_name, info.descriptor);
-                        let exc = self.new_vm_exception_message("java/lang/AbstractMethodError", ms.clone());
-                        *self.pending_exception_mut() = Some(exc);
-                        return Err(format!("java/lang/AbstractMethodError: {ms}"));
-                    }
-                } else if info.has_code {
-                    self.populate_virtual_method_cache(cache, idx, &runtime_class, method_name, desc, &info);
-                    let cached_entry = {
-                        let cb = cache.borrow();
-                        match cb.get(idx as usize) {
-                            Some(Some(CpCacheEntry::Method(entry))) => Some(entry.clone()),
-                            _ => None,
-                        }
-                    };
-                    if let Some(entry) = cached_entry {
-                        let fi = self.build_instance_frame_from_cache(&entry, r.clone(), args, push_return);
-                        *self.pending_frame_mut() = Some(fi);
-                        return Ok(None);
-                    }
-                } else {
-                    self.populate_virtual_native_cache(
-                        cache,
-                        idx,
-                        &runtime_class,
-                        &info.class_name,
-                        method_name,
-                        &info.descriptor,
-                    );
-                    if let Some(result) = self.native_virtual(&r, &info.class_name, method_name, &info.descriptor, &args) {
-                        if let Some(err) = self.pending_exception_err() {
-                            return Err(err);
-                        }
-                        if !matches!(result, JValue::Void) {
-                            frame.stack.push(result);
-                        }
-                        return Ok(None);
-                    }
-                }
+                Ok(None)
             }
         }
-
-        // Try to handle BytecodeLambda SAM dispatch via the trampoline
-        // (instead of the recursive invoke_virtual path which uses
-        // run_trampoline — the non-time-sliced variant that ignores
-        // thread state changes like WaitingOnCondition).
-        if let Some(fi) = self.try_build_lambda_sam_frame(&r, method_name, descriptor, args.clone(), push_return)? {
-            *self.pending_frame_mut() = Some(fi);
-            return Ok(None);
-        }
-        // Native, NativePayload::Lambda (Rust closure), or unresolved —
-        // fall back to recursive invoke_virtual. This runs outside the
-        // time-sliced trampoline, so thread state changes (e.g.
-        // WaitingOnCondition) won't cause a yield. This is acceptable
-        // because Rust closures don't call Java wait/notify.
-        let result = self.invoke_virtual(r, class_name, method_name, descriptor, args)?;
-        if !matches!(result, JValue::Void) {
-            frame.stack.push(result);
-        }
-        Ok(None)
     }
 
     pub(super) fn dispatch_special(
@@ -628,32 +349,13 @@ impl Vm {
                     self.remap_declared_class_for_context(&receiver_class, declared_class_name);
                 if method_name == "<init>" {
                     if class_name == "java/lang/String" {
-                        if matches!(
-                            descriptor,
-                            "([C)V"
-                                | "([CII)V"
-                                | "([B)V"
-                                | "([BII)V"
-                                | "([BIILjava/lang/String;)V"
-                                | "([BIILjava/nio/charset/Charset;)V"
-                                | "([BLjava/lang/String;)V"
-                                | "([BLjava/nio/charset/Charset;)V"
-                                | "([BIII)V"
-                                | "(Ljava/lang/String;)V"
-                        ) && args.first().and_then(|a| a.as_ref()).is_none()
-                        {
-                            return Err(format!("java/lang/NullPointerException: {class_name}.{method_name}{descriptor}"));
-                        }
                         let s = self.string_from_init_args(&descriptor, &args, &r);
                         r.borrow_mut().native = NativePayload::JavaString(s);
                         return Ok(None); // void
                     }
                     let has_method = self.method_exists(&class_name, &method_name, &descriptor);
                     if !has_method {
-                        let detail = format!("{class_name}.{method_name}{descriptor}");
-                        let exc = self.new_vm_exception_message("java/lang/NoSuchMethodError", detail.clone());
-                        *self.pending_exception_mut() = Some(exc);
-                        return Err(format!("java/lang/NoSuchMethodError: {detail}"));
+                        return Ok(None); // no-op
                     }
                 }
                 let push_return = !descriptor.ends_with(")V");
@@ -671,9 +373,7 @@ impl Vm {
                     }
                 }
             }
-            JValue::Ref(None) => Err(format!(
-                "NullPointerException: invokespecial {declared_class_name}.{method_name}{descriptor}"
-            )),
+            JValue::Ref(None) => Err(format!("NullPointerException: invokespecial {declared_class_name}.{method_name}{descriptor}")),
             other => Err(format!(
                 "Expected reference for invokespecial {declared_class_name}.{method_name}{descriptor}, got {other:?}"
             )),
@@ -683,7 +383,6 @@ impl Vm {
     pub(super) fn dispatch_interface(
         &mut self,
         cp: &[ConstantPoolEntry],
-        cache: &CpCache,
         idx: u16,
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
@@ -715,7 +414,7 @@ impl Vm {
         match this_val {
             JValue::Ref(Some(r)) => {
                 let push_return = !descriptor.ends_with(")V");
-                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame, cache, idx)
+                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame)
             }
             JValue::Ref(None) => Err(format!("NullPointerException: invokeinterface {class_name}.{method_name}{descriptor}")),
             other => Err(format!(
@@ -903,15 +602,10 @@ impl Vm {
                         _ => None,
                     }
                 }).unwrap_or_default();
-                let lambda_class_name = method_return_descriptor(&descriptor)
-                    .and_then(|ret| ret.strip_prefix('L').and_then(|name| name.strip_suffix(';')))
-                    .unwrap_or("$$Lambda")
-                    .to_owned();
 
                 let lambda = if let Some((ref_kind, impl_class, impl_method, impl_desc)) = impl_info {
                     let obj = Rc::new(RefCell::new(JObject {
-                        class_name: lambda_class_name,
-                        class_snapshot: None,
+                        class_name: "$$Lambda".to_owned(),
                         fields: std::collections::HashMap::new(),
                         native: NativePayload::BytecodeLambda {
                             sam_method: method_name,
@@ -1174,7 +868,6 @@ impl Vm {
 
                 let obj = Rc::new(RefCell::new(JObject {
                     class_name: "$$RecordMethod".to_owned(),
-                    class_snapshot: None,
                     fields: std::collections::HashMap::new(),
                     native: NativePayload::RecordMethod {
                         method: method_name,
