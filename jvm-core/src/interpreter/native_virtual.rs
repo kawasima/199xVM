@@ -995,6 +995,15 @@ impl super::Vm {
                 let binary = self.class_binary_name_for_lookup(&internal);
                 Some(JValue::Ref(Some(self.intern_string(Self::class_display_name(&binary)))))
             }
+            ("java/lang/Class", "getClassLoader") => {
+                let loader = this
+                    .borrow()
+                    .fields
+                    .get("__defining_loader")
+                    .and_then(|v| v.as_ref())
+                    .cloned();
+                Some(JValue::Ref(loader))
+            }
             ("java/lang/Class", "getModifiers") => {
                 let target = self
                     .class_internal_name_from_obj(this)
