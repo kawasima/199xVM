@@ -150,6 +150,16 @@ fn string_index_of_value(haystack: &JavaStringValue, needle: &JavaStringValue, f
     u16_find(haystack.utf16(), needle.utf16(), from_index)
 }
 
+fn defining_loader_id_from_class_obj(class_obj: &JRef) -> usize {
+    class_obj
+        .borrow()
+        .fields
+        .get("__defining_loader")
+        .and_then(|v| v.as_ref())
+        .map(|r| Rc::as_ptr(r) as *const () as usize)
+        .unwrap_or(0)
+}
+
 impl super::Vm {
     /// Extract UTF-16-backed string content from `java/lang/String` constructor arguments.
     pub(super) fn string_from_init_args(&self, descriptor: &str, args: &[JValue], _this: &JRef) -> JavaStringValue {
@@ -336,7 +346,7 @@ impl super::Vm {
     /// Handle ClassLoader instance methods that must dispatch by resolved owner, not runtime class.
     /// Returns `Some(value)` if the method was handled, `None` to fall through.
     fn native_classloader(&mut self, this: &JRef, method_name: &str, args: &[JValue]) -> Option<JValue> {
-        let loader_id = Rc::as_ptr(this) as *const () as usize;
+        let loader_id = Self::object_id(this);
         match method_name {
             "loadClass" | "findClass" => {
                 // A null or missing name argument must surface as NullPointerException.
@@ -378,12 +388,11 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
-                let class_obj = self
+                if let Some(class_obj) = self
                     .loader_defined_classes
                     .get(&(loader_id, internal.clone()))
-                    .map(Rc::clone);
-                if class_obj.is_some() {
-                    return Some(JValue::Ref(class_obj));
+                {
+                    return Some(JValue::Ref(Some(Rc::clone(class_obj))));
                 }
                 if matches!(self.classes.get(&internal), Some(LazyClass::Ready(_))) {
                     Some(JValue::Ref(Some(self.class_object(internal))))
@@ -989,20 +998,8 @@ impl super::Vm {
                 let other = other_class.and_then(|c| self.class_internal_name_from_obj(c));
                 if let (Some(other_class), Some(other_name)) = (other_class, other.as_ref()) {
                     if other_name == &target {
-                        let target_loader_id = this
-                            .borrow()
-                            .fields
-                            .get("__defining_loader")
-                            .and_then(|v| v.as_ref())
-                            .map(|r| Rc::as_ptr(r) as *const () as usize)
-                            .unwrap_or(0);
-                        let other_loader_id = other_class
-                            .borrow()
-                            .fields
-                            .get("__defining_loader")
-                            .and_then(|v| v.as_ref())
-                            .map(|r| Rc::as_ptr(r) as *const () as usize)
-                            .unwrap_or(0);
+                        let target_loader_id = defining_loader_id_from_class_obj(this);
+                        let other_loader_id = defining_loader_id_from_class_obj(other_class);
                         if target_loader_id != other_loader_id {
                             return Some(JValue::Int(0));
                         }
@@ -2063,7 +2060,8 @@ mod tests {
         );
 
         let arg = JValue::Ref(Some(JObject::new_string("broken.txt")));
-        let result = vm.native_classloader("getResourceAsStream", &[arg]);
+        let loader = JObject::new("java/lang/ClassLoader");
+        let result = vm.native_classloader(&loader, "getResourceAsStream", &[arg]);
 
         assert!(matches!(result, Some(JValue::Void)));
         let err = vm.pending_exception_err().expect("pending exception");

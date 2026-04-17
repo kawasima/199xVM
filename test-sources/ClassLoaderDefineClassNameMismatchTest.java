@@ -1,5 +1,5 @@
 public class ClassLoaderDefineClassNameMismatchTest {
-    private static final byte[] DEFINE_PROBE_CLASS = new byte[] {
+    private static final byte[] DEFINE_PROBE_CLASS_BYTES = new byte[] {
         (byte) 0xca, (byte) 0xfe, (byte) 0xba, (byte) 0xbe, 0x00, 0x00, 0x00, 0x34, 0x00, 0x0f,
         0x0a, 0x00, 0x02, 0x00, 0x03, 0x07, 0x00, 0x04, 0x0c, 0x00, 0x05, 0x00, 0x06, 0x01,
         0x00, 0x10, 0x6a, 0x61, 0x76, 0x61, 0x2f, 0x6c, 0x61, 0x6e, 0x67, 0x2f, 0x4f, 0x62,
@@ -30,7 +30,7 @@ public class ClassLoaderDefineClassNameMismatchTest {
     public static String run() {
         ExposedLoader loader = new ExposedLoader();
         try {
-            loader.defineNamed("wrong.Name", DEFINE_PROBE_CLASS);
+            loader.defineNamed("wrong.Name", DEFINE_PROBE_CLASS_BYTES);
             return "no-exception";
         } catch (NoClassDefFoundError e) {
             return "NoClassDefFoundError";

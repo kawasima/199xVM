@@ -1344,15 +1344,16 @@ impl Vm {
 
     fn new_class_object(&mut self, internal_name: &str, defining_loader: Option<JRef>) -> JRef {
         let obj = JObject::new("java/lang/Class");
-        let mut borrow = obj.borrow_mut();
-        borrow.fields.insert(
-            "__name_internal".to_owned(),
-            JValue::Ref(Some(self.intern_string(internal_name.to_owned()))),
-        );
-        borrow
-            .fields
-            .insert("__defining_loader".to_owned(), JValue::Ref(defining_loader));
-        drop(borrow);
+        {
+            let mut borrow = obj.borrow_mut();
+            borrow.fields.insert(
+                "__name_internal".to_owned(),
+                JValue::Ref(Some(self.intern_string(internal_name.to_owned()))),
+            );
+            borrow
+                .fields
+                .insert("__defining_loader".to_owned(), JValue::Ref(defining_loader));
+        }
         obj
     }
 
