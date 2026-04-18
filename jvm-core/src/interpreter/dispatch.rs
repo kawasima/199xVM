@@ -355,7 +355,9 @@ impl Vm {
                     }
                     let has_method = self.method_exists(&class_name, &method_name, &descriptor);
                     if !has_method {
-                        return Ok(None); // no-op
+                        return Err(format!(
+                            "NoSuchMethodError: {class_name}.{method_name}{descriptor}"
+                        ));
                     }
                 }
                 let push_return = !descriptor.ends_with(")V");

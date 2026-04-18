@@ -93,6 +93,7 @@ ENTRY_POINTS=(
   "$SHIM_SRC/java/io/CharConversionException.java"
   "$SHIM_SRC/java/io/EOFException.java"
   "$SHIM_SRC/java/io/ObjectStreamException.java"
+  "$SHIM_SRC/java/io/ObjectStreamField.java"
   "$SHIM_SRC/java/io/InvalidObjectException.java"
   "$SHIM_SRC/java/io/DataInput.java"
   "$SHIM_SRC/java/io/DataOutput.java"
