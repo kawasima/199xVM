@@ -1530,7 +1530,7 @@ impl Vm {
             class.constant_pool.utf8(m.name_index) == method_name
                 && class.constant_pool.utf8(m.descriptor_index) == descriptor
         })?;
-        let class_name_out = class.constant_pool.class_name(class.this_class).to_owned();
+        let class_name_out = owner.clone();
         let descriptor_out = class.constant_pool.utf8(class.methods[method_idx].descriptor_index).to_owned();
         let access_flags = class.methods[method_idx].access_flags;
         let (max_locals, has_code, code, exception_table) =
@@ -1591,7 +1591,7 @@ impl Vm {
             let n = class.constant_pool.utf8(m.name_index);
             let d = class.constant_pool.utf8(m.descriptor_index);
             if n == method_name && d == descriptor {
-                return Some(class.constant_pool.class_name(class.this_class).to_owned());
+                return Some(class_name.to_owned());
             }
         }
         // Resolve names while holding the borrow; allocation is skipped on the fast path.

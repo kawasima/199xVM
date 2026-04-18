@@ -22,8 +22,19 @@ public class ClassLoaderDefineClassLoaderIdentityTest {
     };
 
     private static final class ExposedLoader extends ClassLoader {
+        private Class<?> defined;
+
         Class<?> defineUnnamed(byte[] bytes) {
-            return defineClass(null, bytes, 0, bytes.length);
+            defined = defineClass(null, bytes, 0, bytes.length);
+            return defined;
+        }
+
+        @Override
+        protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+            if ("DefineProbe".equals(name) && defined != null) {
+                return defined;
+            }
+            return super.loadClass(name, resolve);
         }
     }
 
@@ -42,6 +53,13 @@ public class ClassLoaderDefineClassLoaderIdentityTest {
         }
         if (class1.getClassLoader() != loader1 || class2.getClassLoader() != loader2) {
             return "wrong-defining-loader";
+        }
+        try {
+            if (Class.forName("DefineProbe", false, loader1) != class1) {
+                return "forName-wrong-loader-class";
+            }
+        } catch (ClassNotFoundException e) {
+            return "forName-cnfe";
         }
         if (class1.isAssignableFrom(class2) || class2.isAssignableFrom(class1)) {
             return "assignable-across-loaders";

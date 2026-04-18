@@ -335,7 +335,7 @@ impl super::Vm {
 
     /// Handle ClassLoader instance methods that must dispatch by resolved owner, not runtime class.
     /// Returns `Some(value)` if the method was handled, `None` to fall through.
-    fn classloader_object_id(loader: &JRef) -> usize {
+    pub(in crate::interpreter) fn classloader_object_id(loader: &JRef) -> usize {
         Rc::as_ptr(loader) as usize
     }
 

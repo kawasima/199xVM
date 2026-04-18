@@ -382,6 +382,32 @@ impl super::Vm {
                 };
                 let initialize = _args.get(1).map(|v| v.as_int() != 0).unwrap_or(true);
                 let internal = Self::class_internal_name_from_runtime_name(&runtime_name);
+                let explicit_loader = _args.get(2).and_then(|v| v.as_ref()).cloned();
+                if let Some(loader_ref) = explicit_loader.as_ref().cloned() {
+                    let loader_id = super::Vm::classloader_object_id(&loader_ref);
+                    self.loader_objects
+                        .entry(loader_id)
+                        .or_insert_with(|| loader_ref.clone());
+                    if let Some(lookup_key) = self.loader_lookup_internal_name(loader_id, &internal) {
+                        self.ensure_class_ready(&lookup_key);
+                        match self.classes.get(&lookup_key) {
+                            Some(super::LazyClass::Ready(_)) => {
+                                if initialize && self.ensure_class_init(&lookup_key).is_err() {
+                                    return Some(JValue::Void);
+                                }
+                                return Some(JValue::Ref(Some(
+                                    self.class_object_with_lookup(&lookup_key, &internal),
+                                )));
+                            }
+                            Some(super::LazyClass::ParseError(msg)) => {
+                                let msg = msg.clone();
+                                self.throw_class_format_error(&msg);
+                                return Some(JValue::Void);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 self.ensure_class_ready(&internal);
                 match self.classes.get(&internal) {
                     Some(super::LazyClass::Ready(_)) => {}
@@ -391,6 +417,29 @@ impl super::Vm {
                         return Some(JValue::Void);
                     }
                     _ => {
+                        if let Some(loader_ref) = explicit_loader {
+                            let loader_class = loader_ref.borrow().class_name.clone();
+                            let name_ref = self.intern_string(runtime_name.clone());
+                            let class_obj = match self.invoke_virtual(
+                                loader_ref,
+                                &loader_class,
+                                "loadClass",
+                                "(Ljava/lang/String;Z)Ljava/lang/Class;",
+                                vec![JValue::Ref(Some(name_ref)), JValue::Int(0)],
+                            ) {
+                                Ok(JValue::Ref(Some(class_obj))) => class_obj,
+                                Ok(JValue::Void) => return Some(JValue::Void),
+                                _ => return Some(JValue::Ref(None)),
+                            };
+                            if initialize {
+                                if let Some(lookup_name) = self.class_internal_name_from_obj(&class_obj) {
+                                    if self.ensure_class_init(&lookup_name).is_err() {
+                                        return Some(JValue::Void);
+                                    }
+                                }
+                            }
+                            return Some(JValue::Ref(Some(class_obj)));
+                        }
                         return Some(JValue::Ref(None)); // not found — caller checks null
                     }
                 }
