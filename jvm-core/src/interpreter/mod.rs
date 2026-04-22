@@ -18,7 +18,7 @@ use crate::class_file::{
     self, Attribute, BootstrapMethod, ClassFile, ConstantPoolEntry, ExceptionTableEntry,
 };
 use crate::heap::{JavaStringValue, JObject, JRef, JValue};
-use class_identity::{ClassId, ClassIdentityRegistry, LoaderId};
+use class_identity::{ClassId, ClassIdentityRegistry, ClassRecord, DefineClassError, LoaderId};
 
 type OwnedJarArchive = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
 
@@ -523,6 +523,12 @@ pub struct Vm {
     pub(in crate::interpreter) classes: HashMap<String, LazyClass>,
     /// Loader-owned class identity records for defining and initiating loaders.
     class_identities: ClassIdentityRegistry,
+    /// Java ClassLoader object identity to VM LoaderId side table.
+    classloader_ids: HashMap<usize, LoaderId>,
+    /// VM LoaderId to Java ClassLoader object side table for Java-visible mirrors.
+    classloader_objects: HashMap<LoaderId, JRef>,
+    /// Next dynamically assigned LoaderId. Built-in ids occupy 0 and 1.
+    next_loader_id: u64,
     /// Interned strings cache keyed by UTF-16 content.
     pub(in crate::interpreter) string_pool: HashMap<JavaStringValue, JRef>,
     /// Static field storage keyed by class name → field name.
@@ -532,8 +538,8 @@ pub struct Vm {
     pub(in crate::interpreter) clinit_done: HashSet<String>,
     /// Classes whose `<clinit>` threw an exception (erroneous state per JVMS §5.5).
     pub(in crate::interpreter) clinit_failed: HashSet<String>,
-    /// Canonical Class objects keyed by internal class name or descriptor.
-    pub(in crate::interpreter) class_pool: HashMap<String, JRef>,
+    /// Canonical Class objects keyed by loader-scoped class identity.
+    pub(in crate::interpreter) class_pool: HashMap<ClassId, JRef>,
     /// Buffered `System.out.print` content until newline/println.
     pub(in crate::interpreter) stdout_buffer: String,
     /// Buffered `System.err.print` content until newline/println.
@@ -579,6 +585,9 @@ impl Vm {
         Vm {
             classes: HashMap::new(),
             class_identities: ClassIdentityRegistry::new(),
+            classloader_ids: HashMap::new(),
+            classloader_objects: HashMap::new(),
+            next_loader_id: 2,
             string_pool: HashMap::new(),
             static_fields: HashMap::new(),
             clinit_done: HashSet::new(),
@@ -991,6 +1000,15 @@ impl Vm {
         self.class_identities.register_defined_class(defining_loader, internal_name)
     }
 
+    pub(crate) fn try_register_defined_class(
+        &mut self,
+        defining_loader: LoaderId,
+        internal_name: impl Into<String>,
+    ) -> Result<ClassId, DefineClassError> {
+        self.class_identities
+            .try_register_defined_class(defining_loader, internal_name)
+    }
+
     pub(crate) fn record_initiating_loader(
         &mut self,
         initiating_loader: LoaderId,
@@ -998,6 +1016,38 @@ impl Vm {
         class_id: ClassId,
     ) {
         self.class_identities.record_initiating_loader(initiating_loader, lookup_name, class_id);
+    }
+
+    pub(crate) fn class_id_for_defined(
+        &self,
+        defining_loader: LoaderId,
+        internal_name: &str,
+    ) -> Option<ClassId> {
+        self.class_identities.class_id_for_defined(defining_loader, internal_name)
+    }
+
+    pub(crate) fn class_id_for_initiating(
+        &self,
+        initiating_loader: LoaderId,
+        lookup_name: &str,
+    ) -> Option<ClassId> {
+        self.class_identities.class_id_for_initiating(initiating_loader, lookup_name)
+    }
+
+    pub(crate) fn class_record(&self, class_id: ClassId) -> Option<&ClassRecord> {
+        self.class_identities.class_record(class_id)
+    }
+
+    pub(crate) fn loader_id_for_classloader(&mut self, classloader: &JRef) -> LoaderId {
+        let object_id = Self::object_id(classloader);
+        if let Some(loader_id) = self.classloader_ids.get(&object_id) {
+            return *loader_id;
+        }
+        let loader_id = LoaderId::new(self.next_loader_id);
+        self.next_loader_id += 1;
+        self.classloader_ids.insert(object_id, loader_id);
+        self.classloader_objects.insert(loader_id, Rc::clone(classloader));
+        loader_id
     }
 
     /// Register a pre-parsed class file (always stored as `Ready`).
@@ -1342,6 +1392,9 @@ impl Vm {
             return Rc::clone(cl);
         }
         let cl = JObject::new("java/lang/ClassLoader");
+        let object_id = Self::object_id(&cl);
+        self.classloader_ids.insert(object_id, LoaderId::SYSTEM);
+        self.classloader_objects.insert(LoaderId::SYSTEM, Rc::clone(&cl));
         self.system_classloader = Some(Rc::clone(&cl));
         cl
     }
@@ -1387,18 +1440,73 @@ impl Vm {
         *self.pending_exception_mut() = Some(exc);
     }
 
+    /// Set `pending_exception` to a `LinkageError` carrying a detail message.
+    pub(in crate::interpreter) fn throw_linkage_error(&mut self, detail: &str) {
+        let exc = self.new_vm_exception_message("java/lang/LinkageError", detail);
+        *self.pending_exception_mut() = Some(exc);
+    }
+
     fn class_object(&mut self, internal_name: impl Into<String>) -> JRef {
         let internal_name = internal_name.into();
-        if let Some(r) = self.class_pool.get(&internal_name) {
-            return Rc::clone(r);
+        let class_id = self.class_id_for_mirror_name(&internal_name);
+        self.class_object_for_id(class_id)
+            .expect("class identity was just registered")
+    }
+
+    fn class_id_for_mirror_name(&mut self, internal_name: &str) -> ClassId {
+        self.class_id_for_defined(LoaderId::SYSTEM, internal_name)
+            .or_else(|| self.class_id_for_defined(LoaderId::BOOTSTRAP, internal_name))
+            .unwrap_or_else(|| {
+                let defining_loader = if Self::is_vm_defined_mirror_name(internal_name) {
+                    LoaderId::BOOTSTRAP
+                } else {
+                    LoaderId::SYSTEM
+                };
+                self.register_defined_class(defining_loader, internal_name.to_owned())
+            })
+    }
+
+    fn is_vm_defined_mirror_name(internal_name: &str) -> bool {
+        internal_name.starts_with('[')
+            || matches!(
+                internal_name,
+                "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" | "void"
+            )
+    }
+
+    fn class_loader_ref_for_mirror(&mut self, defining_loader: LoaderId) -> Option<JRef> {
+        if defining_loader == LoaderId::BOOTSTRAP {
+            return None;
         }
+        if defining_loader == LoaderId::SYSTEM {
+            return Some(self.get_or_create_system_classloader());
+        }
+        self.classloader_objects.get(&defining_loader).cloned()
+    }
+
+    pub(crate) fn class_object_for_id(&mut self, class_id: ClassId) -> Option<JRef> {
+        if let Some(r) = self.class_pool.get(&class_id) {
+            return Some(Rc::clone(r));
+        }
+        let record = self.class_record(class_id)?.clone();
+        let loader_ref = self.class_loader_ref_for_mirror(record.defining_loader);
+        let internal_name = self.intern_string(record.internal_name);
+        let binary_name = self.intern_string(record.binary_name);
         let obj = JObject::new("java/lang/Class");
-        obj.borrow_mut().fields.insert(
-            "__name_internal".to_owned(),
-            JValue::Ref(Some(self.intern_string(internal_name.clone()))),
-        );
-        self.class_pool.insert(internal_name, Rc::clone(&obj));
-        obj
+        {
+            let mut obj_ref = obj.borrow_mut();
+            obj_ref
+                .fields
+                .insert("__name_internal".to_owned(), JValue::Ref(Some(internal_name)));
+            obj_ref
+                .fields
+                .insert("__name".to_owned(), JValue::Ref(Some(binary_name)));
+            obj_ref
+                .fields
+                .insert("__class_loader".to_owned(), JValue::Ref(loader_ref));
+        }
+        self.class_pool.insert(class_id, Rc::clone(&obj));
+        Some(obj)
     }
 
     /// Look up a loaded class by internal name (triggers lazy parse if needed).

@@ -135,6 +135,56 @@ final class LoaderPhase0Fixtures {
         return out;
     }
 
+    static byte[] bytesWithInvalidSuperClass(String encoded) {
+        byte[] out = bytes(encoded);
+        int p = 8;
+        int cpCount = u16(out, p);
+        p += 2;
+        for (int i = 1; i < cpCount; i++) {
+            int tag = out[p++] & 0xff;
+            switch (tag) {
+                case 1:
+                    p += 2 + u16(out, p);
+                    break;
+                case 3:
+                case 4:
+                case 9:
+                case 10:
+                case 11:
+                case 12:
+                case 17:
+                case 18:
+                    p += 4;
+                    break;
+                case 5:
+                case 6:
+                    p += 8;
+                    i++;
+                    break;
+                case 7:
+                case 8:
+                case 16:
+                case 19:
+                case 20:
+                    p += 2;
+                    break;
+                case 15:
+                    p += 3;
+                    break;
+                default:
+                    throw new IllegalArgumentException("unsupported cp tag");
+            }
+        }
+        p += 4;
+        out[p] = (byte) 0xff;
+        out[p + 1] = (byte) 0xff;
+        return out;
+    }
+
+    private static int u16(byte[] bytes, int offset) {
+        return ((bytes[offset] & 0xff) << 8) | (bytes[offset + 1] & 0xff);
+    }
+
     private static int decode(char ch) {
         if (ch >= 'A' && ch <= 'Z') {
             return ch - 'A';

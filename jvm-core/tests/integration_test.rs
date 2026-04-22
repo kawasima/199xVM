@@ -462,7 +462,6 @@ fn classloader_missing_class_throws_cnfe() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "Phase 0 regression target for loader-scoped defineClass identity"]
 fn define_class_duplicate_same_loader_throws_linkage_error() {
     let result = run_jar_test(
         "DefineClassDuplicateSameLoaderTest",
@@ -473,7 +472,6 @@ fn define_class_duplicate_same_loader_throws_linkage_error() {
 }
 
 #[test]
-#[ignore = "Phase 0 regression target for defineClass explicit-name validation"]
 fn define_class_explicit_name_mismatch_throws_no_class_def_found_error() {
     let result = run_jar_test(
         "DefineClassExplicitNameMismatchTest",
@@ -484,7 +482,16 @@ fn define_class_explicit_name_mismatch_throws_no_class_def_found_error() {
 }
 
 #[test]
-#[ignore = "Phase 0 regression target for loader-scoped Class mirrors"]
+fn malformed_define_class_does_not_register_duplicate_identity() {
+    let result = run_jar_test(
+        "DefineClassMalformedDoesNotRegisterTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ClassFormatError|ClassFormatError");
+}
+
+#[test]
 fn same_binary_name_under_distinct_loaders_has_distinct_class_mirrors() {
     let result = run_jar_test(
         "LoaderDistinctClassMirrorTest",
@@ -495,7 +502,6 @@ fn same_binary_name_under_distinct_loaders_has_distinct_class_mirrors() {
 }
 
 #[test]
-#[ignore = "Phase 0 regression target for loader-scoped Class reflection metadata"]
 fn defined_class_reflection_metadata_uses_class_identity() {
     let result = run_jar_test(
         "DefinedClassReflectionMetadataTest",
@@ -503,6 +509,16 @@ fn defined_class_reflection_metadata_uses_class_identity() {
         "()Ljava/lang/String;",
     );
     assert_eq!(result, "public|fields=2|methods=2|ctors=1|annotations=0");
+}
+
+#[test]
+fn class_get_classloader_reflects_defining_loader_surface() {
+    let result = run_jar_test(
+        "ClassGetClassLoaderTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "primitive:null|custom:same");
 }
 
 #[test]

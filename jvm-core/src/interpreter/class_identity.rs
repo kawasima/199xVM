@@ -7,6 +7,10 @@ pub(crate) struct LoaderId(u64);
 impl LoaderId {
     pub(crate) const BOOTSTRAP: Self = Self(0);
     pub(crate) const SYSTEM: Self = Self(1);
+
+    pub(crate) fn new(id: u64) -> Self {
+        Self(id)
+    }
 }
 
 /// VM-internal handle for a class identity record.
@@ -34,6 +38,11 @@ pub(crate) struct ClassIdentityRegistry {
     next_class_id: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DefineClassError {
+    Duplicate(ClassId),
+}
+
 impl ClassIdentityRegistry {
     pub(crate) fn new() -> Self {
         Self {
@@ -44,6 +53,12 @@ impl ClassIdentityRegistry {
         }
     }
 
+    /// Register class identity for normal load paths.
+    ///
+    /// This is intentionally idempotent: repeated loads of the same binary name
+    /// by the same defining loader must reuse the existing ClassId. Use
+    /// `try_register_defined_class` for `ClassLoader#defineClass`, where a
+    /// duplicate definition is a Java-visible LinkageError.
     pub(crate) fn register_defined_class(
         &mut self,
         defining_loader: LoaderId,
@@ -65,6 +80,29 @@ impl ClassIdentityRegistry {
         self.defined_classes.insert(key, class_id);
         self.class_records.insert(class_id, record);
         class_id
+    }
+
+    pub(crate) fn try_register_defined_class(
+        &mut self,
+        defining_loader: LoaderId,
+        internal_name: impl Into<String>,
+    ) -> Result<ClassId, DefineClassError> {
+        let internal_name = internal_name.into();
+        let key = (defining_loader, internal_name.clone());
+        if let Some(class_id) = self.defined_classes.get(&key) {
+            return Err(DefineClassError::Duplicate(*class_id));
+        }
+
+        let class_id = ClassId::new(self.next_class_id);
+        self.next_class_id += 1;
+        let record = ClassRecord {
+            binary_name: binary_name_from_internal_name(&internal_name),
+            internal_name,
+            defining_loader,
+        };
+        self.defined_classes.insert(key, class_id);
+        self.class_records.insert(class_id, record);
+        Ok(class_id)
     }
 
     pub(crate) fn record_initiating_loader(
@@ -156,5 +194,20 @@ mod tests {
                 .map(|record| record.defining_loader),
             Some(LoaderId::BOOTSTRAP),
         );
+    }
+
+    #[test]
+    fn duplicate_define_reports_existing_class_id() {
+        let mut registry = ClassIdentityRegistry::new();
+
+        let first = registry
+            .try_register_defined_class(LoaderId::BOOTSTRAP, "pkg/Thing")
+            .expect("first definition");
+        let duplicate = registry.try_register_defined_class(LoaderId::BOOTSTRAP, "pkg/Thing");
+
+        assert!(matches!(
+            duplicate,
+            Err(super::DefineClassError::Duplicate(existing)) if existing == first
+        ));
     }
 }

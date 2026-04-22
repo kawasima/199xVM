@@ -110,9 +110,7 @@ public final class Class<T> implements Type {
         return (getModifiers() & 0x1000) != 0;
     }
 
-    public ClassLoader getClassLoader() {
-        return null;
-    }
+    public native ClassLoader getClassLoader();
 
     public <A extends Annotation> A getAnnotation(Class<A> annotationClass) {
         Annotation[] annotations = getDeclaredAnnotations();

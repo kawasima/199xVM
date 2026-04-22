@@ -5,6 +5,7 @@ use std::rc::Rc;
 use crate::class_file::Attribute;
 use crate::heap::{JavaStringValue, JObject, JRef, JValue, NativePayload};
 
+use super::class_identity::DefineClassError;
 use super::LazyClass;
 use super::descriptors::*;
 use super::native_static::{regex_encode_java_string, regex_full_match_source};
@@ -335,7 +336,12 @@ impl super::Vm {
 
     /// Handle ClassLoader instance methods that must dispatch by resolved owner, not runtime class.
     /// Returns `Some(value)` if the method was handled, `None` to fall through.
-    fn native_classloader(&mut self, method_name: &str, args: &[JValue]) -> Option<JValue> {
+    fn native_classloader(
+        &mut self,
+        this: &JRef,
+        method_name: &str,
+        args: &[JValue],
+    ) -> Option<JValue> {
         match method_name {
             "loadClass" | "findClass" => {
                 // A null or missing name argument must surface as NullPointerException.
@@ -365,7 +371,29 @@ impl super::Vm {
                         return Some(JValue::Void);
                     }
                 }
-                Some(JValue::Ref(Some(self.class_object(internal))))
+                let initiating_loader = self.loader_id_for_classloader(this);
+                let class_id = self
+                    .class_id_for_defined(initiating_loader, &internal)
+                    .or_else(|| {
+                        self.class_id_for_defined(
+                            super::class_identity::LoaderId::SYSTEM,
+                            &internal,
+                        )
+                    })
+                    .or_else(|| {
+                        self.class_id_for_defined(
+                            super::class_identity::LoaderId::BOOTSTRAP,
+                            &internal,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        self.register_defined_class(
+                            super::class_identity::LoaderId::SYSTEM,
+                            internal.clone(),
+                        )
+                    });
+                self.record_initiating_loader(initiating_loader, internal.clone(), class_id);
+                Some(JValue::Ref(self.class_object_for_id(class_id)))
             }
             "findLoadedClass" => {
                 let name_str = args
@@ -374,13 +402,18 @@ impl super::Vm {
                     .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()))
                     .unwrap_or_default();
                 let internal = Self::class_internal_name_from_runtime_name(&name_str);
-                if matches!(self.classes.get(&internal), Some(LazyClass::Ready(_))) {
-                    Some(JValue::Ref(Some(self.class_object(internal))))
+                let initiating_loader = self.loader_id_for_classloader(this);
+                if let Some(class_id) = self.class_id_for_initiating(initiating_loader, &internal) {
+                    Some(JValue::Ref(self.class_object_for_id(class_id)))
                 } else {
                     Some(JValue::Ref(None))
                 }
             }
             "defineClass" => {
+                let explicit_name = args
+                    .first()
+                    .and_then(|v| v.as_ref())
+                    .and_then(|r| r.borrow().as_java_string().map(|s| s.to_owned()));
                 // Extract byte[] argument (2nd arg), off (3rd), len (4th).
                 // Supports both 4-arg and 5-arg (with ProtectionDomain) variants.
                 let byte_array = args.get(1)
@@ -410,15 +443,36 @@ impl super::Vm {
                     let len = len_raw as usize;
                     let class_bytes = bytes[off..off + len].to_vec();
                     if let Some(class_name) = crate::class_file::parse_class_name(&class_bytes) {
-                        self.load_lazy(class_name.clone(), class_bytes);
-                        self.ensure_class_ready(&class_name);
-                        // Check if parsing actually succeeded
-                        if let Some(super::LazyClass::ParseError(msg)) = self.classes.get(&class_name) {
-                            let msg = msg.clone();
-                            self.throw_class_format_error(&msg);
-                            return Some(JValue::Void);
+                        let defining_loader = self.loader_id_for_classloader(this);
+                        if let Some(name) = explicit_name {
+                            let explicit_internal = Self::class_internal_name_from_runtime_name(&name);
+                            if explicit_internal != class_name {
+                                self.throw_no_class_def_found(&class_name);
+                                return Some(JValue::Void);
+                            }
                         }
-                        Some(JValue::Ref(Some(self.class_object(class_name))))
+                        let class_file = match crate::class_file::parse(&class_bytes) {
+                            Ok(class_file) => class_file,
+                            Err(err) => {
+                                self.throw_class_format_error(&err);
+                                return Some(JValue::Void);
+                            }
+                        };
+                        let class_id = match self.try_register_defined_class(
+                            defining_loader,
+                            class_name.clone(),
+                        ) {
+                            Ok(class_id) => class_id,
+                            Err(DefineClassError::Duplicate(_)) => {
+                                self.throw_linkage_error(&format!("duplicate class definition: {class_name}"));
+                                return Some(JValue::Void);
+                            }
+                        };
+                        self.record_initiating_loader(defining_loader, class_name.clone(), class_id);
+                        self.classes
+                            .entry(class_name.clone())
+                            .or_insert(LazyClass::Ready(class_file));
+                        Some(JValue::Ref(self.class_object_for_id(class_id)))
                     } else {
                         self.throw_class_format_error("defineClass: cannot parse class");
                         Some(JValue::Void)
@@ -636,7 +690,7 @@ impl super::Vm {
         if matches!(method_name, "loadClass" | "findClass" | "findLoadedClass" | "defineClass" | "getResource" | "getResourceAsStream" | "findResource" | "findResources")
             && self.is_classloader_subtype(_class_name)
         {
-            if let Some(v) = self.native_classloader(method_name, _args) {
+            if let Some(v) = self.native_classloader(this, method_name, _args) {
                 return Some(v);
             }
         }
@@ -914,6 +968,14 @@ impl super::Vm {
                     .class_internal_name_from_obj(this)
                     .unwrap_or_else(|| "java/lang/Object".to_owned());
                 Some(JValue::Ref(Some(self.intern_string(Self::class_display_name(&internal)))))
+            }
+            ("java/lang/Class", "getClassLoader") => {
+                let loader = this
+                    .borrow()
+                    .fields
+                    .get("__class_loader")
+                    .and_then(|v| v.as_ref().cloned());
+                Some(JValue::Ref(loader))
             }
             ("java/lang/Class", "getModifiers") => {
                 let target = self
@@ -2000,7 +2062,8 @@ mod tests {
         );
 
         let arg = JValue::Ref(Some(JObject::new_string("broken.txt")));
-        let result = vm.native_classloader("getResourceAsStream", &[arg]);
+        let classloader = JObject::new("java/lang/ClassLoader");
+        let result = vm.native_classloader(&classloader, "getResourceAsStream", &[arg]);
 
         assert!(matches!(result, Some(JValue::Void)));
         let err = vm.pending_exception_err().expect("pending exception");
