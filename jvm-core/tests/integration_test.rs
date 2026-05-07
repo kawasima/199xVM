@@ -508,7 +508,10 @@ fn defined_class_reflection_metadata_uses_class_identity() {
         "run",
         "()Ljava/lang/String;",
     );
-    assert_eq!(result, "public|fields=2|methods=2|ctors=1|annotations=0");
+    assert_eq!(
+        result,
+        "public|fields=2|methods=2|ctors=1|annotations=0|declaring=same"
+    );
 }
 
 #[test]

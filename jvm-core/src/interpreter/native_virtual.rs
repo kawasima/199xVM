@@ -1181,7 +1181,12 @@ impl super::Vm {
                     }
                 }
                 for (name, desc, flags) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_field(&target, &name, &desc, flags))));
+                    let field = self.build_reflect_field(&target, &name, &desc, flags);
+                    field
+                        .borrow_mut()
+                        .fields
+                        .insert("clazz".to_owned(), JValue::Ref(Some(Rc::clone(this))));
+                    out.push(JValue::Ref(Some(field)));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
                     "[Ljava/lang/reflect/Field;",
@@ -1219,9 +1224,14 @@ impl super::Vm {
                     }
                 }
                 for (name, desc, flags, ex) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_method(
+                    let method = self.build_reflect_method(
                         &target, &name, &desc, flags, ex,
-                    ))));
+                    );
+                    method
+                        .borrow_mut()
+                        .fields
+                        .insert("clazz".to_owned(), JValue::Ref(Some(Rc::clone(this))));
+                    out.push(JValue::Ref(Some(method)));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
                     "[Ljava/lang/reflect/Method;",
@@ -1260,9 +1270,14 @@ impl super::Vm {
                     }
                 }
                 for (desc, flags, ex) in members {
-                    out.push(JValue::Ref(Some(self.build_reflect_constructor(
+                    let constructor = self.build_reflect_constructor(
                         &target, &desc, flags, ex,
-                    ))));
+                    );
+                    constructor
+                        .borrow_mut()
+                        .fields
+                        .insert("clazz".to_owned(), JValue::Ref(Some(Rc::clone(this))));
+                    out.push(JValue::Ref(Some(constructor)));
                 }
                 Some(JValue::Ref(Some(JObject::new_array(
                     "[Ljava/lang/reflect/Constructor;",
