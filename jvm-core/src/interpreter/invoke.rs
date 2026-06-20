@@ -86,7 +86,7 @@ impl Vm {
         descriptor: &str,
         args: Vec<JValue>,
     ) -> Result<JValue, String> {
-        match self.build_special_frame_inner(this.clone(), class_name, method_name, descriptor, args.clone(), true)? {
+        match self.build_special_frame_inner(this.clone(), None, class_name, method_name, descriptor, args.clone(), true)? {
             Some(fi) => {
                 let frame_owner = fi.frame_owner.clone();
                 let mut call_stack = vec![fi];

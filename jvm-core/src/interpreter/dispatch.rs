@@ -64,25 +64,46 @@ impl Vm {
 
         // ---- SLOW PATH: first invocation — resolve and populate cache ----
         let (class_name, method_name, descriptor) = resolve_methodref_ref(cp, idx);
-        let resolved_class_id = caller_class_id
-            .and_then(|caller| self.resolve_methodref_owner_class(caller, cp, idx).ok());
-        let resolved_class_name = resolved_class_id
-            .and_then(|class_id| self.class_record(class_id).map(|record| record.internal_name.clone()))
+        let resolved_target = match caller_class_id {
+            Some(caller) => Some(self.resolve_method_reference(caller, cp, idx)?),
+            None => None,
+        };
+        let resolved_class_id = resolved_target.as_ref().map(|target| target.owner_class_id);
+        let resolved_class_name = resolved_target
+            .as_ref()
+            .map(|target| target.owner_class.clone())
             .unwrap_or_else(|| class_name.to_owned());
+        let resolved_method_name = resolved_target
+            .as_ref()
+            .map(|target| target.name.as_str())
+            .unwrap_or(method_name);
+        let resolved_descriptor = resolved_target
+            .as_ref()
+            .map(|target| target.descriptor.as_str())
+            .unwrap_or(descriptor);
+        if resolved_target
+            .as_ref()
+            .map(|target| target.access_flags & 0x0008 == 0)
+            .unwrap_or(false)
+        {
+            let detail = format!("{resolved_class_name}.{resolved_method_name}{resolved_descriptor}");
+            self.throw_incompatible_class_change_error(&detail);
+            return Err(format!("java/lang/IncompatibleClassChangeError: {detail}"));
+        }
         self.ensure_class_init(&resolved_class_name)?;
-        let n_args = count_args(descriptor);
+        let n_args = count_args(resolved_descriptor);
         let args = pop_args(frame, n_args);
 
         // Normalize descriptor and args (varargs synthesis) before branching.
         let orig_args = args.clone();
         let (desc, args) = if resolved_class_id.is_some() {
-            (descriptor.to_owned(), args)
+            (resolved_descriptor.to_owned(), args)
         } else {
-            match self.prepare_static_args(&resolved_class_name, method_name, descriptor, args) {
+            match self.prepare_static_args(&resolved_class_name, resolved_method_name, resolved_descriptor, args) {
                 Some(pair) => pair,
                 None => {
                     // Method flags not found — fall back to invoke_static with original args.
-                    let result = self.invoke_static(&resolved_class_name, method_name, descriptor, orig_args)?;
+                    let result = self.invoke_static(&resolved_class_name, resolved_method_name, resolved_descriptor, orig_args)?;
                     if !matches!(result, JValue::Void) { frame.stack.push(result); }
                     return Ok(None);
                 }
@@ -92,40 +113,26 @@ impl Vm {
         let push_return = !desc.ends_with(")V");
         // Resolve method exec info once (used for both frame building and cache population).
         let exec_info = resolved_class_id
-            .and_then(|class_id| self.resolve_method_exec_info_for_class_id(class_id, method_name, &desc))
-            .or_else(|| self.resolve_method_exec_info(&resolved_class_name, method_name, &desc));
+            .and_then(|class_id| self.resolve_method_exec_info_for_class_id(class_id, resolved_method_name, &desc))
+            .or_else(|| self.resolve_method_exec_info(&resolved_class_name, resolved_method_name, &desc));
         match exec_info {
             Some(info) if info.has_code => {
                 // Bytecode method — build frame and populate cache.
-                let fi = self.build_static_frame_from_exec_info(&info, method_name, &desc, args, push_return);
-                self.populate_static_method_cache(cache, idx, method_name, &desc, &info);
+                let fi = self.build_static_frame_from_exec_info(&info, resolved_method_name, &desc, args, push_return);
+                self.populate_static_method_cache(cache, idx, resolved_method_name, &desc, &info);
                 *self.pending_frame_mut() = Some(fi);
                 Ok(None)
             }
             _ => {
                 // Native or unresolved — cache and fall back to invoke_static.
-                self.populate_static_native_cache(cache, idx, &resolved_class_name, method_name, &desc);
-                let result = self.invoke_static(&resolved_class_name, method_name, &desc, args)?;
+                self.populate_static_native_cache(cache, idx, resolved_class_id, &resolved_class_name, resolved_method_name, &desc);
+                let result = self.invoke_static(&resolved_class_name, resolved_method_name, &desc, args)?;
                 if !matches!(result, JValue::Void) {
                     frame.stack.push(result);
                 }
                 Ok(None)
             }
         }
-    }
-
-    fn resolve_methodref_owner_class(
-        &mut self,
-        caller_class_id: ClassId,
-        cp: &[ConstantPoolEntry],
-        idx: u16,
-    ) -> Result<ClassId, String> {
-        let class_index = match cp.get(idx as usize) {
-            Some(ConstantPoolEntry::Methodref { class_index, .. })
-            | Some(ConstantPoolEntry::InterfaceMethodref { class_index, .. }) => *class_index,
-            _ => return Err(format!("java/lang/NoClassDefFoundError: invalid method reference #{idx}")),
-        };
-        self.resolve_symbolic_class(caller_class_id, cp, class_index)
     }
 
     /// Build a FrameInfo from a pre-resolved MethodExecInfo (avoids double resolution).
@@ -244,13 +251,14 @@ impl Vm {
         &self,
         cache: &CpCache,
         idx: u16,
+        class_id: Option<ClassId>,
         class_name: &str,
         method_name: &str,
         descriptor: &str,
     ) {
         let (param_tokens, _) = Self::parse_method_descriptor_tokens(descriptor);
         let entry = ResolvedMethodEntry {
-            owner_class_id: None,
+            owner_class_id: class_id,
             owner_class: class_name.to_owned(),
             code: Rc::new(Vec::new()),
             exception_table: Rc::new(Vec::new()),
@@ -370,33 +378,63 @@ impl Vm {
         &mut self,
         cp: &[ConstantPoolEntry],
         idx: u16,
+        caller_class_id: Option<ClassId>,
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
         let (class_name, method_name, descriptor) = resolve_methodref_ref(cp, idx);
-        let n_args = count_args(descriptor);
+        let resolved_target = match caller_class_id {
+            Some(caller) => Some(self.resolve_method_reference(caller, cp, idx)?),
+            None => None,
+        };
+        let resolved_class_name = resolved_target
+            .as_ref()
+            .map(|target| target.owner_class.as_str())
+            .unwrap_or(class_name);
+        let resolved_method_name = resolved_target
+            .as_ref()
+            .map(|target| target.name.as_str())
+            .unwrap_or(method_name);
+        let resolved_descriptor = resolved_target
+            .as_ref()
+            .map(|target| target.descriptor.as_str())
+            .unwrap_or(descriptor);
+        let n_args = count_args(resolved_descriptor);
         let args = pop_args(frame, n_args);
         let this_val = frame.stack.pop().unwrap();
         match this_val {
             JValue::Ref(Some(r)) => {
                 if method_name == "<init>" {
-                    if class_name == "java/lang/String" {
-                        let s = self.string_from_init_args(&descriptor, &args, &r);
+                    if resolved_class_name == "java/lang/String" {
+                        let s = self.string_from_init_args(resolved_descriptor, &args, &r);
                         r.borrow_mut().native = NativePayload::JavaString(s);
                         return Ok(None); // void
                     }
-                    let has_method = self.method_exists(&class_name, &method_name, &descriptor);
-                    if !has_method {
-                        return Ok(None); // no-op
+                    if resolved_target.is_none() && !self.method_exists(class_name, method_name, descriptor) {
+                        return Ok(None); // legacy no-op for non-loader-aware helper paths
                     }
                 }
-                let push_return = !descriptor.ends_with(")V");
-                match self.build_special_frame_inner(r.clone(), &class_name, &method_name, &descriptor, args.clone(), push_return)? {
+                let push_return = !resolved_descriptor.ends_with(")V");
+                match self.build_special_frame_inner(
+                    r.clone(),
+                    resolved_target.as_ref().map(|target| target.owner_class_id),
+                    resolved_class_name,
+                    resolved_method_name,
+                    resolved_descriptor,
+                    args.clone(),
+                    push_return,
+                )? {
                     Some(fi) => {
                         *self.pending_frame_mut() = Some(fi);
                         Ok(None)
                     }
                     None => {
-                        let result = self.invoke_special(r, &class_name, &method_name, &descriptor, args)?;
+                        let result = self.invoke_special(
+                            r,
+                            resolved_class_name,
+                            resolved_method_name,
+                            resolved_descriptor,
+                            args,
+                        )?;
                         if !matches!(result, JValue::Void) {
                             frame.stack.push(result);
                         }
@@ -415,24 +453,55 @@ impl Vm {
         &mut self,
         cp: &[ConstantPoolEntry],
         idx: u16,
+        caller_class_id: Option<ClassId>,
         frame: &mut Frame,
     ) -> Result<Option<JValue>, String> {
         let (class_name, method_name, descriptor) = resolve_methodref_ref(cp, idx);
-        let n_args = count_args(descriptor);
+        let resolved_target = match caller_class_id {
+            Some(caller) => Some(self.resolve_method_reference(caller, cp, idx)?),
+            None => None,
+        };
+        let resolved_class_name = resolved_target
+            .as_ref()
+            .map(|target| target.owner_class.as_str())
+            .unwrap_or(class_name);
+        let resolved_method_name = resolved_target
+            .as_ref()
+            .map(|target| target.name.as_str())
+            .unwrap_or(method_name);
+        let resolved_descriptor = resolved_target
+            .as_ref()
+            .map(|target| target.descriptor.as_str())
+            .unwrap_or(descriptor);
+        let n_args = count_args(resolved_descriptor);
         let args = pop_args(frame, n_args);
 
-        let is_static = self.find_method_flags(class_name, method_name, descriptor)
-            .map(|flags| flags & 0x0008 != 0)
+        let is_static = resolved_target
+            .as_ref()
+            .map(|target| target.access_flags & 0x0008 != 0)
+            .or_else(|| self.find_method_flags(resolved_class_name, resolved_method_name, resolved_descriptor)
+                .map(|flags| flags & 0x0008 != 0))
             .unwrap_or(false);
         if is_static {
-            let push_return = !descriptor.ends_with(")V");
-            match self.build_static_frame(class_name, method_name, descriptor, args.clone(), push_return)? {
+            let push_return = !resolved_descriptor.ends_with(")V");
+            match self.build_static_frame(
+                resolved_class_name,
+                resolved_method_name,
+                resolved_descriptor,
+                args.clone(),
+                push_return,
+            )? {
                 Some(fi) => {
                     *self.pending_frame_mut() = Some(fi);
                     return Ok(None);
                 }
                 None => {
-                    let result = self.invoke_static(class_name, method_name, descriptor, args)?;
+                    let result = self.invoke_static(
+                        resolved_class_name,
+                        resolved_method_name,
+                        resolved_descriptor,
+                        args,
+                    )?;
                     if !matches!(result, JValue::Void) {
                         frame.stack.push(result);
                     }
@@ -444,8 +513,16 @@ impl Vm {
         let this_val = frame.stack.pop().unwrap();
         match this_val {
             JValue::Ref(Some(r)) => {
-                let push_return = !descriptor.ends_with(")V");
-                self.dispatch_virtual_on_ref(r, class_name, method_name, descriptor, args, push_return, frame)
+                let push_return = !resolved_descriptor.ends_with(")V");
+                self.dispatch_virtual_on_ref(
+                    r,
+                    resolved_class_name,
+                    resolved_method_name,
+                    resolved_descriptor,
+                    args,
+                    push_return,
+                    frame,
+                )
             }
             JValue::Ref(None) => Err(format!("NullPointerException: invokeinterface {class_name}.{method_name}{descriptor}")),
             other => Err(format!(

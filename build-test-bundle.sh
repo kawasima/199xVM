@@ -23,7 +23,7 @@ COMPACT_SOURCES=()
 for f in "$SRC_DIR"/*.java; do
   # Strip package, import, blank, and single-line comment lines, then check for class keyword
   if sed -E '/^\s*$/d; /^\s*\/\//d; /^\s*package\s/d; /^\s*import\s/d; /^\s*\/?\*/d' "$f" \
-     | grep -qE '^\s*(public\s+|abstract\s+|final\s+)*(class|interface|enum|record|@interface)\s'; then
+     | grep -E '^\s*(public\s+|abstract\s+|final\s+)*(class|interface|enum|record|@interface)\s' >/dev/null; then
     NORMAL_SOURCES+=("$f")
   else
     COMPACT_SOURCES+=("$f")

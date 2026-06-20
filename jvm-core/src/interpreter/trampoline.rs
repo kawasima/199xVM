@@ -712,13 +712,25 @@ impl Vm {
     pub(crate) fn build_special_frame_inner(
         &mut self,
         this: JRef,
+        resolved_owner_class_id: Option<ClassId>,
         class_name: &str,
         method_name: &str,
         descriptor: &str,
         args: Vec<JValue>,
         push_return: bool,
     ) -> Result<Option<FrameInfo>, String> {
-        if let Some(class_id) = self.custom_loader_class_id_for_object(&this) {
+        if let Some(class_id) = resolved_owner_class_id {
+            if let Some(frame) = self.try_custom_loader_instance_frame(
+                class_id,
+                Rc::clone(&this),
+                method_name,
+                descriptor,
+                &args,
+                push_return,
+            )? {
+                return Ok(Some(frame));
+            }
+        } else if let Some(class_id) = self.custom_loader_class_id_for_object(&this) {
             if let Some(frame) = self.try_custom_loader_instance_frame(
                 class_id,
                 Rc::clone(&this),

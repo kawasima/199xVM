@@ -44,14 +44,19 @@ pub(crate) struct ResolvedMethodEntry {
     pub method_name: String,
 }
 
-/// A resolved field entry for getstatic/putstatic fast path.
+/// A resolved field entry for field access bytecodes.
 pub(crate) struct ResolvedFieldEntry {
-    /// The class that owns the field (after hierarchy walk).
+    /// Loader-scoped class identity that owns the resolved field.
+    pub owner_class_id: ClassId,
+    /// Legacy class name that owns the field after hierarchy traversal.
+    /// Static field storage remains name-keyed until Phase 5.
     pub owner_class: String,
     /// Field name.
     pub field_name: String,
     /// Field descriptor (for default value computation).
     pub field_descriptor: String,
+    /// Field access flags used to validate static/instance opcode compatibility.
+    pub access_flags: u16,
 }
 
 /// A cpCache entry: resolved method or field.

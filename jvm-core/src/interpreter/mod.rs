@@ -23,6 +23,12 @@ use class_identity::{ClassId, ClassIdentityRegistry, ClassRecord, DefineClassErr
 
 type OwnedJarArchive = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
 
+const ACC_PUBLIC: u16 = 0x0001;
+const ACC_PRIVATE: u16 = 0x0002;
+const ACC_STATIC: u16 = 0x0008;
+const ACC_INTERFACE: u16 = 0x0200;
+const ACC_ABSTRACT: u16 = 0x0400;
+
 /// All execution-time data extracted from a resolved method in a single pass.
 /// Returned by [`Vm::resolve_method_exec_info`] to avoid repeated `find_method`
 /// calls and to give each field a self-documenting name.
@@ -48,6 +54,24 @@ pub(super) struct MethodExecInfo {
     /// Bootstrap methods from the `BootstrapMethods` attribute.
     pub bootstrap_methods: Vec<BootstrapMethod>,
     /// `access_flags` from the method_info entry.
+    pub access_flags: u16,
+}
+
+/// Loader-aware field resolution result for bytecode Fieldref entries.
+pub(super) struct ResolvedFieldTarget {
+    pub owner_class_id: ClassId,
+    pub owner_class: String,
+    pub name: String,
+    pub descriptor: String,
+    pub access_flags: u16,
+}
+
+/// Loader-aware method resolution result for bytecode Methodref entries.
+pub(super) struct ResolvedMethodTarget {
+    pub owner_class_id: ClassId,
+    pub owner_class: String,
+    pub name: String,
+    pub descriptor: String,
     pub access_flags: u16,
 }
 
@@ -574,9 +598,6 @@ pub struct Vm {
     pub(in crate::interpreter) scheduler: Scheduler,
     /// Object monitors keyed by object identity (Rc pointer address).
     monitors: HashMap<usize, Monitor>,
-    /// Legacy method resolution cache: (class, method_name, descriptor) → owner class name.
-    /// Loader-unsafe until the cpCache/member-resolution migration carries ClassId.
-    method_owner_cache: HashMap<(String, String, String), Option<String>>,
     /// Bounded LRU cache for compiled host-side regular expressions.
     regex_cache: RegexCache,
     /// Materialized non-class resources from loaded JARs, keyed by path.
@@ -616,7 +637,6 @@ impl Vm {
             system_classloader: None,
             scheduler: Scheduler::new(),
             monitors: HashMap::new(),
-            method_owner_cache: HashMap::new(),
             regex_cache: RegexCache::new(64),
             resources: HashMap::new(),
             pending_resources: HashMap::new(),
@@ -1514,6 +1534,21 @@ impl Vm {
         *self.pending_exception_mut() = Some(exc);
     }
 
+    pub(in crate::interpreter) fn throw_no_such_field_error(&mut self, detail: &str) {
+        let exc = self.new_vm_exception_message("java/lang/NoSuchFieldError", detail);
+        *self.pending_exception_mut() = Some(exc);
+    }
+
+    pub(in crate::interpreter) fn throw_no_such_method_error(&mut self, detail: &str) {
+        let exc = self.new_vm_exception_message("java/lang/NoSuchMethodError", detail);
+        *self.pending_exception_mut() = Some(exc);
+    }
+
+    pub(in crate::interpreter) fn throw_incompatible_class_change_error(&mut self, detail: &str) {
+        let exc = self.new_vm_exception_message("java/lang/IncompatibleClassChangeError", detail);
+        *self.pending_exception_mut() = Some(exc);
+    }
+
     /// Set `pending_exception` to a new `ClassNotFoundException` for `name`.
     /// `name` should be the runtime (dot-separated) class name.
     pub(in crate::interpreter) fn throw_class_not_found(&mut self, name: &str) {
@@ -1815,6 +1850,379 @@ impl Vm {
         self.resolve_class(name)
     }
 
+    fn class_is_interface_by_id(&mut self, class_id: ClassId) -> bool {
+        self.ensure_class_ready_by_id(class_id);
+        self.get_class_by_id(class_id)
+            .map(|class| class.access_flags & ACC_INTERFACE != 0)
+            .unwrap_or(false)
+    }
+
+    fn member_name_and_descriptor(
+        cp: &[ConstantPoolEntry],
+        name_and_type_index: u16,
+    ) -> Option<(String, String)> {
+        let ConstantPoolEntry::NameAndType { name_index, descriptor_index } =
+            cp.get(name_and_type_index as usize)?
+        else {
+            return None;
+        };
+        let name = match cp.get(*name_index as usize)? {
+            ConstantPoolEntry::Utf8(name) => name.clone(),
+            _ => return None,
+        };
+        let descriptor = match cp.get(*descriptor_index as usize)? {
+            ConstantPoolEntry::Utf8(descriptor) => descriptor.clone(),
+            _ => return None,
+        };
+        Some((name, descriptor))
+    }
+
+    pub(super) fn resolve_field_reference(
+        &mut self,
+        caller_class_id: ClassId,
+        cp: &[ConstantPoolEntry],
+        idx: u16,
+    ) -> Result<ResolvedFieldTarget, String> {
+        let (class_index, name_and_type_index) = match cp.get(idx as usize) {
+            Some(ConstantPoolEntry::Fieldref { class_index, name_and_type_index }) => {
+                (*class_index, *name_and_type_index)
+            }
+            _ => return Err(format!("java/lang/NoSuchFieldError: invalid field reference #{idx}")),
+        };
+        let (name, descriptor) = Self::member_name_and_descriptor(cp, name_and_type_index)
+            .ok_or_else(|| format!("java/lang/NoSuchFieldError: invalid field reference #{idx}"))?;
+        let referenced_class_id = self.resolve_symbolic_class(caller_class_id, cp, class_index)?;
+        self.find_field_owner_by_class_id(referenced_class_id, &name, &descriptor)
+            .ok_or_else(|| {
+                let referenced_class = self
+                    .class_record(referenced_class_id)
+                    .map(|record| record.internal_name.clone())
+                    .unwrap_or_else(|| "<invalid>".to_owned());
+                let detail = format!("{referenced_class}.{name}:{descriptor}");
+                self.throw_no_such_field_error(&detail);
+                format!("java/lang/NoSuchFieldError: {detail}")
+            })
+    }
+
+    pub(super) fn resolve_method_reference(
+        &mut self,
+        caller_class_id: ClassId,
+        cp: &[ConstantPoolEntry],
+        idx: u16,
+    ) -> Result<ResolvedMethodTarget, String> {
+        let (class_index, name_and_type_index, is_interface_ref) = match cp.get(idx as usize) {
+            Some(ConstantPoolEntry::Methodref { class_index, name_and_type_index }) => {
+                (*class_index, *name_and_type_index, false)
+            }
+            Some(ConstantPoolEntry::InterfaceMethodref { class_index, name_and_type_index }) => {
+                (*class_index, *name_and_type_index, true)
+            }
+            _ => return Err(format!("java/lang/NoSuchMethodError: invalid method reference #{idx}")),
+        };
+        let (name, descriptor) = Self::member_name_and_descriptor(cp, name_and_type_index)
+            .ok_or_else(|| format!("java/lang/NoSuchMethodError: invalid method reference #{idx}"))?;
+        let referenced_class_id = self.resolve_symbolic_class(caller_class_id, cp, class_index)?;
+        let is_interface = self.class_is_interface_by_id(referenced_class_id);
+        if is_interface_ref != is_interface {
+            let referenced_class = self
+                .class_record(referenced_class_id)
+                .map(|record| record.internal_name.clone())
+                .unwrap_or_else(|| "<invalid>".to_owned());
+            let detail = if is_interface_ref {
+                format!("InterfaceMethodref resolved to non-interface {referenced_class}")
+            } else {
+                format!("Methodref resolved to interface {referenced_class}")
+            };
+            self.throw_incompatible_class_change_error(&detail);
+            return Err(format!("java/lang/IncompatibleClassChangeError: {detail}"));
+        }
+
+        let target = if is_interface_ref {
+            self.find_interface_method_owner_by_class_id(referenced_class_id, &name, &descriptor)
+        } else {
+            self.find_method_owner_by_class_id(referenced_class_id, &name, &descriptor)
+        };
+        target.ok_or_else(|| {
+            let referenced_class = self
+                .class_record(referenced_class_id)
+                .map(|record| record.internal_name.clone())
+                .unwrap_or_else(|| "<invalid>".to_owned());
+            let detail = format!("{referenced_class}.{name}{descriptor}");
+            self.throw_no_such_method_error(&detail);
+            format!("java/lang/NoSuchMethodError: {detail}")
+        })
+    }
+
+    pub(super) fn find_field_owner_by_class_id(
+        &mut self,
+        class_id: ClassId,
+        field_name: &str,
+        descriptor: &str,
+    ) -> Option<ResolvedFieldTarget> {
+        self.ensure_class_ready_by_id(class_id);
+        let class = self.get_class_by_id(class_id)?;
+        for field in &class.fields {
+            let name = class.constant_pool.utf8(field.name_index);
+            let desc = class.constant_pool.utf8(field.descriptor_index);
+            if name == field_name && desc == descriptor {
+                let owner_class = class.constant_pool.class_name(class.this_class).to_owned();
+                return Some(ResolvedFieldTarget {
+                    owner_class_id: class_id,
+                    owner_class,
+                    name: name.to_owned(),
+                    descriptor: desc.to_owned(),
+                    access_flags: field.access_flags,
+                });
+            }
+        }
+        let cp = Rc::clone(&class.constant_pool.entries);
+        let super_class = class.super_class;
+        let interfaces = class.interfaces.clone();
+
+        for interface_index in interfaces {
+            if let Ok(interface_id) = self.resolve_symbolic_class(class_id, &cp, interface_index) {
+                if let Some(target) = self.find_field_owner_by_class_id(interface_id, field_name, descriptor) {
+                    return Some(target);
+                }
+            }
+        }
+        if super_class != 0 {
+            if let Ok(super_id) = self.resolve_symbolic_class(class_id, &cp, super_class) {
+                if let Some(target) = self.find_field_owner_by_class_id(super_id, field_name, descriptor) {
+                    return Some(target);
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn find_method_owner_by_class_id(
+        &mut self,
+        class_id: ClassId,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Option<ResolvedMethodTarget> {
+        if let Some(target) = self.declared_method_by_class_id(class_id, method_name, descriptor) {
+            return Some(target);
+        }
+        let class = self.get_class_by_id(class_id)?;
+        let cp = Rc::clone(&class.constant_pool.entries);
+        let super_class = class.super_class;
+
+        if super_class != 0 {
+            if let Ok(super_id) = self.resolve_symbolic_class(class_id, &cp, super_class) {
+                if let Some(target) =
+                    self.find_method_owner_by_class_id(super_id, method_name, descriptor)
+                {
+                    return Some(target);
+                }
+            }
+        }
+        let candidates = self.superinterface_method_candidates(class_id, method_name, descriptor);
+        self.choose_superinterface_method_candidate(candidates)
+    }
+
+    fn find_interface_method_owner_by_class_id(
+        &mut self,
+        interface_id: ClassId,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Option<ResolvedMethodTarget> {
+        if let Some(target) =
+            self.declared_method_by_class_id(interface_id, method_name, descriptor)
+        {
+            return Some(target);
+        }
+        if let Some(target) = self.object_public_instance_method(method_name, descriptor) {
+            return Some(target);
+        }
+
+        let candidates =
+            self.superinterface_method_candidates(interface_id, method_name, descriptor);
+        self.choose_superinterface_method_candidate(candidates)
+    }
+
+    fn choose_superinterface_method_candidate(
+        &mut self,
+        candidates: Vec<ResolvedMethodTarget>,
+    ) -> Option<ResolvedMethodTarget> {
+        let mut concrete_maximally_specific_index = None;
+        let mut concrete_maximally_specific_count = 0;
+        for (index, candidate) in candidates.iter().enumerate() {
+            let shadowed_by_subinterface = candidates.iter().any(|other| {
+                other.owner_class_id != candidate.owner_class_id
+                    && self.interface_extends_by_id(other.owner_class_id, candidate.owner_class_id)
+            });
+            if !shadowed_by_subinterface && candidate.access_flags & ACC_ABSTRACT == 0 {
+                concrete_maximally_specific_count += 1;
+                concrete_maximally_specific_index.get_or_insert(index);
+            }
+        }
+        if concrete_maximally_specific_count == 1 {
+            if let Some(index) = concrete_maximally_specific_index {
+                return candidates.into_iter().nth(index);
+            }
+        }
+
+        candidates.into_iter().next()
+    }
+
+    fn declared_method_by_class_id(
+        &mut self,
+        class_id: ClassId,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Option<ResolvedMethodTarget> {
+        self.ensure_class_ready_by_id(class_id);
+        let class = self.get_class_by_id(class_id)?;
+        for method in &class.methods {
+            let name = class.constant_pool.utf8(method.name_index);
+            let desc = class.constant_pool.utf8(method.descriptor_index);
+            if name == method_name && desc == descriptor {
+                let owner_class = class.constant_pool.class_name(class.this_class).to_owned();
+                return Some(ResolvedMethodTarget {
+                    owner_class_id: class_id,
+                    owner_class,
+                    name: name.to_owned(),
+                    descriptor: desc.to_owned(),
+                    access_flags: method.access_flags,
+                });
+            }
+        }
+        None
+    }
+
+    fn object_public_instance_method(
+        &mut self,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Option<ResolvedMethodTarget> {
+        let object_id = self.loaded_class_id_by_name("java/lang/Object")?;
+        let target = self.declared_method_by_class_id(object_id, method_name, descriptor)?;
+        if Self::is_public_instance_method(target.access_flags) {
+            Some(target)
+        } else {
+            None
+        }
+    }
+
+    fn loaded_class_id_by_name(&mut self, internal_name: &str) -> Option<ClassId> {
+        let existing = self
+            .class_id_for_defined(LoaderId::SYSTEM, internal_name)
+            .or_else(|| self.class_id_for_defined(LoaderId::BOOTSTRAP, internal_name));
+        if existing.is_some() {
+            return existing;
+        }
+        self.resolve_class(internal_name)?;
+        self.class_id_for_defined(LoaderId::SYSTEM, internal_name)
+            .or_else(|| self.class_id_for_defined(LoaderId::BOOTSTRAP, internal_name))
+    }
+
+    fn superinterface_method_candidates(
+        &mut self,
+        class_or_interface_id: ClassId,
+        method_name: &str,
+        descriptor: &str,
+    ) -> Vec<ResolvedMethodTarget> {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        for direct_interface_id in self.direct_interface_ids(class_or_interface_id) {
+            self.collect_interface_method_candidates(
+                direct_interface_id,
+                method_name,
+                descriptor,
+                &mut seen,
+                &mut candidates,
+            );
+        }
+        candidates
+    }
+
+    fn collect_interface_method_candidates(
+        &mut self,
+        interface_id: ClassId,
+        method_name: &str,
+        descriptor: &str,
+        seen: &mut HashSet<ClassId>,
+        candidates: &mut Vec<ResolvedMethodTarget>,
+    ) {
+        if !seen.insert(interface_id) {
+            return;
+        }
+        if let Some(target) =
+            self.declared_method_by_class_id(interface_id, method_name, descriptor)
+        {
+            if Self::is_inherited_interface_method_candidate(target.access_flags) {
+                candidates.push(target);
+            }
+        }
+        for superinterface_id in self.direct_interface_ids(interface_id) {
+            self.collect_interface_method_candidates(
+                superinterface_id,
+                method_name,
+                descriptor,
+                seen,
+                candidates,
+            );
+        }
+    }
+
+    fn interface_extends_by_id(
+        &mut self,
+        child_interface_id: ClassId,
+        ancestor_interface_id: ClassId,
+    ) -> bool {
+        let mut seen = HashSet::new();
+        self.interface_extends_by_id_inner(child_interface_id, ancestor_interface_id, &mut seen)
+    }
+
+    fn interface_extends_by_id_inner(
+        &mut self,
+        child_interface_id: ClassId,
+        ancestor_interface_id: ClassId,
+        seen: &mut HashSet<ClassId>,
+    ) -> bool {
+        if !seen.insert(child_interface_id) {
+            return false;
+        }
+        for direct_interface_id in self.direct_interface_ids(child_interface_id) {
+            if direct_interface_id == ancestor_interface_id
+                || self.interface_extends_by_id_inner(
+                    direct_interface_id,
+                    ancestor_interface_id,
+                    seen,
+                )
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn direct_interface_ids(&mut self, class_id: ClassId) -> Vec<ClassId> {
+        self.ensure_class_ready_by_id(class_id);
+        let Some(class) = self.get_class_by_id(class_id) else {
+            return Vec::new();
+        };
+        let cp = Rc::clone(&class.constant_pool.entries);
+        let interfaces = class.interfaces.clone();
+        interfaces
+            .into_iter()
+            .filter_map(|interface_index| {
+                self.resolve_symbolic_class(class_id, &cp, interface_index)
+                    .ok()
+            })
+            .collect()
+    }
+
+    fn is_public_instance_method(access_flags: u16) -> bool {
+        access_flags & ACC_PUBLIC != 0 && access_flags & ACC_STATIC == 0
+    }
+
+    fn is_inherited_interface_method_candidate(access_flags: u16) -> bool {
+        access_flags & (ACC_PRIVATE | ACC_STATIC) == 0
+    }
+
     /// Find the `access_flags` of a method by name and descriptor in a class
     /// (including super-chain). Returns `None` if the method is not found.
     ///
@@ -1916,8 +2324,9 @@ impl Vm {
         method_name: &str,
         descriptor: &str,
     ) -> Option<MethodExecInfo> {
-        self.ensure_class_ready_by_id(class_id);
-        let class = self.get_class_by_id(class_id)?;
+        let owner = self.find_method_owner_by_class_id(class_id, method_name, descriptor)?;
+        self.ensure_class_ready_by_id(owner.owner_class_id);
+        let class = self.get_class_by_id(owner.owner_class_id)?;
         let method_idx = class.methods.iter().position(|m| {
             class.constant_pool.utf8(m.name_index) == method_name
                 && class.constant_pool.utf8(m.descriptor_index) == descriptor
@@ -1937,7 +2346,7 @@ impl Vm {
             if let Attribute::BootstrapMethods(bms) = a { Some(bms.clone()) } else { None }
         }).unwrap_or_default();
         Some(MethodExecInfo {
-            class_id: Some(class_id),
+            class_id: Some(owner.owner_class_id),
             class_name: class_name_out,
             descriptor: descriptor_out,
             access_flags,
@@ -1959,25 +2368,6 @@ impl Vm {
         method_name: &str,
         descriptor: &str,
     ) -> Option<String> {
-        let cache_key = (class_name.to_owned(), method_name.to_owned(), descriptor.to_owned());
-        if let Some(cached) = self.method_owner_cache.get(&cache_key) {
-            return cached.clone();
-        }
-        let result = self.find_method_owner_uncached(class_name, method_name, descriptor);
-        // Only cache positive results — negative lookups (None) may become valid
-        // after new classes are registered via load_lazy/load_class.
-        if result.is_some() {
-            self.method_owner_cache.insert(cache_key, result.clone());
-        }
-        result
-    }
-
-    fn find_method_owner_uncached(
-        &mut self,
-        class_name: &str,
-        method_name: &str,
-        descriptor: &str,
-    ) -> Option<String> {
         self.ensure_class_ready(class_name);
         let class = self.get_class(class_name)?;
         for m in &class.methods {
@@ -1993,21 +2383,16 @@ impl Vm {
         } else {
             None
         };
-        let iface_names: Vec<String> = class.interfaces.iter()
-            .map(|&idx| class.constant_pool.class_name(idx).to_owned())
-            .collect();
         // borrow on `class` ends here
         if let Some(super_name) = super_name {
             if let Some(owner) = self.find_method_owner(&super_name, method_name, descriptor) {
                 return Some(owner);
             }
         }
-        for iface_name in &iface_names {
-            if let Some(owner) = self.find_method_owner(iface_name, method_name, descriptor) {
-                return Some(owner);
-            }
-        }
-        None
+        let class_id = self.loaded_class_id_by_name(class_name)?;
+        let candidates = self.superinterface_method_candidates(class_id, method_name, descriptor);
+        self.choose_superinterface_method_candidate(candidates)
+            .map(|target| target.owner_class)
     }
 
     /// Returns `true` if the named method exists in the class hierarchy.

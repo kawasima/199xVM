@@ -566,7 +566,7 @@ fn loader_linkage_error_survives_symbolic_resolution() {
 }
 
 #[test]
-#[ignore = "Phase 0 regression target for cpCache owner isolation"]
+#[ignore = "Phase 5 regression target for ClassId-scoped static field storage"]
 fn cp_cache_keeps_loader_distinct_member_owners_isolated() {
     let result = run_jar_test(
         "CpCacheOwnerIsolationTest",
@@ -577,16 +577,96 @@ fn cp_cache_keeps_loader_distinct_member_owners_isolated() {
 }
 
 #[test]
+fn invokespecial_uses_resolved_declaring_owner_for_custom_loader_classes() {
+    let result = run_jar_test(
+        "InvokespecialResolvedOwnerTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "base");
+}
+
+#[test]
 fn failed_symbolic_class_resolution_repeats_same_error_family() {
     let result = run_jar_test(
         "RepeatedResolutionFailureTest",
+        "missingClass",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "NoClassDefFoundError");
+}
+
+#[test]
+fn failed_symbolic_field_resolution_repeats_same_error_family() {
+    let result = run_jar_test(
+        "RepeatedResolutionFailureTest",
+        "missingField",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "NoSuchFieldError");
+}
+
+#[test]
+fn failed_symbolic_method_resolution_repeats_same_error_family() {
+    let result = run_jar_test(
+        "RepeatedResolutionFailureTest",
+        "missingMethod",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "NoSuchMethodError");
+}
+
+#[test]
+fn failed_symbolic_interface_method_resolution_repeats_same_error_family() {
+    let result = run_jar_test(
+        "RepeatedResolutionFailureTest",
+        "missingInterfaceMethod",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "NoSuchMethodError");
+}
+
+#[test]
+fn member_reference_kind_mismatch_throws_icce() {
+    let result = run_jar_test(
+        "MemberReferenceKindMismatchTest",
         "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "IncompatibleClassChangeError|IncompatibleClassChangeError");
+}
+
+#[test]
+fn field_access_kind_mismatch_throws_icce() {
+    let result = run_jar_test(
+        "MemberReferenceKindMismatchTest",
+        "fieldAccessKindMismatch",
         "()Ljava/lang/String;",
     );
     assert_eq!(
         result,
-        "NoClassDefFoundError"
+        "IncompatibleClassChangeError|IncompatibleClassChangeError|IncompatibleClassChangeError|IncompatibleClassChangeError"
     );
+}
+
+#[test]
+fn instance_field_resolution_uses_caller_loader() {
+    let result = run_jar_test(
+        "MemberReferenceKindMismatchTest",
+        "instanceFieldResolutionUsesCallerLoader",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "none|IncompatibleClassChangeError");
+}
+
+#[test]
+fn missing_instance_field_throws_no_such_field_error() {
+    let result = run_jar_test(
+        "MemberReferenceKindMismatchTest",
+        "missingInstanceField",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "NoSuchFieldError");
 }
 
 #[test]
@@ -656,7 +736,7 @@ fn clinit_erroneous_state_throws_ncdfe_on_second_access() {
 }
 
 // ---------------------------------------------------------------------------
-// JVMS §6.5: invokeinterface dispatches to interface default method
+// JVMS §5.4.3.4 / §6.5: interface method resolution and dispatch
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -667,6 +747,16 @@ fn interface_default_method_dispatch() {
         "()Ljava/lang/String;",
     );
     assert_eq!(result, "I am Thing");
+}
+
+#[test]
+fn interface_method_resolution_ignores_private_and_static_superinterface_methods() {
+    let result = run_jar_test(
+        "InterfaceMethodResolutionChoiceTest",
+        "run",
+        "()Ljava/lang/String;",
+    );
+    assert_eq!(result, "ignored-static|ignored-private");
 }
 
 #[test]
